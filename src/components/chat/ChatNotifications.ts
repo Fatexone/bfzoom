@@ -1,0 +1,1 @@
+//Gère les notifications des nouveaux messages.

@@ -1,0 +1,37 @@
+{
+  "boxe": [
+    "Shadow Boxing",
+    "Sacs de frappe",
+    "Cordes à sauter",
+    "Jeu de jambes",
+    "Uppercuts & Jabs"
+  ],
+  "pilates": [
+    "Pilates au sol",
+    "Étirements dynamiques",
+    "Respiration & contrôle",
+    "Renforcement du core",
+    "Pilates avec ballon"
+  ],
+  "hiit": [
+    "Jump Squats",
+    "Burpees explosifs",
+    "Mountain Climbers",
+    "Pompes explosives",
+    "Tabata"
+  ],
+  "muscu": [
+    "Pompes classiques",
+    "Squats profonds",
+    "Tractions",
+    "Deadlifts",
+    "Développé couché"
+  ],
+  "cardio": [
+    "Course à pied",
+    "Sprints fractionnés",
+    "Cyclisme intensif",
+    "Rameur",
+    "Jumping Jacks"
+  ]
+}
