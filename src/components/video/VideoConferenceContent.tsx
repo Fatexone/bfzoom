@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
+import type { SyntheticEvent, KeyboardEvent } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useSearchParams, useRouter } from "next/navigation";
 import { onAuthStateChanged } from "firebase/auth";
@@ -108,7 +109,7 @@ export default function VideoConferenceContent() {
      🧍 Mode invité → saisie du prénom avant entrée
   ======================================================= */
   if (isGuest && roomId && !confirmed) {
-    const handleEnter = (e?: React.FormEvent) => {
+    const handleEnter = (e?: SyntheticEvent) => {
       if (e) e.preventDefault();
       if (!guestName) return;
 
@@ -120,7 +121,7 @@ export default function VideoConferenceContent() {
 
       setLoadingJoin(true);
 
-      // 🔹 Petit délai visuel avant la visio
+      // 🔹 Petit délai visuel avant la visio + fade
       setTimeout(() => {
         setLoadingJoin(false);
         setFadeIn(true);
@@ -128,9 +129,15 @@ export default function VideoConferenceContent() {
       }, 800);
     };
 
+    const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === "Enter") {
+        handleEnter(e as unknown as SyntheticEvent);
+      }
+    };
+
     return (
       <div className="flex flex-col items-center justify-center min-h-screen bg-gradient-to-b from-gray-900 via-black to-gray-800 text-white px-6 text-center">
-        <h2 className="text-2xl font-bold mb-4">Rejoindre la salle privée</h2>
+        <h2 className="text-2xl font-bold mb-4">Rejoindre THE salle privée</h2>
         <p className="text-sm text-gray-400 mb-6 max-w-sm">
           Ce lien vous permet de rejoindre une visioconférence sécurisée.
         </p>
@@ -147,16 +154,14 @@ export default function VideoConferenceContent() {
               transition={{ duration: 0.4 }}
               autoComplete="off"
             >
-           <input
-  type="text"
-  placeholder="Votre prénom"
-  value={guestName}
-  onChange={(e) => setGuestName(e.target.value)}
-  onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter") handleEnter(e as unknown as React.FormEvent<HTMLFormElement>);
-  }}
-  className="px-4 py-2 rounded-lg text-black mb-4 w-60 text-center outline-none focus:ring-2 focus:ring-blue-500"
-/>
+              <input
+                type="text"
+                placeholder="Votre prénom"
+                value={guestName}
+                onChange={(e) => setGuestName(e.target.value)}
+                onKeyDown={handleKeyDown}
+                className="px-4 py-2 rounded-lg text-black mb-4 w-60 text-center outline-none focus:ring-2 focus:ring-blue-500"
+              />
 
               <button
                 type="button"
@@ -168,7 +173,7 @@ export default function VideoConferenceContent() {
                     : "bg-gray-600 opacity-60 cursor-not-allowed"
                 }`}
               >
-                Entrer dans The salle
+                Entrer dans la salle
               </button>
             </motion.form>
           ) : (
