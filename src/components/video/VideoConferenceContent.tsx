@@ -1,8 +1,7 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
-import type { SyntheticEvent, KeyboardEvent } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { useState, useCallback, useEffect, useMemo } from "react";
+import { motion } from "framer-motion";
 import { useSearchParams, useRouter } from "next/navigation";
 import { onAuthStateChanged } from "firebase/auth";
 import { auth } from "@/lib/firebaseConfig";
@@ -24,17 +23,12 @@ export default function VideoConferenceContent() {
   const [roomId, setRoomId] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [isGuest, setIsGuest] = useState(false);
-  const [guestName, setGuestName] = useState("");
-  const [confirmed, setConfirmed] = useState(false);
-  const [loadingJoin, setLoadingJoin] = useState(false);
-  const [fadeIn, setFadeIn] = useState(false); // 🌫️ transition vers visio
+  const [fadeIn, setFadeIn] = useState(false);
 
   const searchParams = useSearchParams();
   const router = useRouter();
 
-  /* =======================================================
-     🔐 Vérifie la connexion Firebase (détermine guest/creator)
-  ======================================================= */
+  /* 🔐 Vérifie la connexion Firebase (détermine guest/creator) */
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
       setIsGuest(!u);
@@ -42,20 +36,26 @@ export default function VideoConferenceContent() {
     return () => unsub();
   }, []);
 
-  /* =======================================================
-     🔗 Récupère le roomId depuis l’URL
-  ======================================================= */
+  /* 🔗 Récupère le roomId dans l’URL */
   useEffect(() => {
     const urlRoom = searchParams.get("room");
     if (urlRoom && urlRoom !== roomId) {
       setRoomId(urlRoom);
+      setFadeIn(true);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams]);
+  }, [searchParams, roomId]);
 
-  /* =======================================================
-     🎬 Création / entrée / sortie de salle
-  ======================================================= */
+  /* 🎭 Pseudo invité (aucun état inutile) */
+  const guestName = useMemo(() => {
+    if (!isGuest) return "";
+    // pseudo stable dérivé du roomId quand possible
+    const suffix =
+      (roomId && roomId.slice(-4).replace(/[^a-z0-9]/gi, "")) ||
+      String(Math.floor(Math.random() * 9999)).padStart(4, "0");
+    return `Invité-${suffix}`;
+  }, [isGuest, roomId]);
+
+  /* 🎬 Création / entrée / sortie de salle */
   const handleCreateRoom = useCallback(() => {
     const id = generateRoomId();
     router.push(`/videoconference?room=${id}`);
@@ -78,9 +78,7 @@ export default function VideoConferenceContent() {
     router.push("/videoconference");
   }, [router]);
 
-  /* =======================================================
-     📋 Copie du lien d’invitation
-  ======================================================= */
+  /* 📋 Copie du lien d’invitation */
   const inviteLink =
     typeof window !== "undefined" && roomId
       ? `${window.location.origin}/videoconference?room=${roomId}`
@@ -93,7 +91,6 @@ export default function VideoConferenceContent() {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
-      // Fallback anciens navigateurs
       const ta = document.createElement("textarea");
       ta.value = inviteLink;
       document.body.appendChild(ta);
@@ -105,100 +102,14 @@ export default function VideoConferenceContent() {
     }
   }, [inviteLink]);
 
-  /* =======================================================
-     🧍 Mode invité → saisie du prénom avant entrée
-  ======================================================= */
-  if (isGuest && roomId && !confirmed) {
-    const handleEnter = (e?: SyntheticEvent) => {
-      if (e) e.preventDefault();
-      if (!guestName) return;
+  /* ⚡️ Entrée automatique pour invités (zéro friction) */
+  useEffect(() => {
+    if (isGuest && roomId) {
+      setFadeIn(true);
+    }
+  }, [isGuest, roomId]);
 
-      // 🔹 Ferme le clavier iOS
-      const activeEl = document.activeElement as HTMLElement | null;
-      if (activeEl && typeof activeEl.blur === "function") {
-        activeEl.blur();
-      }
-
-      setLoadingJoin(true);
-
-      // 🔹 Petit délai visuel avant la visio + fade
-      setTimeout(() => {
-        setLoadingJoin(false);
-        setFadeIn(true);
-        setTimeout(() => setConfirmed(true), 400); // délai du fade
-      }, 800);
-    };
-
-    const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-      if (e.key === "Enter") {
-        handleEnter(e as unknown as SyntheticEvent);
-      }
-    };
-
-    return (
-      <div className="flex flex-col items-center justify-center min-h-screen bg-gradient-to-b from-gray-900 via-black to-gray-800 text-white px-6 text-center">
-        <h2 className="text-2xl font-bold mb-4">Rejoindre THE salle privée</h2>
-        <p className="text-sm text-gray-400 mb-6 max-w-sm">
-          Ce lien vous permet de rejoindre une visioconférence sécurisée.
-        </p>
-
-        <AnimatePresence mode="wait">
-          {!loadingJoin ? (
-            <motion.form
-              key="form"
-              onSubmit={handleEnter}
-              className="flex flex-col items-center justify-center"
-              initial={{ opacity: 0, y: 15 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              transition={{ duration: 0.4 }}
-              autoComplete="off"
-            >
-              <input
-                type="text"
-                placeholder="Votre prénom"
-                value={guestName}
-                onChange={(e) => setGuestName(e.target.value)}
-                onKeyDown={handleKeyDown}
-                className="px-4 py-2 rounded-lg text-black mb-4 w-60 text-center outline-none focus:ring-2 focus:ring-blue-500"
-              />
-
-              <button
-                type="button"
-                onClick={() => handleEnter()}
-                disabled={!guestName}
-                className={`px-6 py-2 rounded-lg font-medium transition-all duration-200 ${
-                  guestName
-                    ? "bg-blue-600 hover:bg-blue-500 active:scale-95"
-                    : "bg-gray-600 opacity-60 cursor-not-allowed"
-                }`}
-              >
-                Entrer dans la salle
-              </button>
-            </motion.form>
-          ) : (
-            <motion.div
-              key="loader"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.5 }}
-              className="flex flex-col items-center justify-center"
-            >
-              <div className="w-6 h-6 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
-              <p className="text-sm text-gray-300 animate-pulse">
-                Connexion en cours...
-              </p>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
-    );
-  }
-
-  /* =======================================================
-     🧠 Écran principal (créateur ou salle active)
-  ======================================================= */
+  /* 🎥 Écran principal */
   return (
     <motion.div
       className="relative min-h-screen flex flex-col items-center justify-center bg-gradient-to-b from-gray-900 via-black to-gray-800 text-white overflow-hidden"
@@ -223,7 +134,6 @@ export default function VideoConferenceContent() {
             </p>
           </div>
 
-          {/* 🔵 Bouton création de salle */}
           <div className="flex items-center justify-center mb-6">
             <button
               onClick={handleCreateRoom}
@@ -233,15 +143,14 @@ export default function VideoConferenceContent() {
             </button>
           </div>
 
-          {/* 🟡 Composant Lobby pour rejoindre une salle */}
           <Lobby onJoin={handleJoinRoom} />
         </motion.div>
       ) : (
         /* === SALLE ACTIVE === */
         <div className="w-full">
-          {/* 🔗 Bandeau de lien à copier (invisible pour invités) */}
-          <div className="w-full max-w-2xl mx-auto px-6 pt-6">
-            {!isGuest && (
+          {/* Bandeau lien (uniquement pour créateur) */}
+          {!isGuest && (
+            <div className="w-full max-w-2xl mx-auto px-6 pt-6">
               <div className="rounded-xl border border-white/10 bg-white/5 p-4">
                 <p className="text-sm text-gray-300 mb-2">
                   Partage ce lien à ton interlocuteur :
@@ -264,15 +173,15 @@ export default function VideoConferenceContent() {
                   Salle : <span className="font-mono">{roomId}</span>
                 </p>
               </div>
-            )}
-          </div>
+            </div>
+          )}
 
-          {/* 🎥 Lancement de la visio */}
+          {/* Visio (créateur ou invité) */}
           <VideoCall
             roomId={roomId}
             onClose={handleLeaveRoom}
             isGuest={isGuest}
-            guestName={guestName || `Invité-${Math.floor(Math.random() * 999)}`}
+            guestName={guestName}
           />
         </div>
       )}
