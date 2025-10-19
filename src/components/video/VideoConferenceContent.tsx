@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import { useSearchParams, useRouter } from "next/navigation";
 import { onAuthStateChanged } from "firebase/auth";
 import { auth } from "@/lib/firebaseConfig";
@@ -26,6 +26,7 @@ export default function VideoConferenceContent() {
   const [guestName, setGuestName] = useState("");
   const [confirmed, setConfirmed] = useState(false);
   const [loadingJoin, setLoadingJoin] = useState(false);
+  const [fadeIn, setFadeIn] = useState(false); // 🌫️ transition vers visio
 
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -107,69 +108,85 @@ export default function VideoConferenceContent() {
      🧍 Mode invité → saisie du prénom avant entrée
   ======================================================= */
   if (isGuest && roomId && !confirmed) {
-    const handleEnter = () => {
+    const handleEnter = (e?: React.FormEvent) => {
+      if (e) e.preventDefault();
       if (!guestName) return;
 
-      // Forcer Safari/iOS à retirer le focus avant l'action
-      const activeEl = document.activeElement as (HTMLElement | null);
+      // 🔹 Ferme le clavier iOS
+      const activeEl = document.activeElement as HTMLElement | null;
       if (activeEl && typeof activeEl.blur === "function") {
         activeEl.blur();
       }
 
       setLoadingJoin(true);
 
-      // Court temps de "connexion" (feedback visuel)
+      // 🔹 Petit délai visuel avant la visio
       setTimeout(() => {
         setLoadingJoin(false);
-        setConfirmed(true);
-      }, 1200);
+        setFadeIn(true);
+        setTimeout(() => setConfirmed(true), 400); // délai du fade
+      }, 800);
     };
 
     return (
-      <div
-        className="flex flex-col items-center justify-center min-h-screen bg-gradient-to-b from-gray-900 via-black to-gray-800 text-white px-6 text-center"
-        role="dialog"
-        aria-modal="true"
-      >
+      <div className="flex flex-col items-center justify-center min-h-screen bg-gradient-to-b from-gray-900 via-black to-gray-800 text-white px-6 text-center">
         <h2 className="text-2xl font-bold mb-4">Rejoindre la salle privée</h2>
         <p className="text-sm text-gray-400 mb-6 max-w-sm">
           Ce lien vous permet de rejoindre une visioconférence sécurisée.
         </p>
 
-        {!loadingJoin ? (
-          <>
-            <input
-              type="text"
-              placeholder="Votre prénom"
-              value={guestName}
-              onChange={(e) => setGuestName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && guestName) {
-                  handleEnter();
-                }
-              }}
-              className="px-4 py-2 rounded-lg text-black mb-4 w-60 text-center outline-none focus:ring-2 focus:ring-blue-500"
-            />
-
-            <button
-              onClick={handleEnter}
-              disabled={!guestName}
-              className={`px-6 py-2 rounded-lg font-medium transition-all duration-200 ${
-                guestName
-                  ? "bg-blue-600 hover:bg-blue-500 active:scale-95"
-                  : "bg-gray-600 opacity-60 cursor-not-allowed"
-              }`}
+        <AnimatePresence mode="wait">
+          {!loadingJoin ? (
+            <motion.form
+              key="form"
+              onSubmit={handleEnter}
+              className="flex flex-col items-center justify-center"
+              initial={{ opacity: 0, y: 15 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              transition={{ duration: 0.4 }}
+              autoComplete="off"
             >
-              Entrer dans la salle
-            </button>
-          </>
-        ) : (
-          <div className="flex flex-col items-center justify-center">
-            {/* Petit loader animé */}
-            <div className="w-6 h-6 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
-            <p className="text-sm text-gray-300 animate-pulse">Connexion en cours...</p>
-          </div>
-        )}
+           <input
+  type="text"
+  placeholder="Votre prénom"
+  value={guestName}
+  onChange={(e) => setGuestName(e.target.value)}
+  onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") handleEnter(e as unknown as React.FormEvent<HTMLFormElement>);
+  }}
+  className="px-4 py-2 rounded-lg text-black mb-4 w-60 text-center outline-none focus:ring-2 focus:ring-blue-500"
+/>
+
+              <button
+                type="button"
+                onClick={() => handleEnter()}
+                disabled={!guestName}
+                className={`px-6 py-2 rounded-lg font-medium transition-all duration-200 ${
+                  guestName
+                    ? "bg-blue-600 hover:bg-blue-500 active:scale-95"
+                    : "bg-gray-600 opacity-60 cursor-not-allowed"
+                }`}
+              >
+                Entrer dans The salle
+              </button>
+            </motion.form>
+          ) : (
+            <motion.div
+              key="loader"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.5 }}
+              className="flex flex-col items-center justify-center"
+            >
+              <div className="w-6 h-6 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+              <p className="text-sm text-gray-300 animate-pulse">
+                Connexion en cours...
+              </p>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
     );
   }
@@ -178,7 +195,12 @@ export default function VideoConferenceContent() {
      🧠 Écran principal (créateur ou salle active)
   ======================================================= */
   return (
-    <div className="relative min-h-screen flex flex-col items-center justify-center bg-gradient-to-b from-gray-900 via-black to-gray-800 text-white overflow-hidden">
+    <motion.div
+      className="relative min-h-screen flex flex-col items-center justify-center bg-gradient-to-b from-gray-900 via-black to-gray-800 text-white overflow-hidden"
+      initial={{ opacity: fadeIn ? 0 : 1 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.8 }}
+    >
       {!roomId ? (
         /* === PAGE D’ACCUEIL === */
         <motion.div
@@ -212,7 +234,7 @@ export default function VideoConferenceContent() {
       ) : (
         /* === SALLE ACTIVE === */
         <div className="w-full">
-          {/* 🔗 Bandeau de lien à copier (caché pour les invités) */}
+          {/* 🔗 Bandeau de lien à copier (invisible pour invités) */}
           <div className="w-full max-w-2xl mx-auto px-6 pt-6">
             {!isGuest && (
               <div className="rounded-xl border border-white/10 bg-white/5 p-4">
@@ -249,6 +271,6 @@ export default function VideoConferenceContent() {
           />
         </div>
       )}
-    </div>
+    </motion.div>
   );
 }
