@@ -1,4 +1,4 @@
-// server.js
+// server.js (ESM)
 import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
@@ -8,9 +8,14 @@ const httpServer = createServer(app);
 
 const io = new Server(httpServer, {
   cors: {
-    origin: "*", // 🔒 à restreindre plus tard à ton domaine (ex: "https://bfzoom.vercel.app")
+    origin: "*", // 🔒 restreins plus tard (ex: https://bfzoom.vercel.app)
     methods: ["GET", "POST"],
   },
+});
+
+// Endpoint de vérification
+app.get("/", (_req, res) => {
+  res.send("bfzoom socket server OK (ESM)");
 });
 
 /* ===========================================================
@@ -27,11 +32,11 @@ io.on("connection", (socket) => {
 
     console.log(`👥 Room ${roomId}: ${count} utilisateur(s)`);
 
-    // informe tous les clients de la room du nombre total
+    // Informe tout le monde du nombre total
     io.to(roomId).emit("room-users", { count });
 
-    // informe les autres qu’un nouvel utilisateur arrive
-    socket.to(roomId).emit("user-joined", { id: socket.id });
+    // ✅ IMPORTANT : notifie TOUT le monde (y compris le nouvel arrivant)
+    io.to(roomId).emit("user-joined", { id: socket.id });
   });
 
   // Quitte la salle
@@ -45,10 +50,12 @@ io.on("connection", (socket) => {
 
   // === WebRTC Signaling ===
   socket.on("offer", ({ roomId, offer }) => {
+    console.log(`📨 offer → room ${roomId}`);
     socket.to(roomId).emit("offer", { roomId, offer });
   });
 
   socket.on("answer", ({ roomId, answer }) => {
+    console.log(`📨 answer → room ${roomId}`);
     socket.to(roomId).emit("answer", { roomId, answer });
   });
 
@@ -56,7 +63,6 @@ io.on("connection", (socket) => {
     socket.to(roomId).emit("ice-candidate", { roomId, candidate });
   });
 
-  // === Déconnexion ===
   socket.on("disconnect", () => {
     console.log("🔴 Déconnexion :", socket.id);
   });
@@ -66,6 +72,6 @@ io.on("connection", (socket) => {
    🚀 Lancement du serveur
 =========================================================== */
 const PORT = process.env.PORT || 4000;
-httpServer.listen(PORT, () =>
-  console.log(`✅ Socket.IO Server opérationnel sur le port ${PORT}`)
-);
+httpServer.listen(PORT, () => {
+  console.log(`✅ Socket.IO Server opérationnel (ESM) sur le port ${PORT}`);
+});
