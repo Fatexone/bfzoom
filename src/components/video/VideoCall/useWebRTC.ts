@@ -108,6 +108,8 @@ export function useWebRTC(roomId: string, onClose: () => void) {
         };
 
         /* ---------------- Écoute des signaux ---------------- */
+
+        // 📨 Offre reçue
         socket.on("offer", async ({ offer }: OfferPayload) => {
           console.log("📨 Offre reçue");
           if (!offer || !isMounted) return;
@@ -119,6 +121,7 @@ export function useWebRTC(roomId: string, onClose: () => void) {
           socket.emit("answer", { roomId, answer });
         });
 
+        // 📨 Réponse reçue
         socket.on("answer", async ({ answer }: AnswerPayload) => {
           console.log("📨 Réponse reçue");
           if (!answer || !isMounted) return;
@@ -126,6 +129,7 @@ export function useWebRTC(roomId: string, onClose: () => void) {
           await pc.setRemoteDescription(new RTCSessionDescription(answer));
         });
 
+        // ❄️ ICE candidate reçue
         socket.on("ice-candidate", async ({ candidate }: CandidatePayload) => {
           if (!candidate || !isMounted) return;
           try {
@@ -136,19 +140,29 @@ export function useWebRTC(roomId: string, onClose: () => void) {
           }
         });
 
-        socket.on("room-users", ({ count }: RoomUsersPayload) => {
+        // 👥 Gestion du nombre d’utilisateurs dans la room
+        socket.on("room-users", async ({ count }: RoomUsersPayload) => {
           if (!isMounted) return;
           console.log("👥 Utilisateurs dans la room :", count);
           setUserCount(count);
           setOtherUserConnected(count > 1);
+
+          // 🚀 Si on est deux et que la connexion est stable => création d’offre
+          if (count === 2 && pc.signalingState === "stable") {
+            console.log("🧩 Deux utilisateurs détectés — création et envoi de l’offre");
+            try {
+              const offer = await pc.createOffer();
+              await pc.setLocalDescription(offer);
+              socket.emit("offer", { roomId, offer });
+            } catch (err) {
+              console.error("Erreur lors de la création de l’offre :", err);
+            }
+          }
         });
 
-        socket.on("user-joined", async () => {
-          if (!isMounted || pc.signalingState === "closed") return;
-          console.log("👤 Nouvel utilisateur rejoint — création d’une offre");
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          socket.emit("offer", { roomId, offer });
+        // 👤 Log simple quand un utilisateur rejoint
+        socket.on("user-joined", () => {
+          console.log("👤 Nouvel utilisateur rejoint la room");
         });
       } catch (error) {
         console.error("Erreur init WebRTC:", error);
