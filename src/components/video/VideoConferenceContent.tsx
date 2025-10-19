@@ -25,6 +25,7 @@ export default function VideoConferenceContent() {
   const [isGuest, setIsGuest] = useState(false);
   const [guestName, setGuestName] = useState("");
   const [confirmed, setConfirmed] = useState(false);
+  const [loadingJoin, setLoadingJoin] = useState(false);
 
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -90,7 +91,7 @@ export default function VideoConferenceContent() {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
-      // Fallback pour anciens navigateurs
+      // Fallback anciens navigateurs
       const ta = document.createElement("textarea");
       ta.value = inviteLink;
       document.body.appendChild(ta);
@@ -106,36 +107,75 @@ export default function VideoConferenceContent() {
      🧍 Mode invité → saisie du prénom avant entrée
   ======================================================= */
   if (isGuest && roomId && !confirmed) {
+    const handleEnter = () => {
+      if (!guestName) return;
+
+      // Forcer Safari/iOS à retirer le focus avant l'action
+      const activeEl = document.activeElement as (HTMLElement | null);
+      if (activeEl && typeof activeEl.blur === "function") {
+        activeEl.blur();
+      }
+
+      setLoadingJoin(true);
+
+      // Court temps de "connexion" (feedback visuel)
+      setTimeout(() => {
+        setLoadingJoin(false);
+        setConfirmed(true);
+      }, 1200);
+    };
+
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen bg-gradient-to-b from-gray-900 via-black to-gray-800 text-white px-6 text-center">
+      <div
+        className="flex flex-col items-center justify-center min-h-screen bg-gradient-to-b from-gray-900 via-black to-gray-800 text-white px-6 text-center"
+        role="dialog"
+        aria-modal="true"
+      >
         <h2 className="text-2xl font-bold mb-4">Rejoindre la salle privée</h2>
         <p className="text-sm text-gray-400 mb-6 max-w-sm">
           Ce lien vous permet de rejoindre une visioconférence sécurisée.
         </p>
-        <input
-          type="text"
-          placeholder="Votre prénom"
-          value={guestName}
-          onChange={(e) => setGuestName(e.target.value)}
-          className="px-4 py-2 rounded-lg text-black mb-4 w-60 text-center"
-        />
-        <button
-          onClick={() => guestName && setConfirmed(true)}
-          disabled={!guestName}
-          className={`px-6 py-2 rounded-lg font-medium transition ${
-            guestName
-              ? "bg-blue-600 hover:bg-blue-500"
-              : "bg-gray-500 cursor-not-allowed"
-          }`}
-        >
-          Entrer dans la salle
-        </button>
+
+        {!loadingJoin ? (
+          <>
+            <input
+              type="text"
+              placeholder="Votre prénom"
+              value={guestName}
+              onChange={(e) => setGuestName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && guestName) {
+                  handleEnter();
+                }
+              }}
+              className="px-4 py-2 rounded-lg text-black mb-4 w-60 text-center outline-none focus:ring-2 focus:ring-blue-500"
+            />
+
+            <button
+              onClick={handleEnter}
+              disabled={!guestName}
+              className={`px-6 py-2 rounded-lg font-medium transition-all duration-200 ${
+                guestName
+                  ? "bg-blue-600 hover:bg-blue-500 active:scale-95"
+                  : "bg-gray-600 opacity-60 cursor-not-allowed"
+              }`}
+            >
+              Entrer dans la salle
+            </button>
+          </>
+        ) : (
+          <div className="flex flex-col items-center justify-center">
+            {/* Petit loader animé */}
+            <div className="w-6 h-6 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+            <p className="text-sm text-gray-300 animate-pulse">Connexion en cours...</p>
+          </div>
+        )}
       </div>
     );
   }
 
   /* =======================================================
-     🧠 Écran principal
+     🧠 Écran principal (créateur ou salle active)
   ======================================================= */
   return (
     <div className="relative min-h-screen flex flex-col items-center justify-center bg-gradient-to-b from-gray-900 via-black to-gray-800 text-white overflow-hidden">
