@@ -8,38 +8,43 @@ const httpServer = createServer(app);
 
 const io = new Server(httpServer, {
   cors: {
-    origin: "*", // 🔒 restreins plus tard (ex: https://bfzoom.vercel.app)
+    origin: "*", // 🔒 à restreindre ensuite: "https://bfzoom.vercel.app"
     methods: ["GET", "POST"],
   },
 });
 
-// Endpoint de vérification
+// 🩵 Endpoint de test
 app.get("/", (_req, res) => {
-  res.send("bfzoom socket server OK (ESM)");
+  res.send("🚀 Serveur Socket.IO BFZoom actif !");
 });
 
 /* ===========================================================
-   🎥 GESTION DES ROOMS POUR VISIO BFZOOM
+   🎥 GESTION DES ROOMS — version stable et pro
 =========================================================== */
 io.on("connection", (socket) => {
   console.log("🟢 Client connecté :", socket.id);
 
-  // Rejoint une salle
   socket.on("join-room", (roomId) => {
     socket.join(roomId);
     const room = io.sockets.adapter.rooms.get(roomId);
     const count = room ? room.size : 0;
-
     console.log(`👥 Room ${roomId}: ${count} utilisateur(s)`);
 
     // Informe tout le monde du nombre total
     io.to(roomId).emit("room-users", { count });
 
-    // ✅ IMPORTANT : notifie TOUT le monde (y compris le nouvel arrivant)
+    // ✅ Détermine qui initie l’offre :
+    // si quelqu’un était déjà là, c’est lui qui démarre
+    const others = [...(room || [])].filter((id) => id !== socket.id);
+    if (others.length === 1) {
+      const initiatorId = others[0];
+      io.to(initiatorId).emit("initiate-offer", { roomId, peerId: socket.id });
+      console.log(`🎬 Demande à ${initiatorId} de créer l'offre pour ${socket.id}`);
+    }
+
     io.to(roomId).emit("user-joined", { id: socket.id });
   });
 
-  // Quitte la salle
   socket.on("leave-room", (roomId) => {
     socket.leave(roomId);
     const room = io.sockets.adapter.rooms.get(roomId);
@@ -48,14 +53,14 @@ io.on("connection", (socket) => {
     console.log(`🚪 ${socket.id} a quitté ${roomId}`);
   });
 
-  // === WebRTC Signaling ===
+  /* === Signaling WebRTC === */
   socket.on("offer", ({ roomId, offer }) => {
-    console.log(`📨 offer → room ${roomId}`);
+    console.log(`📨 Offre transmise → ${roomId}`);
     socket.to(roomId).emit("offer", { roomId, offer });
   });
 
   socket.on("answer", ({ roomId, answer }) => {
-    console.log(`📨 answer → room ${roomId}`);
+    console.log(`📨 Réponse transmise → ${roomId}`);
     socket.to(roomId).emit("answer", { roomId, answer });
   });
 
@@ -69,9 +74,9 @@ io.on("connection", (socket) => {
 });
 
 /* ===========================================================
-   🚀 Lancement du serveur
+   🚀 Lancement
 =========================================================== */
 const PORT = process.env.PORT || 4000;
 httpServer.listen(PORT, () => {
-  console.log(`✅ Socket.IO Server opérationnel (ESM) sur le port ${PORT}`);
+  console.log(`✅ Socket.IO server opérationnel sur le port ${PORT}`);
 });
