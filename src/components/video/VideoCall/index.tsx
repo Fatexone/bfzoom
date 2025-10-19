@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState, Suspense } from "react";
+import { useCallback, useRef, useState, Suspense, useEffect } from "react";
 import dynamic from "next/dynamic";
 import { useWebRTC } from "./useWebRTC";
 import useMediaStreams from "./useMediaStreams";
@@ -16,12 +16,15 @@ import OpenAIEspace from "@/components/video/panels/OpenAIEspace";
 import ExerciseMenu from "@/components/video/menus/ExerciseMenu";
 
 // Lazy-load lourd (BodyPix & tfjs chargés dans VideoEffects)
-const VideoEffects = dynamic(() => import("@/components/video/effects/VideoEffects"), {
-  ssr: false,
-  loading: () => (
-    <div className="w-full sm:max-w-xl md:max-w-2xl lg:max-w-3xl h-40 rounded-2xl bg-white/5 border border-white/10 animate-pulse" />
-  ),
-});
+const VideoEffects = dynamic(
+  () => import("@/components/video/effects/VideoEffects"),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="w-full h-40 rounded-2xl bg-white/5 border border-white/10 animate-pulse" />
+    ),
+  }
+);
 
 /* ---------------------------- Types ---------------------------- */
 interface VideoCallProps {
@@ -32,7 +35,7 @@ interface VideoCallProps {
 }
 
 /* =======================================================
-   🎥 VISIO — Responsive, accessible, haut de gamme
+   🎥 VISIO — version professionnelle et responsive
 ======================================================= */
 export default function VideoCall({
   roomId,
@@ -43,7 +46,9 @@ export default function VideoCall({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const layoutRef = useRef<VideoLayoutHandle | null>(null);
 
-  // ---------- WebRTC ----------
+  /* =======================================================
+     🔗 WebRTC : flux local / distant
+  ======================================================= */
   const {
     localStream,
     remoteStream,
@@ -53,7 +58,9 @@ export default function VideoCall({
     leaveRoom,
   } = useWebRTC(roomId, onClose);
 
-  // ---------- Caméra / micro / plein écran ----------
+  /* =======================================================
+     🎙️ Contrôles audio / vidéo
+  ======================================================= */
   const {
     isMuted,
     toggleMute,
@@ -63,26 +70,38 @@ export default function VideoCall({
     toggleFullScreen,
   } = useMediaStreams(localStream);
 
-  // ---------- Effets vidéo ----------
+  /* =======================================================
+     ⚙️ États UI & Effets
+  ======================================================= */
   const [videoEffect, setVideoEffect] = useState<"none" | string>("none");
+  const [isMobile, setIsMobile] = useState(false);
 
-  // ---------- Quitter ----------
+  // Détection responsive côté client
+  useEffect(() => {
+    const update = () => setIsMobile(window.innerWidth < 768);
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+
   const handleLeave = useCallback(() => {
     leaveRoom();
   }, [leaveRoom]);
 
-  // ---------- Toggle Picture-in-Picture ----------
   const handleTogglePiP = useCallback(() => {
     layoutRef.current?.togglePiP();
   }, []);
 
+  /* =======================================================
+     🧠 Rendu principal
+  ======================================================= */
   return (
     <div
       ref={containerRef}
-      className="flex min-h-[100dvh] w-full flex-col bg-gradient-to-b from-zinc-900 via-black to-zinc-900 text-white overflow-hidden"
+      className="flex flex-col min-h-[100dvh] w-full bg-gradient-to-b from-zinc-900 via-black to-zinc-900 text-white overflow-hidden"
     >
-      {/* HEADER */}
-      <div className="w-full px-3 sm:px-6 md:px-10 pt-[env(safe-area-inset-top)]">
+      {/* -------- HEADER -------- */}
+      <header className="w-full px-3 sm:px-6 md:px-10 pt-[env(safe-area-inset-top)]">
         <VideoHeader
           roomId={roomId}
           connected={connected}
@@ -91,90 +110,92 @@ export default function VideoCall({
           isGuest={isGuest}
           guestName={guestName}
         />
-      </div>
+      </header>
 
-      {/* MAIN */}
+      {/* -------- MAIN -------- */}
       <main
         className="
-          flex-1 w-full mx-auto
-          px-2 sm:px-5 md:px-8
-          py-3 sm:py-6
-          max-w-[1400px]
-          flex flex-col gap-4 sm:gap-6 md:gap-8
-          overflow-y-auto
-          pb-[120px] sm:pb-[120px] md:pb-[110px]
+          flex-1 flex flex-col lg:flex-row gap-4 sm:gap-6 md:gap-8
+          max-w-[1400px] mx-auto px-2 sm:px-5 md:px-8
+          py-3 sm:py-6 overflow-y-auto
         "
-        role="main"
       >
-        <section className="w-full grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-6">
-          {/* -------- ZONE VIDÉO -------- */}
-          <div className="lg:col-span-8 flex flex-col items-center gap-4">
-            <div className="w-full">
-              <VideoLayout
-                ref={layoutRef}
-                localStream={localStream}
-                remoteStream={remoteStream}
-                isMuted={isMuted}
-                cameraOn={cameraOn}
-              />
-            </div>
-
-            {/* -------- CONTROLS -------- */}
-            <ControlsBar
+        {/* === ZONE VIDÉO === */}
+        <section
+          className="
+            flex-1 flex flex-col items-center justify-center
+            w-full lg:w-2/3 xl:w-3/4 gap-4 transition-all
+          "
+        >
+          {/* 🎬 Vidéos */}
+          <div className="relative w-full rounded-2xl overflow-hidden shadow-lg">
+            <VideoLayout
+              ref={layoutRef}
+              localStream={localStream}
+              remoteStream={remoteStream}
               isMuted={isMuted}
-              onToggleMute={toggleMute}
               cameraOn={cameraOn}
-              onToggleCamera={toggleCamera}
-              fullScreen={fullScreen}
-              onToggleFullScreen={toggleFullScreen}
-              onTogglePiP={handleTogglePiP}
-              onLeave={handleLeave}
             />
           </div>
 
-          {/* -------- PANNEAU LATÉRAL -------- */}
-          <aside className="lg:col-span-4 flex flex-col gap-4 max-h-[calc(100vh-200px)] overflow-y-auto">
-            {/* Effets visuels */}
-            <Suspense
-              fallback={
-                <div className="w-full h-32 rounded-2xl bg-white/5 border border-white/10 animate-pulse" />
-              }
-            >
-              <VideoEffects videoEffect={videoEffect} setVideoEffect={setVideoEffect} />
-            </Suspense>
+          {/* 🎛️ Contrôles bas de page */}
+          <ControlsBar
+            isMuted={isMuted}
+            onToggleMute={toggleMute}
+            cameraOn={cameraOn}
+            onToggleCamera={toggleCamera}
+            fullScreen={fullScreen}
+            onToggleFullScreen={toggleFullScreen}
+            onTogglePiP={handleTogglePiP}
+            onLeave={handleLeave}
+          />
 
-            {/* Modules IA & Timer */}
-            {!isGuest && (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 gap-4">
-                <Timer />
-                <OpenAIEspace />
-              </div>
-            )}
-          </aside>
-        </section>
-
-        {/* -------- ÉCRAN D’ATTENTE -------- */}
-        {!otherUserConnected && (
-          <section className="w-full flex justify-center">
-            <div className="w-full max-w-md">
+          {/* 🕒 Écran d’attente */}
+          {!otherUserConnected && (
+            <div className="flex flex-col items-center text-center mt-6 mb-10">
               <WaitingScreen roomId={roomId} userCount={userCount} />
-              <p className="text-center text-sm text-gray-400 mt-3">
+              <p className="text-gray-400 text-sm mt-2">
                 {isGuest
                   ? "En attente du créateur de la salle..."
                   : "En attente de ton interlocuteur..."}
               </p>
             </div>
-          </section>
-        )}
+          )}
+        </section>
+
+        {/* === PANNEAU LATÉRAL === */}
+        <aside
+          className={`
+            w-full lg:w-1/3 xl:w-1/4
+            flex flex-col gap-4 transition-all
+            ${isMobile ? "hidden" : "block"}
+          `}
+        >
+          <Suspense
+            fallback={
+              <div className="w-full h-32 rounded-2xl bg-white/5 border border-white/10 animate-pulse" />
+            }
+          >
+            <VideoEffects videoEffect={videoEffect} setVideoEffect={setVideoEffect} />
+          </Suspense>
+
+          {/* Modules IA / Timer */}
+          {!isGuest && (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 gap-4">
+              <Timer />
+              <OpenAIEspace />
+            </div>
+          )}
+        </aside>
       </main>
 
       {/* -------- MENU EXERCICES -------- */}
       {!isGuest && <ExerciseMenu />}
 
       {/* -------- FOOTER -------- */}
-      <div className="w-full mt-auto pb-[env(safe-area-inset-bottom)]">
+      <footer className="w-full mt-auto pb-[env(safe-area-inset-bottom)]">
         <VideoFooter />
-      </div>
+      </footer>
     </div>
   );
 }

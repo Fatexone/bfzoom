@@ -1,8 +1,17 @@
 "use client";
 
-import React, { useEffect, useRef, useState, forwardRef, useImperativeHandle } from "react";
-import { motion } from "framer-motion";
+import React, {
+  useEffect,
+  useRef,
+  useState,
+  forwardRef,
+  useImperativeHandle,
+} from "react";
+import { motion, AnimatePresence } from "framer-motion";
 
+/* =======================================================
+   🔧 Types
+======================================================= */
 export interface VideoLayoutProps {
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
@@ -14,9 +23,9 @@ export interface VideoLayoutHandle {
   togglePiP: () => void;
 }
 
-/**
- * 🎥 Layout vidéo responsive + Picture-in-Picture natif
- */
+/* =======================================================
+   🎥 VideoLayout — version sublimée et responsive
+======================================================= */
 const VideoLayout = forwardRef<VideoLayoutHandle, VideoLayoutProps>(
   ({ localStream, remoteStream, isMuted, cameraOn }, ref) => {
     const localVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -24,7 +33,13 @@ const VideoLayout = forwardRef<VideoLayoutHandle, VideoLayoutProps>(
     const containerRef = useRef<HTMLDivElement | null>(null);
 
     const [bounds, setBounds] = useState<DOMRect | null>(null);
+    const [isPiP, setIsPiP] = useState(false);
 
+    const hasRemote = !!remoteStream;
+
+    /* =======================================================
+       🧠 Gestion des flux vidéo
+    ======================================================= */
     useEffect(() => {
       if (localVideoRef.current && localStream) {
         localVideoRef.current.srcObject = localStream;
@@ -39,30 +54,31 @@ const VideoLayout = forwardRef<VideoLayoutHandle, VideoLayoutProps>(
 
     useEffect(() => {
       const update = () => {
-        if (containerRef.current) setBounds(containerRef.current.getBoundingClientRect());
+        if (containerRef.current)
+          setBounds(containerRef.current.getBoundingClientRect());
       };
       update();
       window.addEventListener("resize", update);
       return () => window.removeEventListener("resize", update);
     }, []);
 
-    /* =====================================================
-       🎞️ Mode Picture-in-Picture (PiP)
-    ===================================================== */
+    /* =======================================================
+       🖼️ Picture-in-Picture
+    ======================================================= */
     const togglePiP = async () => {
       const video = localVideoRef.current;
       if (!video) return;
 
       try {
-        // Si déjà en PiP → quitter
         if (document.pictureInPictureElement) {
           await document.exitPictureInPicture();
+          setIsPiP(false);
           return;
         }
 
-        // Safari / Chrome : activer PiP sur la vidéo locale
         if (document.pictureInPictureEnabled && !video.disablePictureInPicture) {
           await video.requestPictureInPicture();
+          setIsPiP(true);
         }
       } catch (err) {
         console.error("❌ Erreur PiP :", err);
@@ -71,29 +87,51 @@ const VideoLayout = forwardRef<VideoLayoutHandle, VideoLayoutProps>(
 
     useImperativeHandle(ref, () => ({ togglePiP }));
 
-    const hasRemote = !!remoteStream;
-
+    /* =======================================================
+       🧩 Rendu principal
+    ======================================================= */
     return (
       <div
         ref={containerRef}
-        className="relative w-full aspect-video max-h-[90vh] bg-black rounded-2xl overflow-hidden border border-white/10 shadow-lg"
+        className="
+          relative w-full aspect-video max-h-[90vh]
+          bg-black rounded-2xl overflow-hidden border border-white/10 shadow-lg
+          transition-all duration-300
+        "
       >
-        {/* Remote (interlocuteur) */}
-        {hasRemote ? (
-          <video
-            ref={remoteVideoRef}
-            autoPlay
-            playsInline
-            className="absolute inset-0 w-full h-full object-cover"
-          />
-        ) : (
-          <div className="absolute inset-0 flex items-center justify-center text-gray-400 text-sm sm:text-base">
+        {/* === Flux distant (interlocuteur) === */}
+        <AnimatePresence>
+          {hasRemote && (
+            <motion.video
+              key="remote-video"
+              ref={remoteVideoRef}
+              autoPlay
+              playsInline
+              className="absolute inset-0 w-full h-full object-cover"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.6 }}
+            />
+          )}
+        </AnimatePresence>
+
+        {/* === Fallback si aucun interlocuteur === */}
+        {!hasRemote && (
+          <motion.div
+            key="waiting"
+            className="absolute inset-0 flex items-center justify-center text-gray-400 text-sm sm:text-base bg-gradient-to-b from-black/60 to-black/80 backdrop-blur-sm"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.6 }}
+          >
             En attente d’un interlocuteur…
-          </div>
+          </motion.div>
         )}
 
-        {/* Local (toi) */}
-        {cameraOn && (
+        {/* === Flux local (toi) === */}
+        {cameraOn ? (
           <motion.div
             drag
             dragConstraints={
@@ -106,9 +144,17 @@ const VideoLayout = forwardRef<VideoLayoutHandle, VideoLayoutProps>(
                   }
                 : undefined
             }
-            dragElastic={0.2}
+            dragElastic={0.15}
             dragMomentum={false}
-            className="absolute bottom-4 right-4 sm:bottom-6 sm:right-6 w-28 h-20 sm:w-44 sm:h-32 md:w-56 md:h-40 rounded-xl overflow-hidden border border-white/20 bg-black/50 shadow-lg hover:scale-[1.03] transition-transform cursor-grab active:cursor-grabbing"
+            className="
+              absolute bottom-4 right-4 sm:bottom-6 sm:right-6
+              w-28 h-20 sm:w-44 sm:h-32 md:w-56 md:h-40
+              rounded-xl overflow-hidden border border-white/20
+              bg-black/60 backdrop-blur-sm shadow-lg
+              hover:scale-[1.04] active:scale-[0.98]
+              transition-transform duration-150 ease-out
+              cursor-grab active:cursor-grabbing
+            "
           >
             <video
               ref={localVideoRef}
@@ -118,12 +164,20 @@ const VideoLayout = forwardRef<VideoLayoutHandle, VideoLayoutProps>(
               className="w-full h-full object-cover"
               style={{ transform: "scaleX(-1)" }}
             />
+            <div className="absolute bottom-1 left-1 text-[10px] bg-black/60 px-1.5 py-0.5 rounded text-gray-200">
+              Toi
+            </div>
           </motion.div>
-        )}
-
-        {!cameraOn && (
+        ) : (
           <div className="absolute inset-0 flex items-center justify-center text-gray-400 text-sm">
             🚫 Caméra désactivée
+          </div>
+        )}
+
+        {/* === Badge Picture-in-Picture actif === */}
+        {isPiP && (
+          <div className="absolute top-2 right-2 bg-blue-600/80 text-white text-[10px] px-2 py-1 rounded-full shadow-md">
+            PiP actif
           </div>
         )}
       </div>
