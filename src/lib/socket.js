@@ -5,41 +5,49 @@ import { io } from "socket.io-client";
 const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || "http://localhost:4000";
 const SOCKET_PATH = process.env.NEXT_PUBLIC_SOCKET_PATH || "/socket.io";
 
-// ✅ Évite les connexions multiples en dev (HMR Next.js)
+// ✅ Création unique de l’instance Socket.IO (évite les doublons HMR)
+let socketInstance;
+
 if (typeof window !== "undefined") {
-  // @ts-expect-error: on étend globalThis pour stocker le singleton
-  if (!globalThis.__bfzoom_socket__) {
-    // Création de l’instance unique
-    // NB: transports WebSocket pour éviter le long-polling sur hébergeurs serverless
-    // Ajuste la stratégie de reconnexion pour la prod
-    const s = io(SOCKET_URL, {
+  if (!window.__bfzoom_socket__) {
+    const socket = io(SOCKET_URL, {
       path: SOCKET_PATH,
-      transports: ["websocket"],
+      transports: ["websocket"], // 🔒 WebSocket only pour Render/Vercel
       withCredentials: false,
-      autoConnect: true,
       reconnection: true,
-      reconnectionAttempts: 20,
-      reconnectionDelay: 500,
+      reconnectionAttempts: 10,
+      reconnectionDelay: 800,
       reconnectionDelayMax: 5000,
-      timeout: 10000, // délai de connexion initiale
+      timeout: 10000,
+      autoConnect: true,
     });
 
-    s.on("connect", () => {
-      console.log("✅ Socket.IO connecté:", SOCKET_URL);
+    // === Log & diagnostics ===
+    socket.on("connect", () => {
+      console.log("✅ [BFZoom] Socket connecté →", SOCKET_URL);
     });
 
-    s.on("connect_error", (err) => {
-      console.error("❌ Erreur Socket.IO:", err?.message || err);
+    socket.on("disconnect", (reason) => {
+      console.warn("⚠️ [BFZoom] Socket déconnecté :", reason);
     });
 
-    s.on("reconnect_attempt", (n) => {
-      if (n % 5 === 0) console.log("↻ Tentative de reconnexion:", n);
+    socket.on("connect_error", (err) => {
+      console.error("❌ [BFZoom] Erreur Socket.IO :", err.message);
     });
 
-   
-    globalThis.__bfzoom_socket__ = s;
+    socket.on("reconnect_attempt", (n) => {
+      if (n % 3 === 0) console.log("↻ Tentative de reconnexion", n);
+    });
+
+    // 🔍 Expose pour le debug console
+    window.__bfzoom_socket__ = socket;
   }
+
+  socketInstance = window.__bfzoom_socket__;
 }
 
+// ✅ Export propre pour tous les imports client-side
+export const socket = socketInstance;
 
-export const socket = typeof window !== "undefined" ? globalThis.__bfzoom_socket__ : null;
+// (Optionnel) Export debug
+if (typeof window !== "undefined") window.__socket = socketInstance;
