@@ -27,14 +27,21 @@ const VideoEffects = dynamic(() => import("@/components/video/effects/VideoEffec
 interface VideoCallProps {
   roomId: string;
   onClose: () => void;
+  isGuest?: boolean;
+  guestName?: string;
 }
 
 /* =======================================================
    🎥 VISIO — Responsive, accessible, haut de gamme
 ======================================================= */
-export default function VideoCall({ roomId, onClose }: VideoCallProps) {
+export default function VideoCall({
+  roomId,
+  onClose,
+  isGuest = false,
+  guestName = "",
+}: VideoCallProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const layoutRef = useRef<VideoLayoutHandle | null>(null); // ✅ ref pour le PiP
+  const layoutRef = useRef<VideoLayoutHandle | null>(null);
 
   // ---------- WebRTC ----------
   const {
@@ -81,6 +88,8 @@ export default function VideoCall({ roomId, onClose }: VideoCallProps) {
           connected={connected}
           userCount={userCount}
           onLeave={handleLeave}
+          isGuest={isGuest}
+          guestName={guestName}
         />
       </div>
 
@@ -97,13 +106,12 @@ export default function VideoCall({ roomId, onClose }: VideoCallProps) {
         "
         role="main"
       >
-        {/* Bloc vidéo + commandes */}
         <section className="w-full grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-6">
-          {/* Zone vidéo (prend la place) */}
+          {/* -------- ZONE VIDÉO -------- */}
           <div className="lg:col-span-8 flex flex-col items-center gap-4">
             <div className="w-full">
               <VideoLayout
-                ref={layoutRef} // ✅ permet d’appeler togglePiP()
+                ref={layoutRef}
                 localStream={localStream}
                 remoteStream={remoteStream}
                 isMuted={isMuted}
@@ -111,6 +119,7 @@ export default function VideoCall({ roomId, onClose }: VideoCallProps) {
               />
             </div>
 
+            {/* -------- CONTROLS -------- */}
             <ControlsBar
               isMuted={isMuted}
               onToggleMute={toggleMute}
@@ -118,13 +127,14 @@ export default function VideoCall({ roomId, onClose }: VideoCallProps) {
               onToggleCamera={toggleCamera}
               fullScreen={fullScreen}
               onToggleFullScreen={toggleFullScreen}
-              onTogglePiP={handleTogglePiP} // ✅ nouvelle prop
+              onTogglePiP={handleTogglePiP}
               onLeave={handleLeave}
             />
           </div>
 
-          {/* Panneau latéral intelligent (stack → side) */}
+          {/* -------- PANNEAU LATÉRAL -------- */}
           <aside className="lg:col-span-4 flex flex-col gap-4 max-h-[calc(100vh-200px)] overflow-y-auto">
+            {/* Effets visuels */}
             <Suspense
               fallback={
                 <div className="w-full h-32 rounded-2xl bg-white/5 border border-white/10 animate-pulse" />
@@ -133,27 +143,35 @@ export default function VideoCall({ roomId, onClose }: VideoCallProps) {
               <VideoEffects videoEffect={videoEffect} setVideoEffect={setVideoEffect} />
             </Suspense>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 gap-4">
-              <Timer />
-              <OpenAIEspace />
-            </div>
+            {/* Modules IA & Timer */}
+            {!isGuest && (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 gap-4">
+                <Timer />
+                <OpenAIEspace />
+              </div>
+            )}
           </aside>
         </section>
 
-        {/* Écran d’attente si interlocuteur absent */}
+        {/* -------- ÉCRAN D’ATTENTE -------- */}
         {!otherUserConnected && (
           <section className="w-full flex justify-center">
             <div className="w-full max-w-md">
               <WaitingScreen roomId={roomId} userCount={userCount} />
+              <p className="text-center text-sm text-gray-400 mt-3">
+                {isGuest
+                  ? "En attente du créateur de la salle..."
+                  : "En attente de ton interlocuteur..."}
+              </p>
             </div>
           </section>
         )}
       </main>
 
-      {/* MENU EXERCICES (fixed, non intrusif) */}
-      <ExerciseMenu />
+      {/* -------- MENU EXERCICES -------- */}
+      {!isGuest && <ExerciseMenu />}
 
-      {/* FOOTER */}
+      {/* -------- FOOTER -------- */}
       <div className="w-full mt-auto pb-[env(safe-area-inset-bottom)]">
         <VideoFooter />
       </div>
