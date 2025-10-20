@@ -1,34 +1,39 @@
 // src/lib/socket.js
 import { io } from "socket.io-client";
 
-// ⚙️ URL + path (laisse /socket.io si tu ne changes rien côté serveur)
-const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || "http://localhost:4000";
+// 🌍 Configuration dynamique depuis .env
+const SOCKET_URL =
+  process.env.NEXT_PUBLIC_SOCKET_URL?.replace(/\/$/, "") ||
+  "https://vps-ac6b333d.vps.ovh.net"; // HTTPS par défaut
 const SOCKET_PATH = process.env.NEXT_PUBLIC_SOCKET_PATH || "/socket.io";
 
-// ✅ Création unique de l’instance Socket.IO (évite les doublons HMR)
+// 🧩 Instance unique (évite les doublons HMR en dev)
 let socketInstance;
 
 if (typeof window !== "undefined") {
   if (!window.__bfzoom_socket__) {
     const socket = io(SOCKET_URL, {
       path: SOCKET_PATH,
-      transports: ["websocket"], // 🔒 WebSocket only pour Render/Vercel
+      transports: ["websocket"], // ✅ WebSocket pur, pas polling
+      secure: true, // ✅ obligatoire sur HTTPS / Vercel
       withCredentials: false,
       reconnection: true,
       reconnectionAttempts: 10,
-      reconnectionDelay: 800,
-      reconnectionDelayMax: 5000,
-      timeout: 10000,
+      reconnectionDelay: 1000,
+      timeout: 20000,
       autoConnect: true,
+      extraHeaders: {
+        Origin: "https://bfzoom.vercel.app", // aide CORS côté serveur
+      },
     });
 
-    // === Log & diagnostics ===
+    // === Logs diagnostics ===
     socket.on("connect", () => {
-      console.log("✅ [BFZoom] Socket connecté →", SOCKET_URL);
+      console.log("✅ [BFZoom] Socket connectée :", SOCKET_URL);
     });
 
     socket.on("disconnect", (reason) => {
-      console.warn("⚠️ [BFZoom] Socket déconnecté :", reason);
+      console.warn("⚠️ [BFZoom] Socket déconnectée :", reason);
     });
 
     socket.on("connect_error", (err) => {
@@ -39,7 +44,7 @@ if (typeof window !== "undefined") {
       if (n % 3 === 0) console.log("↻ Tentative de reconnexion", n);
     });
 
-    // 🔍 Expose pour le debug console
+    // 🔍 expose pour debug
     window.__bfzoom_socket__ = socket;
   }
 
@@ -49,5 +54,5 @@ if (typeof window !== "undefined") {
 // ✅ Export propre pour tous les imports client-side
 export const socket = socketInstance;
 
-// (Optionnel) Export debug
+// (Optionnel) accès debug dans la console
 if (typeof window !== "undefined") window.__socket = socketInstance;
