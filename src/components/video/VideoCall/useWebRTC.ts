@@ -47,18 +47,23 @@ export function useWebRTC(roomId: string, onClose: () => void) {
   const [connected, setConnected] = useState(false);
   const [otherUserConnected, setOtherUserConnected] = useState(false);
 
+  // ✅ Helper logs 100% compatibles ESLint (pas de any)
+  const log = (label: string, ...data: unknown[]) =>
+    console.log(`%c[WebRTC] ${label}`, "color:#0ff;font-weight:600", ...data);
+
   /* =======================================================
      🔌 Connexion Socket.IO + gestion de la room
   ======================================================= */
   useEffect(() => {
     const handleConnect = () => {
-      console.log("✅ Socket connecté :", socket.id);
+      log("✅ Socket connectée :", socket?.id);
       setConnected(true);
       socket.emit("join-room", roomId);
+      log("📨 join-room émis", { roomId });
     };
 
     const handleDisconnect = () => {
-      console.warn("⚠️ Socket déconnecté");
+      log("⚠️ Socket déconnectée");
       setConnected(false);
     };
 
@@ -79,22 +84,30 @@ export function useWebRTC(roomId: string, onClose: () => void) {
 
     const initWebRTC = async () => {
       try {
+        log("🚀 Init RTCPeerConnection avec config", rtcConfigRef.current);
         const pc = new RTCPeerConnection(rtcConfigRef.current);
         peerConnectionRef.current = pc;
+
+        // États & debug
+        pc.onconnectionstatechange = () => log("🔗 pc.connectionState →", pc.connectionState);
+        pc.onsignalingstatechange = () => log("🧭 pc.signalingState →", pc.signalingState);
+        pc.onicegatheringstatechange = () => log("🧊 pc.iceGatheringState →", pc.iceGatheringState);
+        pc.oniceconnectionstatechange = () => log("🧊 pc.iceConnectionState →", pc.iceConnectionState);
 
         // ✅ Capture du flux local (Safari-safe)
         let local: MediaStream | null = null;
         try {
-          local = await navigator.mediaDevices.getUserMedia({
-            video: true,
-            audio: true,
-          });
-        } catch {
-          // fallback sans audio
-          local = await navigator.mediaDevices.getUserMedia({
-            video: true,
-            audio: false,
-          });
+          local = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+          log("🎥 getUserMedia OK (audio+video)");
+        } catch (e1: unknown) {
+          log("⚠️ getUserMedia audio+video a échoué, retry vidéo seule", e1);
+          try {
+            local = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+            log("🎥 getUserMedia OK (vidéo seule)");
+          } catch (e2: unknown) {
+            console.error("❌ getUserMedia impossible", e2);
+            return;
+          }
         }
 
         if (!isMounted || !local) return;
@@ -109,74 +122,92 @@ export function useWebRTC(roomId: string, onClose: () => void) {
         pc.ontrack = (event) => {
           if (!isMounted) return;
           const [stream] = event.streams;
-          console.log("📡 Flux distant reçu");
+          log("📡 Flux distant reçu (ontrack)", { tracks: stream?.getTracks()?.length ?? 0 });
           setRemoteStream(stream);
         };
 
         // Transmission ICE
         pc.onicecandidate = (event) => {
           if (event.candidate) {
+            log("❄️ ICE sortante → emit ice-candidate");
             socket.emit("ice-candidate", {
               roomId,
               candidate: event.candidate.toJSON(),
             });
+          } else {
+            log("🧊 Fin de la collecte ICE (candidate=null)");
           }
-        };
-
-        pc.onconnectionstatechange = () => {
-          console.log("🔗 WebRTC:", pc.connectionState);
         };
 
         /* ---------------- Écoute des signaux ---------------- */
 
         // Offre reçue
-        socket.on("offer", async ({ offer }: OfferPayload) => {
+        const onOffer = async ({ offer }: OfferPayload) => {
+          log("📨 offer reçue");
           if (!isMounted || !offer) return;
           await pc.setRemoteDescription(new RTCSessionDescription(offer));
+          log("📌 setRemoteDescription(offer) OK");
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
+          log("📤 answer créée + setLocalDescription(answer) OK → emit answer");
           socket.emit("answer", { roomId, answer });
-        });
+        };
 
         // Réponse reçue
-        socket.on("answer", async ({ answer }: AnswerPayload) => {
+        const onAnswer = async ({ answer }: AnswerPayload) => {
+          log("📨 answer reçue");
           if (!isMounted || !answer) return;
           await pc.setRemoteDescription(new RTCSessionDescription(answer));
-        });
+          log("📌 setRemoteDescription(answer) OK");
+        };
 
         // ICE candidate reçue
-        socket.on("ice-candidate", async ({ candidate }: CandidatePayload) => {
+        const onIce = async ({ candidate }: CandidatePayload) => {
+          log("📨 ice-candidate reçue");
           if (!isMounted || !candidate) return;
           try {
             await pc.addIceCandidate(new RTCIceCandidate(candidate));
-          } catch (err) {
-            console.error("Erreur ICE:", err);
+            log("✅ addIceCandidate OK");
+          } catch (e: unknown) {
+            console.error("❌ Erreur addIceCandidate:", e);
           }
-        });
+        };
 
         // Nombre d’utilisateurs
-        socket.on("room-users", async ({ count }: RoomUsersPayload) => {
+        const onRoomUsers = async ({ count }: RoomUsersPayload) => {
+          log("👥 room-users →", count);
           if (!isMounted) return;
           setUserCount(count);
           setOtherUserConnected(count > 1);
 
-          // Offre auto quand 2 users
+          // Offre auto quand 2 users (garde-fou 'stable')
           if (count === 2 && pc.signalingState === "stable") {
             try {
+              log("🎬 Deux utilisateurs → création de l’offre");
               const offer = await pc.createOffer();
               await pc.setLocalDescription(offer);
+              log("📤 Offre envoyée → emit offer");
               socket.emit("offer", { roomId, offer });
-            } catch (err) {
-              console.error("Erreur création offre:", err);
+            } catch (e: unknown) {
+              console.error("❌ Erreur création offre:", e);
             }
+          } else {
+            log("⏳ Pas d'offre (count != 2 ou signaling != stable)", {
+              count,
+              signalingState: pc.signalingState,
+            });
           }
-        });
+        };
 
-        socket.on("user-joined", () =>
-          console.log("👤 Nouvel utilisateur rejoint la room")
-        );
-      } catch (error) {
-        console.error("Erreur init WebRTC:", error);
+        const onUserJoined = () => log("👤 user-joined");
+
+        socket.on("offer", onOffer);
+        socket.on("answer", onAnswer);
+        socket.on("ice-candidate", onIce);
+        socket.on("room-users", onRoomUsers);
+        socket.on("user-joined", onUserJoined);
+      } catch (e: unknown) {
+        console.error("❌ Erreur init WebRTC:", e);
       }
     };
 
@@ -186,24 +217,30 @@ export function useWebRTC(roomId: string, onClose: () => void) {
     return () => {
       isMounted = false;
       try {
+        log("🧹 Cleanup : emit leave-room");
         socket.emit("leave-room", roomId);
-        ["offer", "answer", "ice-candidate", "room-users", "user-joined"].forEach((e) =>
-          socket.off(e)
-        );
+
+        socket.off("offer");
+        socket.off("answer");
+        socket.off("ice-candidate");
+        socket.off("room-users");
+        socket.off("user-joined");
 
         const pc = peerConnectionRef.current;
         if (pc) {
           pc.getSenders().forEach((s) => s.track?.stop?.());
           pc.close();
+          log("🔻 RTCPeerConnection fermé");
         }
 
         peerConnectionRef.current = null;
+
         localStreamRef.current?.getTracks().forEach((t) => t.stop());
         localStreamRef.current = null;
         setLocalStream(null);
         setRemoteStream(null);
-      } catch (err) {
-        console.warn("Erreur cleanup WebRTC:", err);
+      } catch (e: unknown) {
+        console.warn("⚠️ Erreur cleanup WebRTC:", e);
       }
     };
   }, [roomId]);
@@ -213,12 +250,14 @@ export function useWebRTC(roomId: string, onClose: () => void) {
   ======================================================= */
   const leaveRoom = useCallback(() => {
     try {
+      log("🚪 leaveRoom()");
       socket.emit("leave-room", roomId);
 
       const pc = peerConnectionRef.current;
       if (pc) {
         pc.getSenders().forEach((s) => s.track?.stop?.());
         pc.close();
+        log("🔻 RTCPeerConnection fermé (leaveRoom)");
       }
 
       peerConnectionRef.current = null;
@@ -227,8 +266,8 @@ export function useWebRTC(roomId: string, onClose: () => void) {
       setLocalStream(null);
       setRemoteStream(null);
       onClose?.();
-    } catch (err) {
-      console.warn("Erreur leaveRoom:", err);
+    } catch (e: unknown) {
+      console.warn("⚠️ Erreur leaveRoom:", e);
     }
   }, [roomId, onClose]);
 
