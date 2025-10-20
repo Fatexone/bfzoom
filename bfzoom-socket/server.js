@@ -6,10 +6,17 @@ import { Server } from "socket.io";
 const app = express();
 const httpServer = createServer(app);
 
+/* ===========================================================
+   ⚙️ Configuration Socket.IO (CORS HTTPS)
+=========================================================== */
 const io = new Server(httpServer, {
   cors: {
-    origin: "*", // 🔒 à restreindre ensuite: "https://bfzoom.vercel.app"
+    origin: [
+      "https://bfzoom.vercel.app",
+      "https://vps-ac6b333d.vps.ovh.net",
+    ],
     methods: ["GET", "POST"],
+    credentials: true,
   },
 });
 
@@ -21,12 +28,12 @@ app.get("/", (_req, res) => {
 });
 
 /* ===========================================================
-   🎥 GESTION DES ROOMS — version stable + logs
+   🎥 GESTION DES ROOMS — version stable + logs clairs
 =========================================================== */
 io.on("connection", (socket) => {
   console.log("🟢 Client connecté :", socket.id);
 
-  // 🛰️ Log tous les events reçus côté serveur
+  // Log tous les événements pour debug
   socket.onAny((event, payload) => {
     console.log(`📡 [EVENT] ${event}`, payload ? JSON.stringify(payload).slice(0, 200) : "");
   });
@@ -40,17 +47,10 @@ io.on("connection", (socket) => {
     const count = room ? room.size : 0;
     console.log(`👥 Room ${roomId}: ${count} utilisateur(s)`);
 
-    // Informe tout le monde du nombre total
+    // Informe tous les clients du nombre actuel d’utilisateurs
     io.to(roomId).emit("room-users", { count });
 
-    // ✅ Détermine qui initie l’offre :
-    const others = [...(room || [])].filter((id) => id !== socket.id);
-    if (others.length === 1) {
-      const initiatorId = others[0];
-      io.to(initiatorId).emit("initiate-offer", { roomId, peerId: socket.id });
-      console.log(`🎬 ${initiatorId} doit créer l’offre pour ${socket.id}`);
-    }
-
+    // Notifie les autres utilisateurs qu’un nouveau client est arrivé
     io.to(roomId).emit("user-joined", { id: socket.id });
   });
 
@@ -66,7 +66,7 @@ io.on("connection", (socket) => {
   });
 
   /* ===========================================================
-     🔁 Signaling WebRTC — avec logs
+     🔁 Signaling WebRTC — transmission offer/answer/ICE
   =========================================================== */
   socket.on("offer", ({ roomId, offer }) => {
     console.log(`📨 Offre reçue de ${socket.id} → relayée à ${roomId}`);
