@@ -28,41 +28,41 @@ app.get("/", (_req, res) => {
 });
 
 /* ===========================================================
-   🎥 GESTION DES ROOMS — version stable + logs clairs
+   🎥 GESTION DES ROOMS — version avec rôles
 =========================================================== */
 io.on("connection", (socket) => {
   console.log("🟢 Client connecté :", socket.id);
 
-  // Log tous les événements pour debug
   socket.onAny((event, payload) => {
     console.log(`📡 [EVENT] ${event}`, payload ? JSON.stringify(payload).slice(0, 200) : "");
   });
 
   /* ---------------- JOIN ROOM ---------------- */
   socket.on("join-room", (roomId) => {
-    console.log(`➡️ ${socket.id} rejoint la salle : ${roomId}`);
     socket.join(roomId);
 
     const room = io.sockets.adapter.rooms.get(roomId);
     const count = room ? room.size : 0;
-    console.log(`👥 Room ${roomId}: ${count} utilisateur(s)`);
 
-    // Informe tous les clients du nombre actuel d’utilisateurs
+    // ✅ Le premier est le créateur
+    const isCreator = count === 1;
+    socket.emit("room-role", { isCreator });
+
     io.to(roomId).emit("room-users", { count });
-
-    // Notifie les autres utilisateurs qu’un nouveau client est arrivé
     io.to(roomId).emit("user-joined", { id: socket.id });
+
+    console.log(`➡️ ${socket.id} rejoint ${roomId} (${count} utilisateur[s])`);
+    if (isCreator) console.log(`👑 ${socket.id} est le créateur`);
   });
 
   /* ---------------- LEAVE ROOM ---------------- */
   socket.on("leave-room", (roomId) => {
-    console.log(`🚪 ${socket.id} quitte la salle : ${roomId}`);
     socket.leave(roomId);
 
     const room = io.sockets.adapter.rooms.get(roomId);
     const count = room ? room.size : 0;
     io.to(roomId).emit("room-users", { count });
-    console.log(`👥 Room ${roomId}: ${count} utilisateur(s) restants`);
+    console.log(`🚪 ${socket.id} quitte ${roomId} → ${count} restant(s)`);
   });
 
   /* ===========================================================

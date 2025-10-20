@@ -46,8 +46,9 @@ export function useWebRTC(roomId: string, onClose: () => void) {
   const [userCount, setUserCount] = useState(1);
   const [connected, setConnected] = useState(false);
   const [otherUserConnected, setOtherUserConnected] = useState(false);
+  const [isCreator, setIsCreator] = useState(false); // 🔹 Nouveau : rôle du client
 
-  // ✅ Helper logs 100% compatibles ESLint (pas de any)
+  // ✅ Helper logs
   const log = (label: string, ...data: unknown[]) =>
     console.log(`%c[WebRTC] ${label}`, "color:#0ff;font-weight:600", ...data);
 
@@ -77,6 +78,18 @@ export function useWebRTC(roomId: string, onClose: () => void) {
   }, [roomId]);
 
   /* =======================================================
+     🎭 Rôle créateur / invité
+  ======================================================= */
+  useEffect(() => {
+    socket.on("room-role", ({ isCreator }: { isCreator: boolean }) => {
+      setIsCreator(isCreator);
+      log("🎭 Rôle attribué :", isCreator ? "Créateur" : "Invité");
+    });
+
+    return () => socket.off("room-role");
+  }, []);
+
+  /* =======================================================
      🎥 Initialisation WebRTC et Signaling
   ======================================================= */
   useEffect(() => {
@@ -89,20 +102,30 @@ export function useWebRTC(roomId: string, onClose: () => void) {
         peerConnectionRef.current = pc;
 
         // États & debug
-        pc.onconnectionstatechange = () => log("🔗 pc.connectionState →", pc.connectionState);
-        pc.onsignalingstatechange = () => log("🧭 pc.signalingState →", pc.signalingState);
-        pc.onicegatheringstatechange = () => log("🧊 pc.iceGatheringState →", pc.iceGatheringState);
-        pc.oniceconnectionstatechange = () => log("🧊 pc.iceConnectionState →", pc.iceConnectionState);
+        pc.onconnectionstatechange = () =>
+          log("🔗 pc.connectionState →", pc.connectionState);
+        pc.onsignalingstatechange = () =>
+          log("🧭 pc.signalingState →", pc.signalingState);
+        pc.onicegatheringstatechange = () =>
+          log("🧊 pc.iceGatheringState →", pc.iceGatheringState);
+        pc.oniceconnectionstatechange = () =>
+          log("🧊 pc.iceConnectionState →", pc.iceConnectionState);
 
-        // ✅ Capture du flux local (Safari-safe)
+        // ✅ Capture du flux local
         let local: MediaStream | null = null;
         try {
-          local = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+          local = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: true,
+          });
           log("🎥 getUserMedia OK (audio+video)");
         } catch (e1: unknown) {
-          log("⚠️ getUserMedia audio+video a échoué, retry vidéo seule", e1);
+          log("⚠️ getUserMedia audio+video échoué, retry vidéo seule", e1);
           try {
-            local = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+            local = await navigator.mediaDevices.getUserMedia({
+              video: true,
+              audio: false,
+            });
             log("🎥 getUserMedia OK (vidéo seule)");
           } catch (e2: unknown) {
             console.error("❌ getUserMedia impossible", e2);
@@ -111,18 +134,19 @@ export function useWebRTC(roomId: string, onClose: () => void) {
         }
 
         if (!isMounted || !local) return;
-
         localStreamRef.current = local;
         setLocalStream(local);
 
-        // Ajoute les pistes locales
+        // Ajout des pistes locales
         local.getTracks().forEach((track) => pc.addTrack(track, local));
 
         // Réception du flux distant
         pc.ontrack = (event) => {
           if (!isMounted) return;
           const [stream] = event.streams;
-          log("📡 Flux distant reçu (ontrack)", { tracks: stream?.getTracks()?.length ?? 0 });
+          log("📡 Flux distant reçu", {
+            tracks: stream?.getTracks()?.length ?? 0,
+          });
           setRemoteStream(stream);
         };
 
@@ -135,35 +159,33 @@ export function useWebRTC(roomId: string, onClose: () => void) {
               candidate: event.candidate.toJSON(),
             });
           } else {
-            log("🧊 Fin de la collecte ICE (candidate=null)");
+            log("🧊 Fin de la collecte ICE");
           }
         };
 
-        /* ---------------- Écoute des signaux ---------------- */
-
-        // Offre reçue
+        /* =======================================================
+           🔁 Gestion des signaux WebRTC
+        ======================================================= */
         const onOffer = async ({ offer }: OfferPayload) => {
-          log("📨 offer reçue");
+          log("📨 Offer reçue");
           if (!isMounted || !offer) return;
           await pc.setRemoteDescription(new RTCSessionDescription(offer));
           log("📌 setRemoteDescription(offer) OK");
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
-          log("📤 answer créée + setLocalDescription(answer) OK → emit answer");
+          log("📤 Answer créée → emit answer");
           socket.emit("answer", { roomId, answer });
         };
 
-        // Réponse reçue
         const onAnswer = async ({ answer }: AnswerPayload) => {
-          log("📨 answer reçue");
+          log("📨 Answer reçue");
           if (!isMounted || !answer) return;
           await pc.setRemoteDescription(new RTCSessionDescription(answer));
           log("📌 setRemoteDescription(answer) OK");
         };
 
-        // ICE candidate reçue
         const onIce = async ({ candidate }: CandidatePayload) => {
-          log("📨 ice-candidate reçue");
+          log("📨 ICE candidate reçue");
           if (!isMounted || !candidate) return;
           try {
             await pc.addIceCandidate(new RTCIceCandidate(candidate));
@@ -173,29 +195,25 @@ export function useWebRTC(roomId: string, onClose: () => void) {
           }
         };
 
-        // Nombre d’utilisateurs
+        /* =======================================================
+           👥 Gestion du nombre d’utilisateurs
+        ======================================================= */
         const onRoomUsers = async ({ count }: RoomUsersPayload) => {
           log("👥 room-users →", count);
           if (!isMounted) return;
           setUserCount(count);
           setOtherUserConnected(count > 1);
 
-          // Offre auto quand 2 users (garde-fou 'stable')
-          if (count === 2 && pc.signalingState === "stable") {
+          // 🔹 Seul le créateur crée l’offre
+          if (count >= 2 && isCreator) {
             try {
-              log("🎬 Deux utilisateurs → création de l’offre");
+              log("🎬 Créateur détecté → création de l’offre");
               const offer = await pc.createOffer();
               await pc.setLocalDescription(offer);
-              log("📤 Offre envoyée → emit offer");
               socket.emit("offer", { roomId, offer });
             } catch (e: unknown) {
               console.error("❌ Erreur création offre:", e);
             }
-          } else {
-            log("⏳ Pas d'offre (count != 2 ou signaling != stable)", {
-              count,
-              signalingState: pc.signalingState,
-            });
           }
         };
 
@@ -217,7 +235,7 @@ export function useWebRTC(roomId: string, onClose: () => void) {
     return () => {
       isMounted = false;
       try {
-        log("🧹 Cleanup : emit leave-room");
+        log("🧹 Cleanup : leave-room");
         socket.emit("leave-room", roomId);
 
         socket.off("offer");
@@ -234,7 +252,6 @@ export function useWebRTC(roomId: string, onClose: () => void) {
         }
 
         peerConnectionRef.current = null;
-
         localStreamRef.current?.getTracks().forEach((t) => t.stop());
         localStreamRef.current = null;
         setLocalStream(null);
@@ -243,7 +260,7 @@ export function useWebRTC(roomId: string, onClose: () => void) {
         console.warn("⚠️ Erreur cleanup WebRTC:", e);
       }
     };
-  }, [roomId]);
+  }, [roomId, isCreator]);
 
   /* =======================================================
      ❌ Quitter proprement la session
@@ -280,6 +297,7 @@ export function useWebRTC(roomId: string, onClose: () => void) {
     userCount,
     connected,
     otherUserConnected,
+    isCreator, // 👑 Ajouté : utile pour afficher "Vous êtes l'hôte"
     leaveRoom,
   };
 }
