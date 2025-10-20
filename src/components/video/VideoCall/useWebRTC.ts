@@ -27,6 +27,12 @@ interface RoomUsersPayload {
 export function useWebRTC(roomId: string, onClose: () => void) {
   const localStreamRef = useRef<MediaStream | null>(null);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+
+  // Rôle + protections contre les re-runs & conditions de course
+  const [isCreator, setIsCreator] = useState(false);
+  const isCreatorRef = useRef(false);
+  const offerMadeRef = useRef(false); // anti-doublons d’offre
+
   const rtcConfigRef = useRef<RTCConfiguration>({
     iceServers: [
       { urls: "stun:stun.l.google.com:19302" },
@@ -46,14 +52,13 @@ export function useWebRTC(roomId: string, onClose: () => void) {
   const [userCount, setUserCount] = useState(1);
   const [connected, setConnected] = useState(false);
   const [otherUserConnected, setOtherUserConnected] = useState(false);
-  const [isCreator, setIsCreator] = useState(false); // 🔹 Nouveau : rôle du client
 
   // ✅ Helper logs
   const log = (label: string, ...data: unknown[]) =>
     console.log(`%c[WebRTC] ${label}`, "color:#0ff;font-weight:600", ...data);
 
   /* =======================================================
-     🔌 Connexion Socket.IO + gestion de la room
+     🔌 Connexion Socket.IO + join room
   ======================================================= */
   useEffect(() => {
     const handleConnect = () => {
@@ -78,22 +83,28 @@ export function useWebRTC(roomId: string, onClose: () => void) {
   }, [roomId]);
 
   /* =======================================================
-     🎭 Rôle créateur / invité
+     🎭 Rôle créateur / invité (ne recrée pas le PC)
   ======================================================= */
   useEffect(() => {
-    socket.on("room-role", ({ isCreator }: { isCreator: boolean }) => {
+    const onRole = ({ isCreator }: { isCreator: boolean }) => {
       setIsCreator(isCreator);
+      isCreatorRef.current = isCreator; // évite la stale closure
       log("🎭 Rôle attribué :", isCreator ? "Créateur" : "Invité");
-    });
+    };
 
-    return () => socket.off("room-role");
+    socket.on("room-role", onRole);
+    return () => {
+      socket.off("room-role", onRole);
+    };
   }, []);
 
   /* =======================================================
      🎥 Initialisation WebRTC et Signaling
+     ⚠️ IMPORTANT: ne dépend QUE de roomId (pas de isCreator)
   ======================================================= */
   useEffect(() => {
     let isMounted = true;
+    offerMadeRef.current = false; // réinitialise à chaque nouvelle room
 
     const initWebRTC = async () => {
       try {
@@ -111,7 +122,7 @@ export function useWebRTC(roomId: string, onClose: () => void) {
         pc.oniceconnectionstatechange = () =>
           log("🧊 pc.iceConnectionState →", pc.iceConnectionState);
 
-        // ✅ Capture du flux local
+        // ✅ Capture du flux local (fallback vidéo seule)
         let local: MediaStream | null = null;
         try {
           local = await navigator.mediaDevices.getUserMedia({
@@ -171,6 +182,7 @@ export function useWebRTC(roomId: string, onClose: () => void) {
           if (!isMounted || !offer) return;
           await pc.setRemoteDescription(new RTCSessionDescription(offer));
           log("📌 setRemoteDescription(offer) OK");
+
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
           log("📤 Answer créée → emit answer");
@@ -197,21 +209,32 @@ export function useWebRTC(roomId: string, onClose: () => void) {
 
         /* =======================================================
            👥 Gestion du nombre d’utilisateurs
+           → Seul le créateur lance l’offre, avec anti-doublons
         ======================================================= */
         const onRoomUsers = async ({ count }: RoomUsersPayload) => {
           log("👥 room-users →", count);
           if (!isMounted) return;
+
           setUserCount(count);
           setOtherUserConnected(count > 1);
 
-          // 🔹 Seul le créateur crée l’offre
-          if (count >= 2 && isCreator) {
+          // Seul le créateur initie l'offre, une seule fois, quand au moins 2 présents
+          if (count >= 2 && isCreatorRef.current && !offerMadeRef.current) {
             try {
-              log("🎬 Créateur détecté → création de l’offre");
+              // Attente active jusqu’à "stable" pour éviter les courses
+              let spin = 0;
+              while (pc.signalingState !== "stable" && spin < 50) {
+                await new Promise((r) => setTimeout(r, 100));
+                spin++;
+              }
+
+              log("🎬 Créateur → création de l’offre");
               const offer = await pc.createOffer();
               await pc.setLocalDescription(offer);
+              offerMadeRef.current = true;
               socket.emit("offer", { roomId, offer });
-            } catch (e: unknown) {
+              log("📤 Offre envoyée");
+            } catch (e) {
               console.error("❌ Erreur création offre:", e);
             }
           }
@@ -243,6 +266,7 @@ export function useWebRTC(roomId: string, onClose: () => void) {
         socket.off("ice-candidate");
         socket.off("room-users");
         socket.off("user-joined");
+        socket.off("room-role"); // important si le composant est démonté
 
         const pc = peerConnectionRef.current;
         if (pc) {
@@ -256,11 +280,12 @@ export function useWebRTC(roomId: string, onClose: () => void) {
         localStreamRef.current = null;
         setLocalStream(null);
         setRemoteStream(null);
+        offerMadeRef.current = false;
       } catch (e: unknown) {
         console.warn("⚠️ Erreur cleanup WebRTC:", e);
       }
     };
-  }, [roomId, isCreator]);
+  }, [roomId]); // ⚠️ ne pas dépendre de isCreator
 
   /* =======================================================
      ❌ Quitter proprement la session
@@ -297,7 +322,7 @@ export function useWebRTC(roomId: string, onClose: () => void) {
     userCount,
     connected,
     otherUserConnected,
-    isCreator, // 👑 Ajouté : utile pour afficher "Vous êtes l'hôte"
+    isCreator, // 👑 utile pour afficher "Vous êtes l'hôte"
     leaveRoom,
   };
 }
