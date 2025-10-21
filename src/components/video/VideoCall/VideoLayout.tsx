@@ -24,7 +24,7 @@ export interface VideoLayoutHandle {
 }
 
 /* =======================================================
-   🎥 VideoLayout — version corrigée et robuste
+   🎥 VideoLayout — version iPhone responsive & robuste
 ======================================================= */
 const VideoLayout = forwardRef<VideoLayoutHandle, VideoLayoutProps>(
   ({ localStream, remoteStream, isMuted, cameraOn }, ref) => {
@@ -34,6 +34,7 @@ const VideoLayout = forwardRef<VideoLayoutHandle, VideoLayoutProps>(
 
     const [bounds, setBounds] = useState<DOMRect | null>(null);
     const [isPiP, setIsPiP] = useState(false);
+    const [hasRemote, setHasRemote] = useState(false);
 
     /* =======================================================
        🧠 Gestion des flux vidéo
@@ -64,16 +65,19 @@ const VideoLayout = forwardRef<VideoLayoutHandle, VideoLayoutProps>(
         const play = async () => {
           try {
             await video.play();
-            console.log("🎥 Flux distant attaché", remoteStream);
+            setHasRemote(true);
+            console.log("🎥 Flux distant démarré (iOS OK)");
           } catch (err) {
             console.warn("⚠️ Lecture vidéo distante bloquée :", err);
           }
         };
         play();
+      } else {
+        setHasRemote(false);
       }
     }, [remoteStream]);
 
-    // Mesure des limites du conteneur pour le drag
+    // Mesure du conteneur pour drag local video
     useEffect(() => {
       const update = () => {
         if (containerRef.current) {
@@ -111,40 +115,45 @@ const VideoLayout = forwardRef<VideoLayoutHandle, VideoLayoutProps>(
     useImperativeHandle(ref, () => ({ togglePiP }));
 
     /* =======================================================
-       🧩 Rendu principal
+       🧩 Rendu principal responsive
     ======================================================== */
     return (
       <div
         ref={containerRef}
         className="
-          relative w-full aspect-video max-h-[90vh]
-          bg-black rounded-2xl overflow-hidden border border-white/10 shadow-lg
+          relative w-full aspect-video md:aspect-[16/9]
+          max-h-[100dvh] bg-black rounded-2xl overflow-hidden
+          border border-white/10 shadow-lg
           transition-all duration-300
         "
       >
         {/* === Flux distant (interlocuteur) === */}
         <div className="absolute inset-0 w-full h-full">
-        <video
-  ref={remoteVideoRef}
-  autoPlay
-  playsInline
-  muted
-  onLoadedMetadata={() => {
-    const video = remoteVideoRef.current;
-    if (video) {
-      video
-        .play()
-        .then(() => {
-          video.muted = false; // réactive le son une fois la lecture commencée
-          console.log("🎥 Flux distant démarré (iOS OK)");
-        })
-        .catch((err) => console.warn("⚠️ Lecture distante bloquée :", err));
-    }
-  }}
-  className="absolute inset-0 w-full h-full object-cover"
-/>
+          <video
+            ref={remoteVideoRef}
+            autoPlay
+            playsInline
+            muted={false}
+            onLoadedMetadata={() => {
+              const video = remoteVideoRef.current;
+              if (video) {
+                video
+                  .play()
+                  .then(() => {
+                    video.muted = false;
+                    setHasRemote(true);
+                    console.log("🎥 Flux distant activé (iOS OK)");
+                  })
+                  .catch((err) =>
+                    console.warn("⚠️ Lecture distante bloquée :", err)
+                  );
+              }
+            }}
+            className="absolute inset-0 w-full h-full object-cover mobile-video-full"
+          />
 
-          {!remoteStream && (
+          {/* Overlay attente (disparaît dès flux reçu) */}
+          {!hasRemote && (
             <motion.div
               key="waiting-overlay"
               className="absolute inset-0 flex items-center justify-center text-gray-400 text-sm sm:text-base bg-gradient-to-b from-black/60 to-black/80 backdrop-blur-sm"
@@ -176,7 +185,7 @@ const VideoLayout = forwardRef<VideoLayoutHandle, VideoLayoutProps>(
             dragMomentum={false}
             className="
               absolute bottom-4 right-4 sm:bottom-6 sm:right-6
-              w-28 h-20 sm:w-44 sm:h-32 md:w-56 md:h-40
+              w-24 h-18 sm:w-44 sm:h-32 md:w-56 md:h-40
               rounded-xl overflow-hidden border border-white/20
               bg-black/60 backdrop-blur-sm shadow-lg
               hover:scale-[1.04] active:scale-[0.98]

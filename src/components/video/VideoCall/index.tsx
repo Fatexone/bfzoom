@@ -123,52 +123,71 @@ export default function VideoCall({
       >
         {/* === ZONE VIDÉO === */}
         <section
-          className="
-            flex-1 flex flex-col items-center justify-center
-            w-full lg:w-2/3 xl:w-3/4 gap-4 transition-all relative
-          "
-        >
-          {/* 🎬 Vidéos */}
-          <div className="relative w-full rounded-2xl overflow-hidden shadow-lg">
-            <VideoLayout
-              ref={layoutRef}
-              localStream={localStream}
-              remoteStream={remoteStream}
-              isMuted={isMuted}
-              cameraOn={cameraOn}
-            />
-          </div>
+  className={`
+    flex-1 flex flex-col items-center justify-center
+    w-full lg:w-2/3 xl:w-3/4 gap-4 transition-all relative
+    ${isMobile ? "min-h-[100vh]" : ""}
+  `}
+>
+  {/* 🎬 Vidéos */}
+  <div
+    className={`
+      relative w-full overflow-hidden shadow-lg rounded-2xl
+      ${isMobile ? "h-[100vh] rounded-none" : ""}
+    `}
+  >
+    <VideoLayout
+      ref={layoutRef}
+      localStream={localStream}
+      remoteStream={remoteStream}
+      isMuted={isMuted}
+      cameraOn={cameraOn}
+    />
 
-          {/* 💬 ChatBox (toujours présent) */}
-          <ChatBox
-            roomId={roomId}
-            userName={guestName || (isGuest ? "Invité" : "Créateur")}
-          />
+    {/* 💬 ChatBox mobile : flottant */}
+    {isMobile && (
+      <div className="absolute bottom-0 left-0 right-0 z-20">
+        <ChatBox
+          roomId={roomId}
+          userName={guestName || (isGuest ? "Invité" : "Créateur")}
+        />
+      </div>
+    )}
+  </div>
 
-          {/* 🎛️ Contrôles bas de page */}
-          <ControlsBar
-            isMuted={isMuted}
-            onToggleMute={toggleMute}
-            cameraOn={cameraOn}
-            onToggleCamera={toggleCamera}
-            fullScreen={fullScreen}
-            onToggleFullScreen={toggleFullScreen}
-            onTogglePiP={handleTogglePiP}
-            onLeave={handleLeave}
-          />
+  {/* 💬 ChatBox desktop : intégré */}
+  {!isMobile && (
+    <ChatBox
+      roomId={roomId}
+      userName={guestName || (isGuest ? "Invité" : "Créateur")}
+    />
+  )}
 
-          {/* 🕒 Écran d’attente */}
-          {!otherUserConnected && (
-            <div className="flex flex-col items-center text-center mt-6 mb-10">
-              <WaitingScreen roomId={roomId} userCount={userCount} />
-              <p className="text-gray-400 text-sm mt-2">
-                {isGuest
-                  ? "En attente du créateur de la salle..."
-                  : "En attente de ton interlocuteur..."}
-              </p>
-            </div>
-          )}
-        </section>
+  {/* 🎛️ Contrôles bas de page */}
+  <ControlsBar
+    isMuted={isMuted}
+    onToggleMute={toggleMute}
+    cameraOn={cameraOn}
+    onToggleCamera={toggleCamera}
+    fullScreen={fullScreen}
+    onToggleFullScreen={toggleFullScreen}
+    onTogglePiP={handleTogglePiP}
+    onLeave={handleLeave}
+  />
+
+  {/* 🕒 Écran d’attente */}
+  {!otherUserConnected && (
+    <div className="flex flex-col items-center text-center mt-6 mb-10">
+      <WaitingScreen roomId={roomId} userCount={userCount} />
+      <p className="text-gray-400 text-sm mt-2">
+        {isGuest
+          ? "En attente du créateur de la salle..."
+          : "En attente de ton interlocuteur..."}
+      </p>
+    </div>
+  )}
+</section>
+
 
         {/* === PANNEAU LATÉRAL === */}
         <aside
