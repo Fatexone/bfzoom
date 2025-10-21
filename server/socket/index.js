@@ -19,6 +19,9 @@ console.log("🚀 Socket.IO Server BFZoom démarré...");
 io.on("connection", (socket) => {
   console.log("🟢 Nouveau client :", socket.id);
 
+  /* =======================================================
+     🏠 Gestion des rooms WebRTC
+  ======================================================= */
   socket.on("join-room", (roomId) => {
     socket.join(roomId);
     const room = io.sockets.adapter.rooms.get(roomId);
@@ -47,12 +50,27 @@ io.on("connection", (socket) => {
     console.log(`🚪 ${socket.id} a quitté ${roomId}`);
   });
 
+  /* =======================================================
+     📡 Signalisation WebRTC
+  ======================================================= */
   socket.on("offer", (data) => socket.to(data.roomId).emit("offer", data));
   socket.on("answer", (data) => socket.to(data.roomId).emit("answer", data));
   socket.on("ice-candidate", (data) =>
     socket.to(data.roomId).emit("ice-candidate", data)
   );
 
+  /* =======================================================
+     💬 Chat texte (nouvelle section)
+  ======================================================= */
+  socket.on("chat-message", ({ roomId, msg }) => {
+    if (!roomId || !msg) return;
+    console.log(`💬 [${roomId}] ${msg.sender}: ${msg.text}`);
+    io.to(roomId).emit("chat-message", msg);
+  });
+
+  /* =======================================================
+     ❌ Déconnexion
+  ======================================================= */
   socket.on("disconnect", () => {
     console.log("🔴 Déconnecté :", socket.id);
   });

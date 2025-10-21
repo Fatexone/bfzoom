@@ -3,7 +3,6 @@
 import { useCallback, useRef, useState, Suspense, useEffect } from "react";
 import dynamic from "next/dynamic";
 import { useWebRTC } from "@/hooks/webrtc/useWebRTC";
-
 import useMediaStreams from "./useMediaStreams";
 
 import VideoLayout, { VideoLayoutHandle } from "./VideoLayout";
@@ -11,6 +10,7 @@ import ControlsBar from "./ControlsBar";
 import VideoHeader from "./VideoHeader";
 import VideoFooter from "./VideoFooter";
 import WaitingScreen from "./WaitingScreen";
+import ChatBox from "./ChatBox"; // 🆕 import ajouté
 
 import Timer from "@/components/video/timer/Timer";
 import OpenAIEspace from "@/components/video/panels/OpenAIEspace";
@@ -125,7 +125,7 @@ export default function VideoCall({
         <section
           className="
             flex-1 flex flex-col items-center justify-center
-            w-full lg:w-2/3 xl:w-3/4 gap-4 transition-all
+            w-full lg:w-2/3 xl:w-3/4 gap-4 transition-all relative
           "
         >
           {/* 🎬 Vidéos */}
@@ -138,6 +138,12 @@ export default function VideoCall({
               cameraOn={cameraOn}
             />
           </div>
+
+          {/* 💬 ChatBox (toujours présent) */}
+          <ChatBox
+            roomId={roomId}
+            userName={guestName || (isGuest ? "Invité" : "Créateur")}
+          />
 
           {/* 🎛️ Contrôles bas de page */}
           <ControlsBar

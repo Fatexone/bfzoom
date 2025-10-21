@@ -124,13 +124,26 @@ const VideoLayout = forwardRef<VideoLayoutHandle, VideoLayoutProps>(
       >
         {/* === Flux distant (interlocuteur) === */}
         <div className="absolute inset-0 w-full h-full">
-          <video
-            ref={remoteVideoRef}
-            autoPlay
-            playsInline
-            muted={false}
-            className="absolute inset-0 w-full h-full object-cover"
-          />
+        <video
+  ref={remoteVideoRef}
+  autoPlay
+  playsInline
+  muted
+  onLoadedMetadata={() => {
+    const video = remoteVideoRef.current;
+    if (video) {
+      video
+        .play()
+        .then(() => {
+          video.muted = false; // réactive le son une fois la lecture commencée
+          console.log("🎥 Flux distant démarré (iOS OK)");
+        })
+        .catch((err) => console.warn("⚠️ Lecture distante bloquée :", err));
+    }
+  }}
+  className="absolute inset-0 w-full h-full object-cover"
+/>
+
           {!remoteStream && (
             <motion.div
               key="waiting-overlay"
