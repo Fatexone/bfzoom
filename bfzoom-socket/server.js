@@ -12,8 +12,8 @@ const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
     origin: [
-      "https://bfzoom.vercel.app",
-      "https://vps-ac6b333d.vps.ovh.net",
+      "https://bfzoom.vercel.app",        // Front (Vercel)
+      "https://vps-ac6b333d.vps.ovh.net", // Serveur Socket (OVH)
     ],
     methods: ["GET", "POST"],
     credentials: true,
@@ -24,45 +24,51 @@ const io = new Server(httpServer, {
    🌐 Endpoint de test
 =========================================================== */
 app.get("/", (_req, res) => {
-  res.send("🚀 Serveur Socket.IO BFZoom actif !");
+  res.send("🚀 Serveur Socket.IO BFZoom actif et prêt !");
 });
 
 /* ===========================================================
-   🎥 GESTION DES ROOMS — version avec rôles
+   🎥 GESTION DES ROOMS — version stable et synchrone
 =========================================================== */
 io.on("connection", (socket) => {
   console.log("🟢 Client connecté :", socket.id);
 
-  socket.onAny((event, payload) => {
-    console.log(`📡 [EVENT] ${event}`, payload ? JSON.stringify(payload).slice(0, 200) : "");
-  });
-
   /* ---------------- JOIN ROOM ---------------- */
   socket.on("join-room", (roomId) => {
+    console.log(`➡️ ${socket.id} rejoint la salle : ${roomId}`);
     socket.join(roomId);
 
     const room = io.sockets.adapter.rooms.get(roomId);
     const count = room ? room.size : 0;
 
-    // ✅ Le premier est le créateur
+    // ✅ Détermine si c’est le créateur
     const isCreator = count === 1;
     socket.emit("room-role", { isCreator });
 
+    // 🔁 Informe tous les membres de la room du nouveau total
     io.to(roomId).emit("room-users", { count });
-    io.to(roomId).emit("user-joined", { id: socket.id });
+    console.log(`👥 Room ${roomId}: ${count} utilisateur(s)`);
 
-    console.log(`➡️ ${socket.id} rejoint ${roomId} (${count} utilisateur[s])`);
-    if (isCreator) console.log(`👑 ${socket.id} est le créateur`);
+    // 👑 Si 2 utilisateurs → demande explicite de création d’offre
+    if (count === 2) {
+      const creatorSocketId = Array.from(room)[0]; // premier = créateur
+      console.log(
+        `🎬 Demande à ${creatorSocketId} de créer l’offre pour ${socket.id}`
+      );
+      io.to(creatorSocketId).emit("create-offer");
+    }
   });
 
   /* ---------------- LEAVE ROOM ---------------- */
   socket.on("leave-room", (roomId) => {
     socket.leave(roomId);
+    console.log(`🚪 ${socket.id} quitte la salle : ${roomId}`);
 
     const room = io.sockets.adapter.rooms.get(roomId);
     const count = room ? room.size : 0;
+
     io.to(roomId).emit("room-users", { count });
-    console.log(`🚪 ${socket.id} quitte ${roomId} → ${count} restant(s)`);
+    console.log(`👥 Room ${roomId}: ${count} utilisateur(s) restants`);
   });
 
   /* ===========================================================
@@ -94,5 +100,5 @@ io.on("connection", (socket) => {
 =========================================================== */
 const PORT = process.env.PORT || 4000;
 httpServer.listen(PORT, () => {
-  console.log(`✅ Socket.IO Server opérationnel sur le port ${PORT}`);
+  console.log(`✅ Socket.IO server opérationnel sur le port ${PORT}`);
 });

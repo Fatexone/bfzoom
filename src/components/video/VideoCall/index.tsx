@@ -2,7 +2,8 @@
 
 import { useCallback, useRef, useState, Suspense, useEffect } from "react";
 import dynamic from "next/dynamic";
-import { useWebRTC } from "./useWebRTC";
+import { useWebRTC } from "@/hooks/webrtc/useWebRTC";
+
 import useMediaStreams from "./useMediaStreams";
 
 import VideoLayout, { VideoLayoutHandle } from "./VideoLayout";
