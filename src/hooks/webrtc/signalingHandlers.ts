@@ -26,40 +26,40 @@ export const attachSignalingHandlers = (
   log: (label: string, ...data: unknown[]) => void
 ): (() => void) => {
   /* =======================================================
-     📦 État interne pour fiabiliser l'ordre SDP/ICE
+     📦 État interne
   ======================================================= */
   let remoteDescriptionSet = false;
+  let isMakingOffer = false;
   const pendingRemoteCandidates: RTCIceCandidateInit[] = [];
 
   /* =======================================================
-     📤 Émettre nos ICE candidates locales
+     📤 Émission ICE locale unique
   ======================================================= */
   pc.onicecandidate = (evt: RTCPeerConnectionIceEvent) => {
     const candidate = evt.candidate;
-    if (!candidate) return;
-    socket.emit("ice-candidate", { roomId, candidate: candidate.toJSON() });
-    log("📤 ICE candidate locale envoyée");
+    if (candidate) {
+      socket.emit("ice-candidate", { roomId, candidate: candidate.toJSON() });
+      log("📤 ICE candidate locale envoyée");
+    } else {
+      log("✅ ICE locale terminée");
+    }
   };
 
-  /* Optionnel : logs utiles */
-  pc.onnegotiationneeded = () => log("🧾 onnegotiationneeded");
-  pc.ontrack = (e: RTCTrackEvent) => {
-    const [stream] = e.streams;
-    if (stream) log("📡 ontrack déclenché (tracks:", stream.getTracks().length, ")");
+  pc.oniceconnectionstatechange = () => {
+    log("🧊 ICE connectionState:", pc.iceConnectionState);
   };
 
   /* =======================================================
-     🕒 Helper: attendre des senders/track avant l'offer
-     (sinon offer « vide »; on ajoute des transceivers audio/vidéo)
+     🕒 Préparer transceivers si pas de tracks
   ======================================================= */
   const waitSendersOrAddTransceivers = async (): Promise<void> => {
-    // attend jusqu’à 1s que des tracks soient ajoutées
     for (let i = 0; i < 10; i++) {
       const hasTrack = pc.getSenders().some((s) => !!s.track);
       if (hasTrack) return;
       await new Promise<void>((r) => setTimeout(r, 100));
     }
-    // toujours rien → on prépare des transceivers pour recevoir quand même
+
+    // Si aucune track après 1s → fallback
     if (pc.getTransceivers().length === 0) {
       try {
         pc.addTransceiver("video", { direction: "sendrecv" });
@@ -72,16 +72,20 @@ export const attachSignalingHandlers = (
   };
 
   /* =======================================================
-     📡 Offer reçue → on répond par une Answer
+     📡 Réception d'une offer
   ======================================================= */
   const onOffer = async ({ offer }: OfferPayload): Promise<void> => {
     try {
       if (!offer) return;
+
       log("📨 Offer reçue → setRemoteDescription");
       await pc.setRemoteDescription(new RTCSessionDescription(offer));
       remoteDescriptionSet = true;
 
-      // vider la file des ICE reçues trop tôt
+      // Ajouter nos tracks locales si besoin
+      await waitSendersOrAddTransceivers();
+
+      // Vider la file d'attente ICE
       for (const c of pendingRemoteCandidates) {
         try {
           await pc.addIceCandidate(new RTCIceCandidate(c));
@@ -91,9 +95,9 @@ export const attachSignalingHandlers = (
       }
       pendingRemoteCandidates.length = 0;
 
+      // Créer et envoyer l'answer
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-
       socket.emit("answer", { roomId, answer });
       log("📤 Answer envoyée avec succès");
     } catch (err) {
@@ -102,16 +106,17 @@ export const attachSignalingHandlers = (
   };
 
   /* =======================================================
-     📡 Answer reçue → on finalise la connexion
+     📡 Réception d'une answer
   ======================================================= */
   const onAnswer = async ({ answer }: AnswerPayload): Promise<void> => {
     try {
       if (!answer) return;
+
       log("📨 Answer reçue → setRemoteDescription");
       await pc.setRemoteDescription(new RTCSessionDescription(answer));
       remoteDescriptionSet = true;
 
-      // vider la file des ICE reçues trop tôt
+      // Flush ICE candidates
       for (const c of pendingRemoteCandidates) {
         try {
           await pc.addIceCandidate(new RTCIceCandidate(c));
@@ -126,11 +131,14 @@ export const attachSignalingHandlers = (
   };
 
   /* =======================================================
-     ❄️ ICE Candidate distante → ajout avec file d’attente
+     ❄️ Réception ICE distante
   ======================================================= */
-  const onIceCandidate = async ({ candidate }: CandidatePayload): Promise<void> => {
+  const onIceCandidate = async ({
+    candidate,
+  }: CandidatePayload): Promise<void> => {
     try {
       if (!candidate) return;
+
       if (!remoteDescriptionSet || !pc.remoteDescription) {
         pendingRemoteCandidates.push(candidate);
         log(
@@ -140,6 +148,7 @@ export const attachSignalingHandlers = (
         );
         return;
       }
+
       await pc.addIceCandidate(new RTCIceCandidate(candidate));
       log("✅ ICE candidate distante ajoutée");
     } catch (err) {
@@ -148,27 +157,33 @@ export const attachSignalingHandlers = (
   };
 
   /* =======================================================
-     🎬 Création d’offre (déclenchée par le serveur)
+     🎬 Demande de création d’offre
   ======================================================= */
   const onCreateOffer = async (): Promise<void> => {
     try {
+      if (isMakingOffer) {
+        log("⚠️ Offer déjà en cours, skip");
+        return;
+      }
+      isMakingOffer = true;
+
       log("🎬 Demande de création d’offre reçue (create-offer)");
       await waitSendersOrAddTransceivers();
 
-      // créer l’offre sans flags dépréciés
-      const offerOptions: RTCOfferOptions = {};
-      const offer = await pc.createOffer(offerOptions);
-
+      const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
+
       socket.emit("offer", { roomId, offer });
       log("📤 Offre créée et envoyée au serveur");
     } catch (err) {
       console.error("❌ Erreur createOffer:", err);
+    } finally {
+      isMakingOffer = false;
     }
   };
 
   /* =======================================================
-     🔌 Abonnements
+     🔌 Abonnements Socket.IO
   ======================================================= */
   socket.on("offer", onOffer);
   socket.on("answer", onAnswer);
@@ -176,7 +191,7 @@ export const attachSignalingHandlers = (
   socket.on("create-offer", onCreateOffer);
 
   /* =======================================================
-     🧹 Cleanup propre
+     🧹 Cleanup
   ======================================================= */
   return () => {
     socket.off("offer", onOffer);

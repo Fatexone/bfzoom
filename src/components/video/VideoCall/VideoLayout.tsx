@@ -7,7 +7,7 @@ import React, {
   forwardRef,
   useImperativeHandle,
 } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 
 /* =======================================================
    🔧 Types
@@ -24,7 +24,7 @@ export interface VideoLayoutHandle {
 }
 
 /* =======================================================
-   🎥 VideoLayout — version sublimée et responsive
+   🎥 VideoLayout — version corrigée et robuste
 ======================================================= */
 const VideoLayout = forwardRef<VideoLayoutHandle, VideoLayoutProps>(
   ({ localStream, remoteStream, isMuted, cameraOn }, ref) => {
@@ -35,27 +35,50 @@ const VideoLayout = forwardRef<VideoLayoutHandle, VideoLayoutProps>(
     const [bounds, setBounds] = useState<DOMRect | null>(null);
     const [isPiP, setIsPiP] = useState(false);
 
-    const hasRemote = !!remoteStream;
-
     /* =======================================================
        🧠 Gestion des flux vidéo
-    ======================================================= */
+    ======================================================== */
+
+    // Flux local
     useEffect(() => {
-      if (localVideoRef.current && localStream) {
-        localVideoRef.current.srcObject = localStream;
+      const video = localVideoRef.current;
+      if (video && localStream) {
+        video.srcObject = localStream;
+        const play = async () => {
+          try {
+            await video.play();
+            console.log("🎥 Flux local en lecture");
+          } catch (err) {
+            console.warn("⚠️ Lecture vidéo locale bloquée :", err);
+          }
+        };
+        play();
       }
     }, [localStream]);
 
+    // Flux distant
     useEffect(() => {
-      if (remoteVideoRef.current && remoteStream) {
-        remoteVideoRef.current.srcObject = remoteStream;
+      const video = remoteVideoRef.current;
+      if (video && remoteStream) {
+        video.srcObject = remoteStream;
+        const play = async () => {
+          try {
+            await video.play();
+            console.log("🎥 Flux distant attaché", remoteStream);
+          } catch (err) {
+            console.warn("⚠️ Lecture vidéo distante bloquée :", err);
+          }
+        };
+        play();
       }
     }, [remoteStream]);
 
+    // Mesure des limites du conteneur pour le drag
     useEffect(() => {
       const update = () => {
-        if (containerRef.current)
+        if (containerRef.current) {
           setBounds(containerRef.current.getBoundingClientRect());
+        }
       };
       update();
       window.addEventListener("resize", update);
@@ -64,7 +87,7 @@ const VideoLayout = forwardRef<VideoLayoutHandle, VideoLayoutProps>(
 
     /* =======================================================
        🖼️ Picture-in-Picture
-    ======================================================= */
+    ======================================================== */
     const togglePiP = async () => {
       const video = localVideoRef.current;
       if (!video) return;
@@ -73,15 +96,15 @@ const VideoLayout = forwardRef<VideoLayoutHandle, VideoLayoutProps>(
         if (document.pictureInPictureElement) {
           await document.exitPictureInPicture();
           setIsPiP(false);
-          return;
-        }
-
-        if (document.pictureInPictureEnabled && !video.disablePictureInPicture) {
+        } else if (
+          document.pictureInPictureEnabled &&
+          !video.disablePictureInPicture
+        ) {
           await video.requestPictureInPicture();
           setIsPiP(true);
         }
       } catch (err) {
-        console.error("❌ Erreur PiP :", err);
+        console.error("❌ Erreur Picture-in-Picture :", err);
       }
     };
 
@@ -89,7 +112,7 @@ const VideoLayout = forwardRef<VideoLayoutHandle, VideoLayoutProps>(
 
     /* =======================================================
        🧩 Rendu principal
-    ======================================================= */
+    ======================================================== */
     return (
       <div
         ref={containerRef}
@@ -100,35 +123,27 @@ const VideoLayout = forwardRef<VideoLayoutHandle, VideoLayoutProps>(
         "
       >
         {/* === Flux distant (interlocuteur) === */}
-        <AnimatePresence>
-          {hasRemote && (
-            <motion.video
-              key="remote-video"
-              ref={remoteVideoRef}
-              autoPlay
-              playsInline
-              className="absolute inset-0 w-full h-full object-cover"
+        <div className="absolute inset-0 w-full h-full">
+          <video
+            ref={remoteVideoRef}
+            autoPlay
+            playsInline
+            muted={false}
+            className="absolute inset-0 w-full h-full object-cover"
+          />
+          {!remoteStream && (
+            <motion.div
+              key="waiting-overlay"
+              className="absolute inset-0 flex items-center justify-center text-gray-400 text-sm sm:text-base bg-gradient-to-b from-black/60 to-black/80 backdrop-blur-sm"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               transition={{ duration: 0.6 }}
-            />
+            >
+              En attente d’un interlocuteur…
+            </motion.div>
           )}
-        </AnimatePresence>
-
-        {/* === Fallback si aucun interlocuteur === */}
-        {!hasRemote && (
-          <motion.div
-            key="waiting"
-            className="absolute inset-0 flex items-center justify-center text-gray-400 text-sm sm:text-base bg-gradient-to-b from-black/60 to-black/80 backdrop-blur-sm"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.6 }}
-          >
-            En attente d’un interlocuteur…
-          </motion.div>
-        )}
+        </div>
 
         {/* === Flux local (toi) === */}
         {cameraOn ? (

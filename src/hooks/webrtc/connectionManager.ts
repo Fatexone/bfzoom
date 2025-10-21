@@ -2,6 +2,7 @@
  * connectionManager.ts
  * Gestion bas-niveau du cycle de vie RTCPeerConnection
  */
+
 export const createPeerConnection = (
   config: RTCConfiguration,
   onRemoteStream: (stream: MediaStream) => void,
@@ -9,21 +10,43 @@ export const createPeerConnection = (
 ): RTCPeerConnection => {
   const pc = new RTCPeerConnection(config);
 
-  // --- Logs d’état internes (utile pour debug WebRTC) ---
-  pc.onconnectionstatechange = () => log("🔗 connectionState:", pc.connectionState);
-  pc.onsignalingstatechange = () => log("🧭 signalingState:", pc.signalingState);
+  // === Logs d’état internes (utile pour debug WebRTC) ===
+  pc.onconnectionstatechange = () =>
+    log("🔗 connectionState:", pc.connectionState);
+  pc.onsignalingstatechange = () =>
+    log("🧭 signalingState:", pc.signalingState);
   pc.oniceconnectionstatechange = () =>
     log("🧊 iceConnectionState:", pc.iceConnectionState);
   pc.onicegatheringstatechange = () =>
     log("❄️ iceGatheringState:", pc.iceGatheringState);
 
-  // --- Réception du flux distant ---
-  pc.ontrack = (event: RTCTrackEvent) => {
-    const [stream] = event.streams;
-    if (stream) {
-      onRemoteStream(stream);
-      log("📡 Flux distant reçu (tracks:", stream.getTracks().length, ")");
+  // === Envoi des ICE locales ===
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      log("📤 ICE locale émise:", event.candidate.candidate);
+    } else {
+      log("✅ ICE locale terminée");
     }
+  };
+
+  // === Gestion des flux distants robustes ===
+  const remoteMediaStream = new MediaStream();
+
+  pc.ontrack = (event: RTCTrackEvent) => {
+    log("📡 ontrack déclenché:", event.track.kind);
+
+    // Ajout du track dans le flux distant reconstruit
+    remoteMediaStream.addTrack(event.track);
+
+    // Si event.streams est fourni, on l’utilise pour cohérence
+    const [eventStream] = event.streams;
+    const finalStream = eventStream ?? remoteMediaStream;
+
+    onRemoteStream(finalStream);
+    log(
+      "🎥 Flux distant mis à jour — tracks:",
+      finalStream.getTracks().map((t) => t.kind)
+    );
   };
 
   return pc;
