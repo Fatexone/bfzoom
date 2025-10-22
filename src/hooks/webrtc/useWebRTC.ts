@@ -8,6 +8,7 @@ import { attachSignalingHandlers } from "./signalingHandlers";
 
 /**
  * Hook principal : gestion WebRTC + Socket.IO + cleanup
+ * Version corrigée avec flag isPolite (perfect negotiation)
  */
 export function useWebRTC(roomId: string, onClose: () => void) {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
@@ -52,14 +53,25 @@ export function useWebRTC(roomId: string, onClose: () => void) {
     );
 
     /* --- Création de la connexion WebRTC --- */
-    const pc = createPeerConnection(rtcConfig, (stream) => {
-      if (isMounted) setRemoteStream(stream);
-    }, log);
+    const pc = createPeerConnection(
+      rtcConfig,
+      (stream) => {
+        if (isMounted) setRemoteStream(stream);
+      },
+      log
+    );
 
     peerConnectionRef.current = pc;
 
+    /* =======================================================
+       🔄 Détermination du rôle “polite” (évite les collisions SDP)
+    ======================================================= */
+    // Si l’utilisateur est le créateur de la salle → non-polite (il initie)
+    // Si c’est l’invité (non-créateur) → polite = true
+    const isPolite = !isCreator;
+
     /* --- Attachement des handlers de signaling --- */
-    const detachSignaling = attachSignalingHandlers(pc, roomId, log);
+    const detachSignaling = attachSignalingHandlers(pc, roomId, log, isPolite);
 
     /* --- Capture du flux local --- */
     (async () => {
@@ -73,7 +85,7 @@ export function useWebRTC(roomId: string, onClose: () => void) {
         local.getTracks().forEach((t) => pc.addTrack(t, local));
         log("🎥 getUserMedia OK (audio+video)");
       } catch (err) {
-        log("⚠️ getUserMedia (audio+video) échoué :", err);
+        log("⚠️ getUserMedia échoué, tentative fallback vidéo seule :", err);
         try {
           const fallback = await navigator.mediaDevices.getUserMedia({ video: true });
           if (isMounted) {
@@ -128,10 +140,10 @@ export function useWebRTC(roomId: string, onClose: () => void) {
       setRemoteStream(null);
       peerConnectionRef.current = null;
     };
-  }, [roomId]);
+  }, [roomId, isCreator]); // ← important : relancer si créateur change
 
   /* =======================================================
-     🚪 Quitter proprement la session (depuis le bouton "Quitter")
+     🚪 Quitter proprement la session
   ======================================================= */
   const leaveRoom = useCallback(() => {
     log("🚪 leaveRoom() manuel appelé");
@@ -141,7 +153,7 @@ export function useWebRTC(roomId: string, onClose: () => void) {
   }, [roomId, onClose]);
 
   /* =======================================================
-     📦 Valeurs retournées pour le composant parent
+     📦 Valeurs retournées
   ======================================================= */
   return {
     localStream,

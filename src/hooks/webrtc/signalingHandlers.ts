@@ -17,31 +17,31 @@ interface CandidatePayload {
 }
 
 /**
- * Attache les événements Socket.IO liés au signaling WebRTC
- * et renvoie une fonction de cleanup.
+ * 🎯 Gestion complète du signaling WebRTC avec Socket.IO
+ * → Compatible mobile / desktop
+ * → Évite les collisions d'offres ("perfect negotiation")
  */
 export const attachSignalingHandlers = (
   pc: RTCPeerConnection,
   roomId: string,
-  log: (label: string, ...data: unknown[]) => void
+  log: (label: string, ...data: unknown[]) => void,
+  isPolite: boolean // ✅ True pour l’invité, False pour le créateur
 ): (() => void) => {
   /* =======================================================
      📦 État interne
   ======================================================= */
+  const polite = isPolite; // ✅ pas de warning ESLint
   let remoteDescriptionSet = false;
   let isMakingOffer = false;
   const pendingRemoteCandidates: RTCIceCandidateInit[] = [];
 
   /* =======================================================
-     📤 Émission ICE locale unique
+     🧊 ICE locale
   ======================================================= */
-  pc.onicecandidate = (evt: RTCPeerConnectionIceEvent) => {
-    const candidate = evt.candidate;
-    if (candidate) {
-      socket.emit("ice-candidate", { roomId, candidate: candidate.toJSON() });
+  pc.onicecandidate = (evt) => {
+    if (evt.candidate) {
+      socket.emit("ice-candidate", { roomId, candidate: evt.candidate.toJSON() });
       log("📤 ICE candidate locale envoyée");
-    } else {
-      log("✅ ICE locale terminée");
     }
   };
 
@@ -50,7 +50,7 @@ export const attachSignalingHandlers = (
   };
 
   /* =======================================================
-     🕒 Préparer transceivers si pas de tracks
+     🎛️ Prépare transceivers
   ======================================================= */
   const waitSendersOrAddTransceivers = async (): Promise<void> => {
     for (let i = 0; i < 10; i++) {
@@ -58,13 +58,11 @@ export const attachSignalingHandlers = (
       if (hasTrack) return;
       await new Promise<void>((r) => setTimeout(r, 100));
     }
-
-    // Si aucune track après 1s → fallback
     if (pc.getTransceivers().length === 0) {
       try {
         pc.addTransceiver("video", { direction: "sendrecv" });
         pc.addTransceiver("audio", { direction: "sendrecv" });
-        log("➕ Transceivers audio/vidéo ajoutés (fallback)");
+        log("➕ Transceivers ajoutés (fallback)");
       } catch (e) {
         log("⚠️ Impossible d'ajouter des transceivers:", e);
       }
@@ -72,20 +70,29 @@ export const attachSignalingHandlers = (
   };
 
   /* =======================================================
-     📡 Réception d'une offer
+     📡 Offer reçue
   ======================================================= */
   const onOffer = async ({ offer }: OfferPayload): Promise<void> => {
     try {
       if (!offer) return;
 
+      const offerCollision = isMakingOffer || pc.signalingState !== "stable";
+
+      if (offerCollision) {
+        log("⚠️ Collision d’offre détectée");
+        if (!polite) {
+          log("🚫 Offre ignorée (non-polite)");
+          return;
+        }
+      }
+
       log("📨 Offer reçue → setRemoteDescription");
       await pc.setRemoteDescription(new RTCSessionDescription(offer));
       remoteDescriptionSet = true;
 
-      // Ajouter nos tracks locales si besoin
       await waitSendersOrAddTransceivers();
 
-      // Vider la file d'attente ICE
+      // Ajoute les ICE en attente
       for (const c of pendingRemoteCandidates) {
         try {
           await pc.addIceCandidate(new RTCIceCandidate(c));
@@ -95,28 +102,31 @@ export const attachSignalingHandlers = (
       }
       pendingRemoteCandidates.length = 0;
 
-      // Créer et envoyer l'answer
+      // Crée et envoie l’answer
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       socket.emit("answer", { roomId, answer });
-      log("📤 Answer envoyée avec succès");
+      log("📤 Answer envoyée !");
     } catch (err) {
       console.error("❌ Erreur sur réception offer:", err);
     }
   };
 
   /* =======================================================
-     📡 Réception d'une answer
+     📡 Answer reçue
   ======================================================= */
   const onAnswer = async ({ answer }: AnswerPayload): Promise<void> => {
     try {
       if (!answer) return;
+      if (pc.signalingState !== "have-local-offer") {
+        log("⚠️ Ignorer answer (mauvais état):", pc.signalingState);
+        return;
+      }
 
       log("📨 Answer reçue → setRemoteDescription");
       await pc.setRemoteDescription(new RTCSessionDescription(answer));
       remoteDescriptionSet = true;
 
-      // Flush ICE candidates
       for (const c of pendingRemoteCandidates) {
         try {
           await pc.addIceCandidate(new RTCIceCandidate(c));
@@ -131,21 +141,15 @@ export const attachSignalingHandlers = (
   };
 
   /* =======================================================
-     ❄️ Réception ICE distante
+     ❄️ ICE distante
   ======================================================= */
-  const onIceCandidate = async ({
-    candidate,
-  }: CandidatePayload): Promise<void> => {
+  const onIceCandidate = async ({ candidate }: CandidatePayload): Promise<void> => {
     try {
       if (!candidate) return;
 
       if (!remoteDescriptionSet || !pc.remoteDescription) {
         pendingRemoteCandidates.push(candidate);
-        log(
-          "🧊 ICE distante reçue avant SDP → mise en file (len:",
-          pendingRemoteCandidates.length,
-          ")"
-        );
+        log("🧊 ICE distante reçue avant SDP → en attente");
         return;
       }
 
@@ -157,7 +161,7 @@ export const attachSignalingHandlers = (
   };
 
   /* =======================================================
-     🎬 Demande de création d’offre
+     🛰️ Création d’offre locale
   ======================================================= */
   const onCreateOffer = async (): Promise<void> => {
     try {
@@ -167,14 +171,14 @@ export const attachSignalingHandlers = (
       }
       isMakingOffer = true;
 
-      log("🎬 Demande de création d’offre reçue (create-offer)");
+      log("🎬 Création d’offre locale (create-offer)");
       await waitSendersOrAddTransceivers();
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
       socket.emit("offer", { roomId, offer });
-      log("📤 Offre créée et envoyée au serveur");
+      log("📤 Offre envoyée");
     } catch (err) {
       console.error("❌ Erreur createOffer:", err);
     } finally {

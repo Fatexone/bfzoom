@@ -14,53 +14,68 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
+app.get("/health", (_req, res) => res.status(200).send("ok"));
+
 console.log("🚀 Socket.IO Server BFZoom démarré...");
 
 io.on("connection", (socket) => {
   console.log("🟢 Nouveau client :", socket.id);
 
   /* =======================================================
-     🏠 Gestion des rooms WebRTC
+     🏠 Rooms WebRTC
   ======================================================= */
   socket.on("join-room", (roomId) => {
     socket.join(roomId);
+
     const room = io.sockets.adapter.rooms.get(roomId);
     const clients = room ? Array.from(room) : [];
 
+    // Si premier arrivant → créateur
     const isCreator = clients.length === 1;
     socket.emit("room-role", { isCreator });
 
-    console.log(`👥 ${roomId}: ${clients.length} client(s)`);
+    // Notifie tout le monde du nombre d’utilisateurs
+    io.to(roomId).emit("room-users", { count: clients.length });
 
+    // Si un second utilisateur rejoint, demander au créateur de créer l’offer
     if (clients.length === 2) {
-      const [creatorId] = clients;
-      io.to(creatorId).emit("create-offer");
-      console.log(`🎬 create-offer envoyé au créateur (${creatorId})`);
+      io.to(roomId).emit("create-offer", roomId);
     }
 
-    io.to(roomId).emit("room-users", { count: clients.length });
-    socket.to(roomId).emit("user-joined", { id: socket.id });
+    console.log(`👥 Room ${roomId}: ${clients.length} client(s)`);
   });
 
   socket.on("leave-room", (roomId) => {
     socket.leave(roomId);
+    socket.to(roomId).emit("user-left", { id: socket.id });
+
     const room = io.sockets.adapter.rooms.get(roomId);
     const clients = room ? Array.from(room) : [];
     io.to(roomId).emit("room-users", { count: clients.length });
+
     console.log(`🚪 ${socket.id} a quitté ${roomId}`);
   });
 
   /* =======================================================
-     📡 Signalisation WebRTC
+     📡 Signalisation WebRTC (diffusion room-wide)
   ======================================================= */
-  socket.on("offer", (data) => socket.to(data.roomId).emit("offer", data));
-  socket.on("answer", (data) => socket.to(data.roomId).emit("answer", data));
-  socket.on("ice-candidate", (data) =>
-    socket.to(data.roomId).emit("ice-candidate", data)
-  );
+  socket.on("offer", ({ roomId, offer }) => {
+    socket.to(roomId).emit("offer", { offer });
+    console.log(`📨 Offer relayée dans ${roomId}`);
+  });
+
+  socket.on("answer", ({ roomId, answer }) => {
+    socket.to(roomId).emit("answer", { answer });
+    console.log(`📨 Answer relayée dans ${roomId}`);
+  });
+
+  socket.on("ice-candidate", ({ roomId, candidate }) => {
+    socket.to(roomId).emit("ice-candidate", { candidate });
+    console.log(`🧊 ICE candidate relayée dans ${roomId}`);
+  });
 
   /* =======================================================
-     💬 Chat texte (nouvelle section)
+     💬 Chat texte
   ======================================================= */
   socket.on("chat-message", ({ roomId, msg }) => {
     if (!roomId || !msg) return;
@@ -69,8 +84,19 @@ io.on("connection", (socket) => {
   });
 
   /* =======================================================
-     ❌ Déconnexion
+     🔌 Déconnexion
   ======================================================= */
+  socket.on("disconnecting", () => {
+    for (const roomId of socket.rooms) {
+      if (roomId === socket.id) continue;
+      socket.to(roomId).emit("user-left", { id: socket.id });
+
+      const room = io.sockets.adapter.rooms.get(roomId);
+      const clients = room ? Array.from(room) : [];
+      io.to(roomId).emit("room-users", { count: clients.length });
+    }
+  });
+
   socket.on("disconnect", () => {
     console.log("🔴 Déconnecté :", socket.id);
   });
