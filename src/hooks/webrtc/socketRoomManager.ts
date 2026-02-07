@@ -1,22 +1,28 @@
+// src/hooks/webrtc/socketRoomManager.ts
 import { socket } from "@/lib/socket";
 
 /**
- * Initialise la logique de room Socket.IO :
+ * 🔌 Gestion complète de la room Socket.IO
+ * Compatible multi-participants (2 à 6+) + host unique
+ * =======================================================
  * - rejoint automatiquement la room
  * - reçoit le rôle (créateur/invité)
- * - suit le nombre d'utilisateurs
+ * - suit la liste et le nombre d’utilisateurs
+ * - détecte les arrivées/départs
+ * - réagit à la fermeture automatique de la salle
  * - gère la reconnexion automatique
- * Retourne une fonction de cleanup complète.
  */
 export const initSocketRoomHandlers = (
   roomId: string,
   setIsCreator: (v: boolean) => void,
   setUserCount: (n: number) => void,
   setOtherUserConnected: (b: boolean) => void,
-  log: (label: string, ...data: unknown[]) => void
+  log: (label: string, ...data: unknown[]) => void,
+  onRoomClosed?: () => void,
+  onParticipantsUpdate?: (participants: string[], count?: number) => void
 ): (() => void) => {
   /* =======================================================
-     🔁 Fonction pour rejoindre la room
+     🔁 Fonction utilitaire pour rejoindre la room
   ======================================================= */
   const joinRoom = () => {
     if (socket.connected) {
@@ -39,15 +45,43 @@ export const initSocketRoomHandlers = (
     log("⚠️ Socket déconnectée :", reason);
   };
 
-  const handleRoomRole = ({ isCreator }: { isCreator: boolean }) => {
+  const handleRoomRole = ({
+    isCreator,
+    hostId,
+  }: {
+    isCreator: boolean;
+    hostId: string;
+  }) => {
     setIsCreator(isCreator);
-    log("🎭 Rôle attribué :", isCreator ? "Créateur" : "Invité");
+    log("🎭 Rôle attribué :", isCreator ? "Créateur (host)" : "Invité", "→ hostId:", hostId);
   };
 
-  const handleRoomUsers = ({ count }: { count: number }) => {
+  const handleRoomUsers = ({
+    participants = [],
+    count,
+    hostId,
+  }: {
+    participants?: string[];
+    count: number;
+    hostId: string;
+  }) => {
     setUserCount(count);
     setOtherUserConnected(count > 1);
-    log("👥 room-users →", count);
+    onParticipantsUpdate?.(participants, count);
+    log(`👥 room-users (${count})`, { participants, hostId });
+  };
+
+  const handleUserJoined = ({ id }: { id: string }) => {
+    log(`🟢 user-joined → ${id}`);
+  };
+
+  const handleUserLeft = ({ id }: { id: string }) => {
+    log(`🔴 user-left → ${id}`);
+  };
+
+  const handleRoomClosed = ({ reason }: { reason: string }) => {
+    log("🏁 room-closed → fermeture automatique (host parti)", reason);
+    onRoomClosed?.();
   };
 
   /* =======================================================
@@ -57,6 +91,9 @@ export const initSocketRoomHandlers = (
   socket.on("disconnect", handleDisconnect);
   socket.on("room-role", handleRoomRole);
   socket.on("room-users", handleRoomUsers);
+  socket.on("user-joined", handleUserJoined);
+  socket.on("user-left", handleUserLeft);
+  socket.on("room-closed", handleRoomClosed);
 
   // Premier join dès le montage (si déjà connecté)
   if (socket.connected) {
@@ -69,7 +106,7 @@ export const initSocketRoomHandlers = (
   }
 
   /* =======================================================
-     🧹 Cleanup
+     🧹 Cleanup complet
   ======================================================= */
   return () => {
     log("🧹 Cleanup : leave-room + remove listeners");
@@ -78,5 +115,8 @@ export const initSocketRoomHandlers = (
     socket.off("disconnect", handleDisconnect);
     socket.off("room-role", handleRoomRole);
     socket.off("room-users", handleRoomUsers);
+    socket.off("user-joined", handleUserJoined);
+    socket.off("user-left", handleUserLeft);
+    socket.off("room-closed", handleRoomClosed);
   };
 };

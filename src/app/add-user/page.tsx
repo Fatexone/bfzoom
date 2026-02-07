@@ -8,9 +8,11 @@ import {
   query,
   where,
   getDocs,
+  serverTimestamp,
 } from "firebase/firestore";
 import { useRouter } from "next/navigation";
 import { auth } from "@/lib/firebaseConfig";
+import { getIdToken } from "firebase/auth";
 
 export default function AddUserPage() {
   const [email, setEmail] = useState("");
@@ -58,7 +60,27 @@ export default function AddUserPage() {
       const userSnap = await getDocs(userQuery);
 
       if (userSnap.empty) {
-        setError("❌ Aucun utilisateur trouvé avec cet email.");
+        const token = await getIdToken(currentUser, true);
+        const inviteRes = await fetch("/api/invitations/email", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ email }),
+        });
+        if (!inviteRes.ok) {
+          console.warn("Invitation email failed");
+        }
+        await addDoc(collection(db, "pending_invites"), {
+          email,
+          invitedBy: currentUser.uid,
+          invitedByEmail: currentUser.email || "",
+          createdAt: serverTimestamp(),
+        });
+        setError(
+          "Ce contact n’est pas encore inscrit. Invitation enregistrée."
+        );
         setLoading(false);
         return;
       }
@@ -103,7 +125,15 @@ export default function AddUserPage() {
         {loading ? "⏳ Ajout en cours..." : "Ajouter"}
       </button>
 
-      {error && <p className="mt-2 text-red-500">{error}</p>}
+      <div className="mt-3 flex items-center justify-between text-xs text-gray-500">
+        {error && <p className="text-red-500">{error}</p>}
+        <button
+          onClick={() => router.push("/chat")}
+          className="text-amber-400 hover:text-amber-200"
+        >
+          ← Retour au chat
+        </button>
+      </div>
     </div>
   );
 }

@@ -5,7 +5,6 @@ let io: SocketIOServer | null = null;
 
 // ✅ Étend le type global pour stocker l’instance Socket.IO
 declare global {
-  // eslint-disable-next-line no-var
   var _io: SocketIOServer | undefined;
 }
 

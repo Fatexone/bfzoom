@@ -1,0 +1,143 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 👤 Profils utilisateurs
+    match /users/{userId} {
+      allow read: if request.auth != null;
+      allow create, update, delete: if request.auth != null && request.auth.uid == userId;
+    }
+
+    match /users/{userId}/{subPath=**} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // 🔋 Wallet tokens + logs
+    match /users/{userId}/tokens {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow create: if request.auth != null &&
+        request.auth.uid == userId &&
+        request.resource.data.balance == 0 &&
+        request.resource.data.tier in ["free", "premium"];
+      allow update, delete: if false;
+    }
+
+    match /users/{userId}/usage_logs/{logId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if false;
+    }
+
+    // 👥 Liste de contacts
+    match /contacts/{userId}/list/{contactId} {
+      allow read, write, delete: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // 📬 Invitations reçues
+    match /invitations/{userId}/received/{invitationId} {
+      allow read, delete: if request.auth != null && request.auth.uid == userId;
+      allow create: if request.auth != null && request.auth.uid == request.resource.data.fromUid;
+    }
+
+    // 💬 Conversations existantes
+    match /conversations/{conversationId} {
+      allow get, read, update, delete: if request.auth != null &&
+        request.auth.uid in resource.data.participants;
+
+      allow create: if request.auth != null &&
+        request.auth.uid in request.resource.data.participants;
+    }
+
+    match /conversations/{conversationId}/messages/{messageId} {
+      allow read, create: if request.auth != null &&
+        request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participants;
+
+      allow update, delete: if request.auth != null &&
+        request.auth.uid == resource.data.senderId;
+    }
+
+    // 🧱 Groupes d’expression
+    match /groups/{groupId}/messages/{messageId} {
+      allow read, create: if request.auth != null;
+      allow delete: if request.auth != null &&
+        (
+          request.auth.token.role == "super_admin" ||
+          request.auth.uid == resource.data.userId
+        );
+    }
+
+    // 💬 Chats (nouveau module)
+    match /chats/{chatId} {
+      allow get, read, update, delete: if request.auth != null &&
+        (
+          !("participants" in resource.data) ||
+          (
+            resource.data.participants is list &&
+            request.auth.uid in resource.data.participants
+          )
+        );
+
+      allow create: if request.auth != null &&
+        (
+          !("participants" in request.resource.data) ||
+          (
+            request.resource.data.participants is list &&
+            request.auth.uid in request.resource.data.participants
+          )
+        );
+    }
+
+    match /chats/{chatId}/messages/{messageId} {
+      allow read, create: if request.auth != null &&
+        (
+          !exists(/databases/$(database)/documents/chats/$(chatId)) ||
+          !(
+            "participants" in get(/databases/$(database)/documents/chats/$(chatId)).data
+          ) ||
+          (
+            get(/databases/$(database)/documents/chats/$(chatId)).data.participants is list &&
+            request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants
+          )
+        );
+
+      allow update, delete: if request.auth != null &&
+        request.auth.uid == resource.data.senderId;
+    }
+
+    match /chats/{chatId}/reads/{userId} {
+      allow read: if request.auth != null &&
+        (
+          !exists(/databases/$(database)/documents/chats/$(chatId)) ||
+          !(
+            "participants" in get(/databases/$(database)/documents/chats/$(chatId)).data
+          ) ||
+          (
+            get(/databases/$(database)/documents/chats/$(chatId)).data.participants is list &&
+            request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants
+          )
+        );
+
+      allow create, update: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // 🎙️ Appels vidéo
+    match /calls/{chatId} {
+      allow read, write: if request.auth != null &&
+        (
+          !exists(/databases/$(database)/documents/chats/$(chatId)) ||
+          !(
+            "participants" in get(/databases/$(database)/documents/chats/$(chatId)).data
+          ) ||
+          (
+            get(/databases/$(database)/documents/chats/$(chatId)).data.participants is list &&
+            request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants
+          )
+        );
+    }
+
+    // 📩 Invitations en attente
+    match /pending_invites/{inviteId} {
+      allow create: if request.auth != null;
+      allow read, update, delete: if false;
+    }
+  }
+}

@@ -1,27 +1,41 @@
-import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+// app/layout.tsx
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
-
 export const metadata: Metadata = {
-  title: "Mon SaaS",
-  description: "Une plateforme sécurisée de chat et visioconférence.",
+  title: "BFZoom",
+  description: "Visioconference, coaching et collaboration en temps reel.",
+  applicationName: "BFZoom",
+  manifest: "/manifest.webmanifest",
+  appleWebApp: {
+    capable: true,
+    title: "BFZoom",
+    statusBarStyle: "black-translucent",
+  },
+  icons: {
+    icon: "/pwa-192.png",
+    apple: "/apple-touch-icon.png",
+  },
+};
+
+// ✅ Viewport optimisé iOS (évite les bandes, gère la dynamic viewport height)
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: "#0ea5e9",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="fr">
-      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
-        {children}
+    <html lang="fr" className="h-full">
+      <body
+        className="antialiased bg-neutral-950 text-white"
+      >
+        {/* ✅ Wrapper plein écran avec scroll vertical autorisé */}
+        <div className="min-h-dvh w-full overflow-x-hidden">
+          {children}
+        </div>
       </body>
     </html>
   );

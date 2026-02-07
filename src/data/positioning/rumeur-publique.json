@@ -1,0 +1,33 @@
+{
+  "company": {
+    "name": "Rumeur Publique",
+    "tagline": "Storyproof for modern leaders",
+    "positioning": {
+      "core": "Nous aidons les dirigeants à transformer la rumeur en opportunité par la narration stratégique.",
+      "value": [
+        "Créativité guidée par les données",
+        "Empathie client 360°",
+        "Impact mesurable"
+      ]
+    }
+  },
+  "expertise": [
+    "Stratégie de communication de crise",
+    "Narration corporate",
+    "Relations médias internationales"
+  ],
+  "corporate_comms": {
+    "crisis_method": {
+      "before": [
+        "Écouter toutes les voix",
+        "Cartographier les parties prenantes",
+        "Préparer des messages clairs"
+      ],
+      "during": [
+        "Coordonner la chaîne de décision",
+        "Publier des faits vérifiés",
+        "Partager les progrès en transparence"
+      ]
+    }
+  }
+}

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <path d="M32 6s-10 8-10 18c0 8 6 10 6 18 0 6 8 10 14 4 0 0 4-4 4-10 0-6 4-6 4-14 0-6-6-16-18-16z" fill="url(#fireGradient)"/>
+  <defs>
+    <linearGradient id="fireGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#f87171" />
+      <stop offset="70%" stop-color="#fb923c" />
+      <stop offset="100%" stop-color="#fbbf24" />
+    </linearGradient>
+  </defs>
+</svg>

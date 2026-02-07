@@ -1,0 +1,75 @@
+ ssh ubuntu@vps-ac6b333d.vps.ovh.net 
+
+oui
+ acces serveur : ssh ubuntu@vps-ac6b333d.vps.ovh.net
+ ubuntu@vps-ac6b333d:~/bfzoom-realtime$ 
+
+test 
+
+tail -n 50 /home/ubuntu/bfzoom-realtime/realtime.log
+
+
+
+ubuntu@vps-ac6b333d:~/bfzoom$ dig +short bfzoom.frtu deconseilles
+dig +short www.bfzoom.fr
+
+npm run build -- --webpack
+
+
+
+
+
+
+
+Règle générale
+
+Chat textuel classique : entièrement gratuit et illimité.
+Actions IA (traduction, correction, résumé, training guidé, résumé & actions) sont les seuls usages surveillés : ils consomment soit des quotas gratuits, soit des tokens payants, soit sont totalement débloqués en Premium.
+Free tier (par défaut)
+
+Limité à 3 actions IA/jour (compte pour traductions, résumés, amélioration, training guidé).
+La visioconférence reste gratuite (pas de token).
+Affiche clairement sur le dashboard + la carte “Profil actif” :
+“Plan gratuit — 3 actions IA/jour / 2 trainings guidés par mois / autre mention”.
+Stats et CTA “Recharger des tokens” + “Passer Premium”.
+À chaque action IA, l’UI vérifie le compteur (via Firestore). Si la limite est atteinte, on propose soit :
+d’acheter un pack de tokens,
+soit de passer Premium.
+Tokens payants (packs de 5 €)
+
+Chaque pack crédité sur users/{uid}/tokens.
+Chaque action IA (traduction, résumé, training) décrémente ce compteur : ex.
+traduction/correction = 1 token
+résumé & actions = 2 tokens
+training guidé = 3 tokens
+Les tokens peuvent être achetés via Stripe (nouveau prix “Tokens 5€”).
+UI : affiche “Tokens restants : X” dans le dashboard et dans le chat, avec CTA “Recharger”.
+Les paiements peuvent être gérés par une route dédiée (paiement one-shot) qui crédite Firestore via webhook.
+Premium (subscription Stripe)
+
+Supprime les quotas et offre :
+chat IA + training + traductions illimités
+bonus tokens mensuels (ex. +5 tokens)
+badge “Premium” dans le chat/dashboard
+Lorsqu’un utilisateur est premium (champ Firestore plan/premium), on ignore le wallet et on déverrouille directement les actions IA.
+Monitoring & feedback
+
+Stocke les consommations IA dans Firestore (users/{uid}/usage ou usage_logs) pour suivre les limites.
+Affiche un message clair (“Tu as utilisé 2/3 actions IA gratuites aujourd’hui”, “Tokens restants: 4”) pour encourager l’achat.
+Ajoute un “Banner” ou Toast quand on atteint la limite gratuite.
+Sécurité & règles
+
+Firestore : règles sur users/{uid}/tokens, chats/{id}/actions pour que seul le backend (via Cloud Functions ou API) puisse ajuster les tokens.
+Token purchase : une API (/api/stripe/tokens) crée une session Checkout pour le prix tokens. La webhook (/api/stripe/webhook) crédite le champ Firestore (e.g. tokens: FieldValue.increment(packsize) plus log).
+
+
+
+
+STRIPE_WEBHOOK_SECRET=***REDACTED***
+
+STRIPE_SECRET_KEY=***REDACTED***
+
+guide moi pas à pas etape par etape , demande moi d'exectuter des choses via mon terminal et attend mon retour pour les commandes d'apres 
+
+
+ubuntu@vps-ac6b333d:~/bfzoom-realtime$ 

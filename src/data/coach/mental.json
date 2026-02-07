@@ -1,0 +1,25 @@
+{
+  "id": "mental",
+  "title": "Preparation mentale",
+  "description": "Focus, confiance, gestion du stress.",
+  "items": [
+    {
+      "id": "mental-breath",
+      "title": "Respiration",
+      "prompt": "Guide une respiration 4-4-6 pour calmer et recentrer.",
+      "local": "Respiration 4-4-6: inspire 4s, bloque 4s, expire 6s. Repete 6 cycles, relache les epaules."
+    },
+    {
+      "id": "mental-visual",
+      "title": "Visualisation",
+      "prompt": "Fais une visualisation courte de reussite avant un effort intense.",
+      "local": "Ferme les yeux, vois-toi reussir l'effort avec calme et precision. Sens la confiance monter, garde la respiration lente."
+    },
+    {
+      "id": "mental-focus",
+      "title": "Focus",
+      "prompt": "Donne 3 conseils concrets pour rester concentre pendant l'effort.",
+      "local": "Focus: 1) une seule consigne a la fois. 2) respiration rythmique. 3) regard fixe sur un point et relance mentale courte."
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 /**
  * connectionManager.ts
  * Gestion bas-niveau du cycle de vie RTCPeerConnection
+ * Version optimisée — compatible iOS / macOS / Windows
  */
 
 export const createPeerConnection = (
@@ -10,7 +11,9 @@ export const createPeerConnection = (
 ): RTCPeerConnection => {
   const pc = new RTCPeerConnection(config);
 
-  // === Logs d’état internes (utile pour debug WebRTC) ===
+  /* =======================================================
+     🧠 Log des états internes
+  ======================================================= */
   pc.onconnectionstatechange = () =>
     log("🔗 connectionState:", pc.connectionState);
   pc.onsignalingstatechange = () =>
@@ -20,7 +23,9 @@ export const createPeerConnection = (
   pc.onicegatheringstatechange = () =>
     log("❄️ iceGatheringState:", pc.iceGatheringState);
 
-  // === Envoi des ICE locales ===
+  /* =======================================================
+     📤 Gestion des ICE Candidates
+  ======================================================= */
   pc.onicecandidate = (event) => {
     if (event.candidate) {
       log("📤 ICE locale émise:", event.candidate.candidate);
@@ -29,32 +34,48 @@ export const createPeerConnection = (
     }
   };
 
-  // === Gestion des flux distants robustes ===
-  const remoteMediaStream = new MediaStream();
+  /* =======================================================
+     🎥 Gestion robuste du flux distant
+     - Compatible iPhone Safari
+     - Garde un flux unique que l’on met à jour
+  ======================================================= */
+  const remoteStream = new MediaStream();
 
   pc.ontrack = (event: RTCTrackEvent) => {
-    log("📡 ontrack déclenché:", event.track.kind);
+    log("📡 ontrack reçu:", event.track.kind);
 
-    // Ajout du track dans le flux distant reconstruit
-    remoteMediaStream.addTrack(event.track);
+    // Ajoute chaque track dans le flux distant unique
+    event.streams[0]?.getTracks().forEach((track) => {
+      if (!remoteStream.getTracks().find((t) => t.id === track.id)) {
+        remoteStream.addTrack(track);
+        log("🎬 Track ajoutée au flux distant:", track.kind);
+      }
+    });
 
-    // Si event.streams est fourni, on l’utilise pour cohérence
-    const [eventStream] = event.streams;
-    const finalStream = eventStream ?? remoteMediaStream;
+    // ✅ Envoie toujours le même MediaStream
+    onRemoteStream(remoteStream);
+  };
 
-    onRemoteStream(finalStream);
-    log(
-      "🎥 Flux distant mis à jour — tracks:",
-      finalStream.getTracks().map((t) => t.kind)
-    );
+  /* =======================================================
+     🧰 Sécurité : forcer la reconstruction du flux distant
+     quand une ICE se reconnecte (utile sur iOS/mac)
+  ======================================================= */
+  pc.oniceconnectionstatechange = () => {
+    if (pc.iceConnectionState === "connected") {
+      log("✅ ICE connectée — flux distant stable");
+      onRemoteStream(remoteStream);
+    }
+    if (pc.iceConnectionState === "disconnected") {
+      log("⚠️ ICE déconnectée — tentative de reconnexion");
+    }
   };
 
   return pc;
 };
 
-/**
- * Ferme proprement une RTCPeerConnection + arrête les pistes locales.
- */
+/* =======================================================
+   🧹 Nettoyage complet
+======================================================= */
 export const cleanupPeerConnection = (
   pc: RTCPeerConnection | null,
   log: (label: string, ...data: unknown[]) => void

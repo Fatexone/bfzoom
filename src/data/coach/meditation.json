@@ -1,0 +1,25 @@
+{
+  "id": "meditation",
+  "title": "Meditation & respiration",
+  "description": "Recentre, calme, focus.",
+  "items": [
+    {
+      "id": "meditation-2min",
+      "title": "Meditation 2 min",
+      "prompt": "Guide une meditation simple de 2 minutes, ton calme et positif.",
+      "local": "Meditation 2 min: assis stable, ferme les yeux, observe la respiration. Compte 10 cycles, relache le visage."
+    },
+    {
+      "id": "meditation-breath",
+      "title": "Respiration 4-4-6",
+      "prompt": "Guide une respiration 4-4-6 avec instructions claires.",
+      "local": "Respiration 4-4-6: inspire 4s, bloque 4s, expire 6s. Repete 5 fois, detends les epaules."
+    },
+    {
+      "id": "meditation-reset",
+      "title": "Reset mental",
+      "prompt": "Donne une courte routine de reset mental avant un effort.",
+      "local": "Reset mental: 3 respirations profondes, ancrage des pieds, intention claire, sourire bref."
+    }
+  ]
+}

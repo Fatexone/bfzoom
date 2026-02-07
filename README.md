@@ -34,3 +34,9 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+## Traduction multilingue
+
+- Le panneau de visioconférence permet de choisir une langue source (Français, Persan, Arabe, etc.) et une langue cible (English, Deutsch, Italiano, Español, Русский, Latin, العربية, עברית, فارسی, 日本語 et désormais **Français**).
+- L'hôte peut combiner reconnaissance vocale et synthèse OpenAI : Realtime (flux audio), Traduction vocale (texte + synthèse) ou Lecture locale (écoute seulement sur sa machine).
+- Chaque invité peut aussi sélectionner sa langue de réception pour les sous-titres et la synthèse vocale.

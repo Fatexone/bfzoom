@@ -1,0 +1,25 @@
+{
+  "id": "business",
+  "title": "Business & communication",
+  "description": "Pitch, leadership, communication claire.",
+  "items": [
+    {
+      "id": "business-pitch",
+      "title": "Pitch 30s",
+      "prompt": "Aide a formuler un pitch clair en 30 secondes pour un produit SaaS.",
+      "local": "Pitch 30s: probleme clair, solution simple, benefice mesurable, preuve, appel a l'action. Structure en 4 phrases courtes."
+    },
+    {
+      "id": "business-feedback",
+      "title": "Feedback",
+      "prompt": "Donne un modele simple pour faire un feedback constructif en reunion.",
+      "local": "Modele feedback: 1) fait observe, 2) impact, 3) attente. Ton neutre, une action precise."
+    },
+    {
+      "id": "business-qna",
+      "title": "Q&A difficile",
+      "prompt": "Propose 3 reponses courtes pour gerer une question difficile en public.",
+      "local": "Q&A: 1) \"Bonne question, voici l'essentiel.\" 2) \"Je reviens vers vous avec les details.\" 3) \"Le point cle est X, le reste suit.\""
+    }
+  ]
+}

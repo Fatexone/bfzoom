@@ -1,10 +1,10 @@
 // src/lib/socket.js
 import { io } from "socket.io-client";
 
-// 🌍 Configuration dynamique depuis .env
-const SOCKET_URL =
+// 🌍 Configuration dynamique depuis .env (ou fallback public)
+const DEFAULT_SOCKET_URL =
   process.env.NEXT_PUBLIC_SOCKET_URL?.replace(/\/$/, "") ||
-  "https://vps-ac6b333d.vps.ovh.net"; // HTTPS par défaut
+  "https://socket.bfzoom.fr"; // fallback public
 const SOCKET_PATH = process.env.NEXT_PUBLIC_SOCKET_PATH || "/socket.io";
 
 // 🧩 Instance unique (évite les doublons HMR en dev)
@@ -12,24 +12,25 @@ let socketInstance;
 
 if (typeof window !== "undefined") {
   if (!window.__bfzoom_socket__) {
-    const socket = io(SOCKET_URL, {
+    // Utilise l’URL fournie (env) ou le fallback public. Pour un socket local, définis NEXT_PUBLIC_SOCKET_URL.
+    const socketUrl = DEFAULT_SOCKET_URL;
+
+    const socket = io(socketUrl, {
       path: SOCKET_PATH,
-      transports: ["websocket"], // ✅ WebSocket pur, pas polling
-      secure: true, // ✅ obligatoire sur HTTPS / Vercel
+      // Démarre en polling (tolérant aux proxys) puis upgrade WS si possible.
+      transports: ["polling", "websocket"],
+      secure: socketUrl.startsWith("https://"),
       withCredentials: false,
       reconnection: true,
       reconnectionAttempts: 10,
       reconnectionDelay: 1000,
       timeout: 20000,
       autoConnect: true,
-      extraHeaders: {
-        Origin: "https://bfzoom.vercel.app", // aide CORS côté serveur
-      },
     });
 
     // === Logs diagnostics ===
     socket.on("connect", () => {
-      console.log("✅ [BFZoom] Socket connectée :", SOCKET_URL);
+      console.log("✅ [BFZoom] Socket connectée :", socketUrl);
     });
 
     socket.on("disconnect", (reason) => {
@@ -37,7 +38,10 @@ if (typeof window !== "undefined") {
     });
 
     socket.on("connect_error", (err) => {
-      console.error("❌ [BFZoom] Erreur Socket.IO :", err.message);
+      console.error("❌ [BFZoom] Erreur Socket.IO :", err?.message, {
+        description: err?.description,
+        transport: err?.transport,
+      });
     });
 
     socket.on("reconnect_attempt", (n) => {

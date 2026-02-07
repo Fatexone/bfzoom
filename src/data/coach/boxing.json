@@ -1,0 +1,55 @@
+{
+  "id": "boxing",
+  "title": "Boxe",
+  "description": "Combos, rythme, respiration et intensite.",
+  "items": [
+    {
+      "id": "boxing-warmup",
+      "title": "Echauffement rapide",
+      "prompt": "Propose un echauffement boxing de 4 minutes, cadence progressive, sans materiel.",
+      "local": "Echauffement 4 min: 60s corde imaginaire, 60s shadowboxing lent, 60s pas chasses + jab, 60s respiration + garde haute. Cadence progressive, sans materiel."
+    },
+    {
+      "id": "boxing-alphaboxe-overview",
+      "title": "Alphaboxe - logique",
+      "prompt": "Explique la logique Alphaboxe: rendement de precision, perception, reaction, technique, endurance et emotion stabilisee.",
+      "local": "Logique Alphaboxe: viser la precision utile. Perception -> reaction -> technique -> endurance, stabilisees par l'emotion. Objectif: etre net, economique et lucide sous effort."
+    },
+    {
+      "id": "boxing-alphaboxe-7x7",
+      "title": "Abaque 7/7",
+      "prompt": "Detaille l'abaque 7/7: 7 directions de buste et 7 combinaisons de bras (1 a 3 coups). Combinaisons: G, D, GG, DD, GD, DG, GGG, DDD, GGD, DDG, GDD, DGG, GDG, DGD.",
+      "local": "Abaque 7/7: 7 directions de buste et 7 combinaisons de bras (1 a 3 coups). Combos: G, D, GG, DD, GD, DG, GGG, DDD, GGD, DDG, GDD, DGG, GDG, DGD. Enchaine proprement, respiration stable."
+    },
+    {
+      "id": "boxing-alphaboxe-movements",
+      "title": "Deplacements buste",
+      "prompt": "Liste les mouvements: desaxement gauche/droite, rotation gauche/droite, pivot gauche/droite, retrait du buste. Donne un drill.",
+      "local": "Mouvements: desaxement G/D, rotation G/D, pivot G/D, retrait du buste. Drill: 30s chaque mouvement, puis 1 combo G ou D apres chaque mouvement."
+    },
+    {
+      "id": "boxing-alphaboxe-association",
+      "title": "Association / dissociation",
+      "prompt": "Explique l'association et la dissociation bras/appuis pour creer l'angle et toucher sans s'exposer.",
+      "local": "Association: bras + appuis dans le meme timing pour puissance. Dissociation: decalage appuis/bras pour l'angle, toucher sans s'exposer. Cherche l'impact minimal."
+    },
+    {
+      "id": "boxing-alphaboxe-effort",
+      "title": "Gestion effort",
+      "prompt": "Donne des consignes pour dissocier effort et mouvement, repousser l'inconfort et garder la precision.",
+      "local": "Consignes: respiration calme, cadence stable, relachements brefs entre coups. Effort = mental, mouvement = technique propre. Garde la precision meme en fatigue."
+    },
+    {
+      "id": "boxing-combo",
+      "title": "Combo technique",
+      "prompt": "Donne un combo technique niveau debutant avec conseils de garde et respiration.",
+      "local": "Combo debutant: Jab (G) - Cross (D) - Jab (G). Garde haute, coudes serres. Inspire nez, expire sur chaque coup."
+    },
+    {
+      "id": "boxing-round",
+      "title": "Round intensite",
+      "prompt": "Cree un round de 2 minutes avec intervalles 20s effort / 10s recup.",
+      "local": "Round 2 min: 20s combos rapides, 10s recup active (pas + garde). Repeter 4 fois. Reste precis, souffle controle."
+    }
+  ]
+}

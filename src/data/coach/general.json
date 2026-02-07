@@ -1,0 +1,25 @@
+{
+  "id": "general",
+  "title": "Culture generale",
+  "description": "Questions rapides pendant les pauses.",
+  "items": [
+    {
+      "id": "general-quiz",
+      "title": "Quiz rapide",
+      "prompt": "Pose 3 questions de culture generale simples avec reponses a la fin.",
+      "local": "Quiz rapide: 1) Capitale du Canada ? 2) Symbole chimique de l'or ? 3) Qui a peint la Joconde ? Reponses: Ottawa, Au, Leonard de Vinci."
+    },
+    {
+      "id": "general-fact",
+      "title": "Fait surprenant",
+      "prompt": "Donne un fait surprenant court et motivant.",
+      "local": "Fait surprenant: le coeur bat environ 100 000 fois par jour. Ton corps est deja un athlete d'endurance."
+    },
+    {
+      "id": "general-icebreaker",
+      "title": "Ice-breaker",
+      "prompt": "Propose un ice-breaker rapide de 60 secondes pour relancer l'energie.",
+      "local": "Ice-breaker 60s: chacun dit un mot qui resume son energie + un objectif pour les 5 prochaines minutes."
+    }
+  ]
+}

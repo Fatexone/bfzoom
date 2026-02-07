@@ -1,7 +1,7 @@
 // src/lib/firebaseConfig.ts
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
-import { getFirestore } from "firebase/firestore";
+import { getFirestore, initializeFirestore } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 
 const firebaseConfig = {
@@ -18,6 +18,24 @@ const firebaseConfig = {
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 
 export const auth = getAuth(app);
-export const db = getFirestore(app);
+let firestoreInstance;
+try {
+  firestoreInstance = initializeFirestore(app, {
+    experimentalAutoDetectLongPolling: true,
+    experimentalForceLongPolling: true,
+  });
+} catch {
+  firestoreInstance = getFirestore(app);
+}
+export const db = firestoreInstance;
 export const storage = getStorage(app);
 export default app;
+
+if (typeof window !== "undefined") {
+  interface BfzoomWindow extends Window {
+    __bfzoomAuth?: typeof auth;
+    __bfzoomApp?: typeof app;
+  }
+  (window as BfzoomWindow).__bfzoomAuth = auth;
+  (window as BfzoomWindow).__bfzoomApp = app;
+}

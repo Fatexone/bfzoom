@@ -1,0 +1,19 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /chats/{chatId}/{filePath=**} {
+      allow read, write: if isChatParticipant(chatId);
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
+
+function isChatParticipant(chatId) {
+  return request.auth != null &&
+    firestore.get(/databases/(default)/documents/chats/$(chatId))
+      .data.participants
+      .hasAny([request.auth.uid]);
+}
