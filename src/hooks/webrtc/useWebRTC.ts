@@ -1,9 +1,22 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { socket } from "@/lib/socket";
 import { initSocketRoomHandlers } from "./socketRoomManager";
 import { createPeerConnection, cleanupPeerConnection } from "./connectionManager";
+
+const MAX_RECONNECTS = 3;
+const RECONNECT_DELAY_MS = 3500;
+const LOW_BANDWIDTH_CONSTRAINTS: MediaTrackConstraints = {
+  width: { ideal: 640 },
+  height: { ideal: 360 },
+  frameRate: { max: 15 },
+};
+const DEFAULT_VIDEO_CONSTRAINTS: MediaTrackConstraints = {
+  width: { ideal: 1280 },
+  height: { ideal: 720 },
+  frameRate: { ideal: 30 },
+};
 
 export function useWebRTC(roomId: string, onClose: () => void) {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
@@ -12,8 +25,26 @@ export function useWebRTC(roomId: string, onClose: () => void) {
   const [userCount, setUserCount] = useState(1);
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [isRequestingMedia, setIsRequestingMedia] = useState(false);
+  const [connectionWarning, setConnectionWarning] = useState<string | null>(null);
+  const [offline, setOffline] = useState(false);
+  const [lowBandwidthMode, setLowBandwidthMode] = useState(false);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+
+  const stunUrls = useMemo(
+    () =>
+      process.env.NEXT_PUBLIC_STUN_URLS?.split(",").map((u) => u.trim()).filter(Boolean) || [
+        "stun:stun.l.google.com:19302",
+      ],
+    []
+  );
+  const turnUrls = useMemo(
+    () =>
+      process.env.NEXT_PUBLIC_TURN_URLS?.split(",").map((u) => u.trim()).filter(Boolean) || [],
+    []
+  );
+  const turnUsername = process.env.NEXT_PUBLIC_TURN_USERNAME;
+  const turnCredential = process.env.NEXT_PUBLIC_TURN_CREDENTIAL;
 
   // Références stables
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -29,12 +60,36 @@ export function useWebRTC(roomId: string, onClose: () => void) {
       }
     >
   >({});
+  const reconnectionAttemptsRef = useRef<Record<string, number>>({});
   const isMountedRef = useRef(true);
+
+  const toggleLowBandwidth = useCallback(() => {
+    setLowBandwidthMode((prev) => !prev);
+  }, []);
 
   /* ✅ log mémoïsé (stable, pas de re-déclaration à chaque render) */
   const log = useCallback((label: string, ...data: unknown[]) => {
     console.log(`%c[WebRTC] ${label}`, "color:#00ffff;font-weight:600", ...data);
   }, []);
+
+  const applyBandwidthConstraints = useCallback(
+    async (low: boolean) => {
+      const stream = localStreamRef.current;
+      if (!stream) return;
+      const constraints = low ? LOW_BANDWIDTH_CONSTRAINTS : DEFAULT_VIDEO_CONSTRAINTS;
+
+      for (const track of stream.getVideoTracks()) {
+        if (!track || typeof track.applyConstraints !== "function") continue;
+        try {
+          await track.applyConstraints(constraints);
+          log(`🎚️ Appliqué ${low ? "bas débit" : "qualité standard"} sur ${track.kind}`);
+        } catch (err) {
+          log("⚠️ applyConstraints échoué :", err);
+        }
+      }
+    },
+    [log]
+  );
 
   const replaceLocalStream = useCallback(
     (next: MediaStream) => {
@@ -97,6 +152,37 @@ export function useWebRTC(roomId: string, onClose: () => void) {
     }
   }, [log, replaceLocalStream]);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const updateOnlineStatus = () => setOffline(!navigator.onLine);
+    window.addEventListener("online", updateOnlineStatus);
+    window.addEventListener("offline", updateOnlineStatus);
+    updateOnlineStatus();
+    return () => {
+      window.removeEventListener("online", updateOnlineStatus);
+      window.removeEventListener("offline", updateOnlineStatus);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (offline) {
+      setConnectionWarning("Connexion Internet interrompue — la visioconférence perdra le signal.");
+      return;
+    }
+    if (turnUrls.length > 0 && (!turnUsername || !turnCredential)) {
+      setConnectionWarning(
+        "TURN configuré sans identifiants. Les connexions derrière un NAT strict risquent d’échouer."
+      );
+    } else {
+      setConnectionWarning(null);
+    }
+  }, [offline, turnUrls.length, turnUsername, turnCredential]);
+
+  useEffect(() => {
+    if (!localStream) return;
+    void applyBandwidthConstraints(lowBandwidthMode);
+  }, [localStream, lowBandwidthMode, applyBandwidthConstraints]);
+
   /* ✅ leaveRoom en haut, mémoïsé : réutilisable partout (handlers/cleanup) */
   const leaveRoom = useCallback(() => {
     log("🚪 leaveRoom() manuel / global");
@@ -138,18 +224,8 @@ export function useWebRTC(roomId: string, onClose: () => void) {
   useEffect(() => {
     isMountedRef.current = true;
 
-    const stunUrls =
-      process.env.NEXT_PUBLIC_STUN_URLS?.split(",").map((u) => u.trim()).filter(Boolean) ||
-      ["stun:stun.l.google.com:19302"];
-    const turnUrls = process.env.NEXT_PUBLIC_TURN_URLS
-      ?.split(",")
-      .map((u) => u.trim())
-      .filter(Boolean);
-    const turnUsername = process.env.NEXT_PUBLIC_TURN_USERNAME;
-    const turnCredential = process.env.NEXT_PUBLIC_TURN_CREDENTIAL;
-
     const iceServers: RTCIceServer[] = [{ urls: stunUrls }];
-    if (turnUrls?.length && turnUsername && turnCredential) {
+    if (turnUrls.length && turnUsername && turnCredential) {
       iceServers.push({
         urls: turnUrls,
         username: turnUsername,
@@ -200,6 +276,39 @@ export function useWebRTC(roomId: string, onClose: () => void) {
         },
         log
       );
+
+      const monitorIceState = () => {
+        const state = pc.iceConnectionState;
+        if (state === "connected" || state === "completed") {
+          reconnectionAttemptsRef.current[remoteSocketId] = 0;
+          return;
+        }
+        if (state === "failed" || state === "disconnected") {
+          const attempts = reconnectionAttemptsRef.current[remoteSocketId] || 0;
+          if (attempts >= MAX_RECONNECTS) {
+            log("⚠️ Trop de reconnexions pour", remoteSocketId);
+            return;
+          }
+          reconnectionAttemptsRef.current[remoteSocketId] = attempts + 1;
+          log("🔄 Tentative de reconnexion", remoteSocketId, "tentative", attempts + 1);
+          cleanupPeerConnection(pc, log);
+          delete peerConnectionsRef.current[remoteSocketId];
+          delete pcStateRef.current[remoteSocketId];
+          pendingIceRef.current[remoteSocketId] = [];
+          setRemoteStreams((prev) => {
+            const updated = { ...prev };
+            delete updated[remoteSocketId];
+            return updated;
+          });
+          setTimeout(() => {
+            if (!isMountedRef.current) return;
+            if (peerConnectionsRef.current[remoteSocketId]) return;
+            log("🚧 Réinitialisation RTCPeerConnection vers", remoteSocketId);
+            createConnectionTo(remoteSocketId);
+          }, RECONNECT_DELAY_MS);
+        }
+      };
+      pc.addEventListener("iceconnectionstatechange", monitorIceState);
 
       // Stabilise l'ordre des m-lines (audio puis video) même si le flux local arrive plus tard.
       if (pc.getTransceivers().length === 0) {
@@ -458,5 +567,8 @@ export function useWebRTC(roomId: string, onClose: () => void) {
     mediaError,
     isRequestingMedia,
     requestMedia: acquireLocalStream,
+    lowBandwidthMode,
+    toggleLowBandwidth,
+    connectionWarning,
   };
 }

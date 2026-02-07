@@ -10,6 +10,7 @@ import {
   Maximize,
   PhoneOff,
   Sparkles,
+  WifiOff,
 } from "lucide-react";
 
 interface VideoControlsProps {
@@ -21,6 +22,8 @@ interface VideoControlsProps {
   onLeave: () => void;
   onToggleBlur?: () => void;
   isBlurOn?: boolean;
+  lowBandwidthMode: boolean;
+  onToggleLowBandwidth: () => void;
 }
 
 /* =======================================================
@@ -36,6 +39,8 @@ export default function VideoControls({
   onLeave,
   onToggleBlur,
   isBlurOn = false,
+  lowBandwidthMode = false,
+  onToggleLowBandwidth,
 }: VideoControlsProps) {
   const constraintsRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -160,6 +165,12 @@ export default function VideoControls({
       icon: PhoneOff,
       action: onLeave,
       color: "bg-red-700 hover:bg-red-800",
+    },
+    {
+      label: lowBandwidthMode ? "Bas débit actif" : "Activer bas débit",
+      icon: WifiOff,
+      action: onToggleLowBandwidth,
+      color: lowBandwidthMode ? "bg-amber-600 hover:bg-amber-700" : "bg-emerald-600 hover:bg-emerald-700",
     },
   ];
 

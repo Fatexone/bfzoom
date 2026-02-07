@@ -9,6 +9,8 @@ export interface VideoLayoutProps {
   isMuted: boolean;
   cameraOn: boolean;
   blurOn?: boolean;
+  lowBandwidthMode: boolean;
+  onToggleLowBandwidth: () => void;
 }
 
 const LOCAL_STREAM_ID = "local-self";
@@ -19,6 +21,8 @@ export default function VideoLayout({
   isMuted,
   cameraOn,
   blurOn = false,
+  lowBandwidthMode,
+  onToggleLowBandwidth,
 }: VideoLayoutProps) {
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteRefs = useRef<Record<string, HTMLVideoElement | null>>({});
@@ -179,6 +183,17 @@ export default function VideoLayout({
       `}
       style={gridStyle}
     >
+      <div className="pointer-events-none absolute inset-0 flex justify-end p-3 z-20">
+        <button
+          onClick={onToggleLowBandwidth}
+          className={`
+            pointer-events-auto inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition
+            ${lowBandwidthMode ? "border-amber-500 bg-amber-50 text-amber-600" : "border-slate-300 bg-white text-slate-700"}
+          `}
+        >
+          {lowBandwidthMode ? "Mode bas débit actif" : "Activer bas débit"}
+        </button>
+      </div>
       {layoutStreams.map((stream) => {
         const videoReady = stream.hasVideo && Boolean(stream.stream);
         return (

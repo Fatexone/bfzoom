@@ -52,7 +52,7 @@ import {
   isTrackReferencePinned,
 } from "@livekit/components-core";
 import type { LocalParticipant, Participant } from "livekit-client";
-import { LocalAudioTrack, LocalVideoTrack, Room, RoomEvent, Track } from "livekit-client";
+import { LocalAudioTrack, Room, RoomEvent, Track } from "livekit-client";
 import {
   Camera,
   CameraOff,
@@ -756,6 +756,11 @@ type AnnotationLayerProps = {
   onAnnotationClear?: () => void;
   onAnnotationText?: (entry: AnnotationText) => void;
   isHost: boolean;
+  drawerOpen: boolean;
+  aiBackgroundUrl: string | null;
+  onAiImageGenerated: (url: string) => void;
+  onClearAiBackground: () => void;
+  onSaveAiBackground: (prompt: string, image: string) => void;
 };
 
 type ControlTabId = "feutre" | "stickers";
@@ -848,7 +853,8 @@ const STICKER_LIBRARY: StickerLibraryItem[] = [
   },
 ];
 
-const AnnotationLayer = ({
+const AnnotationLayer = (props: AnnotationLayerProps) => {
+  const {
     overlayRef,
     drawingEnabled,
     setDrawingEnabled,
@@ -866,7 +872,11 @@ const AnnotationLayer = ({
     onAnnotationClear,
     onAnnotationText,
     isHost,
-  }: AnnotationLayerProps) => {
+    aiBackgroundUrl,
+    onAiImageGenerated,
+    onClearAiBackground,
+    onSaveAiBackground,
+  } = props;
   const [mode, setMode] = useState<"draw" | "text">("draw");
   const [textDraft, setTextDraft] = useState("");
   const [textAnchor, setTextAnchor] = useState<{
@@ -876,12 +886,30 @@ const AnnotationLayer = ({
     top: number;
   } | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const [aiPrompt, setAiPrompt] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState("");
+  const aiControllerRef = useRef<AbortController | null>(null);
+  const [latestAiImage, setLatestAiImage] = useState<string | null>(null);
+  const [latestAiPrompt, setLatestAiPrompt] = useState("");
 
+  const prevModeRef = useRef<"draw" | "text">(mode);
   useEffect(() => {
     if (mode === "text") {
       setDrawingEnabled(false);
+    } else if (prevModeRef.current === "text") {
+      setDrawingEnabled(true);
+      setTextAnchor(null);
     }
+    prevModeRef.current = mode;
   }, [mode, setDrawingEnabled]);
+
+  useEffect(() => {
+    return () => {
+      aiControllerRef.current?.abort();
+      aiControllerRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     if (textAnchor && inputRef.current) {
@@ -914,15 +942,57 @@ const AnnotationLayer = ({
   };
 
   const handleModeToggle = () => {
-    setMode((prev) => {
-      const next = prev === "draw" ? "text" : "draw";
-      if (next === "draw") {
-        setDrawingEnabled(true);
-        setTextAnchor(null);
-      }
-      return next;
-    });
+    setMode((prev) => (prev === "draw" ? "text" : "draw"));
   };
+
+  const handleGenerateAi = useCallback(async () => {
+    const trimmed = aiPrompt.trim();
+    if (!trimmed) {
+      setAiError("Décris l’ambiance que tu veux créer.");
+      return;
+    }
+    aiControllerRef.current?.abort();
+    const controller = new AbortController();
+    aiControllerRef.current = controller;
+    setAiError("");
+    setAiLoading(true);
+    try {
+      const response = await fetch("/api/dalle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: trimmed }),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload?.error || "Impossible de générer l’image.");
+      }
+      const data = (await response.json()) as { image?: string };
+      if (!data.image) {
+        throw new Error("Aucune image reçue.");
+      }
+      setLatestAiImage(data.image);
+      setLatestAiPrompt(trimmed);
+      onAiImageGenerated(data.image);
+    } catch (err) {
+      setLatestAiImage(null);
+      setLatestAiPrompt("");
+      if (controller.signal.aborted) return;
+      console.error("DALL·E :", err);
+      setAiError(err instanceof Error ? err.message : "Erreur de génération.");
+    } finally {
+      if (aiControllerRef.current === controller) {
+        aiControllerRef.current = null;
+      }
+      setAiLoading(false);
+    }
+  }, [aiPrompt, onAiImageGenerated]);
+
+  const handleSaveAiToGallery = useCallback(() => {
+    if (!latestAiImage || !latestAiPrompt) return;
+    onSaveAiBackground(latestAiPrompt, latestAiImage);
+    setAiError("Fond enregistré dans ta galerie.");
+  }, [latestAiImage, latestAiPrompt, onSaveAiBackground]);
 
   const [controlsOpen, setControlsOpen] = useState(false);
   const toggleControls = () => setControlsOpen((prev) => !prev);
@@ -931,7 +1001,6 @@ const AnnotationLayer = ({
   const [stickersOnScreen, setStickersOnScreen] = useState<StickerInstance[]>([]);
   const [draggingStickerId, setDraggingStickerId] = useState<string | null>(null);
   const dragOffsetRef = useRef({ x: 0, y: 0 });
-
   const selectedSticker = selectedStickerId
     ? STICKER_LIBRARY.find((item) => item.id === selectedStickerId)
     : null;
@@ -1166,7 +1235,7 @@ const AnnotationLayer = ({
                 : "Afficher les outils de dessin"}
             </span>
           </button>
-          {controlsOpen && (
+          {controlsOpen && !props.drawerOpen && (
             <motion.div
               drag
               dragMomentum={false}
@@ -1301,6 +1370,55 @@ const AnnotationLayer = ({
           )}
         </div>
       )}
+      {isHost && mode === "text" && (
+        <div className="absolute left-1/2 bottom-4 z-40 w-[calc(100%-1.5rem)] max-w-[360px] -translate-x-1/2 rounded-2xl border border-white/20 bg-black/60 p-3 text-white shadow-lg backdrop-blur-lg pointer-events-auto">
+          <div className="flex flex-col gap-2">
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={aiPrompt}
+                onChange={(event) => setAiPrompt(event.target.value)}
+                placeholder="Prompt (ex: lumière douce, studio zen, portraits en mouvement)"
+                className="flex-1 rounded-lg border border-white/30 bg-white/5 px-3 py-2 text-xs text-white placeholder:text-white/50 focus:border-sky-400 focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={handleGenerateAi}
+                disabled={aiLoading}
+                className="rounded-lg bg-sky-500 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.25em] text-white disabled:opacity-60"
+              >
+                {aiLoading ? "Génération..." : "DALL·E"}
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveAiToGallery}
+                disabled={!latestAiImage || !latestAiPrompt || aiLoading}
+                className="rounded-lg border border-white/30 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.25em] text-white disabled:border-slate-700 disabled:text-slate-500"
+              >
+                Enregistrer
+              </button>
+            </div>
+            <p className="text-[11px] text-white/60">
+              {aiError ||
+                (aiBackgroundUrl
+                  ? "Fond IA actif — tu peux le supprimer ou en générer un autre."
+                  : "Décris un décor mental ou un état d’énergie. L’image remplacera ton arrière-plan virtuel.")}
+            </p>
+            {aiBackgroundUrl && (
+              <div className="flex items-center justify-between text-[11px] text-slate-200">
+                <span>Fond IA appliqué.</span>
+                <button
+                  type="button"
+                  onClick={onClearAiBackground}
+                  className="text-[11px] font-semibold uppercase tracking-[0.2em] text-rose-300 hover:text-rose-200"
+                >
+                  Supprimer
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -1369,7 +1487,6 @@ const useRealtimeTranslation = ({
   const contextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
   const gainRef = useRef<GainNode | null>(null);
   const destinationRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   const trackRef = useRef<LocalAudioTrack | null>(null);
@@ -1399,11 +1516,6 @@ const useRealtimeTranslation = ({
       pendingStopRef.current = true;
       return;
     }
-    if (processorRef.current) {
-      processorRef.current.disconnect();
-      processorRef.current.onaudioprocess = null;
-      processorRef.current = null;
-    }
     if (gainRef.current) {
       gainRef.current.disconnect();
       gainRef.current = null;
@@ -1427,9 +1539,14 @@ const useRealtimeTranslation = ({
     }
     const publishedTrack = trackRef.current;
     if (publishedTrack && localParticipant) {
-      try {
-        await localParticipant.unpublishTrack(publishedTrack);
-      } catch {}
+      const hasPublication = localParticipant
+        .getTrackPublications()
+        .some((pub) => pub.track === publishedTrack);
+      if (hasPublication) {
+        try {
+          await localParticipant.unpublishTrack(publishedTrack);
+        } catch {}
+      }
       publishedTrack.stop();
       if (trackRef.current === publishedTrack) {
         trackRef.current = null;
@@ -1502,14 +1619,12 @@ const useRealtimeTranslation = ({
           } catch {}
         }
         const source = context.createMediaStreamSource(stream);
-        const processor = context.createScriptProcessor(4096, 1, 1);
         const gain = context.createGain();
         gain.gain.value = 0;
         const destination = destinationRef.current ?? context.createMediaStreamDestination();
         destinationRef.current = destination;
 
         sourceRef.current = source;
-        processorRef.current = processor;
         gainRef.current = gain;
 
         const ensureTrack = async () => {
@@ -1672,8 +1787,6 @@ const useRealtimeTranslation = ({
   }, [enabled, buildSessionUpdate]);
 };
 
-const MEDIA_LINKS_STORAGE_KEY = "bfzoom:media-links";
-
 type SuggestionMode =
   | "general"
   | "rp"
@@ -1739,10 +1852,49 @@ export default function LiveKitCall({
   }, []);
   const [backgroundMode, setBackgroundMode] = useState<string>("none");
   const [customBackgrounds, setCustomBackgrounds] = useState<BackgroundOption[]>([]);
-  const backgroundOptions = useMemo(
-    () => [...BACKGROUND_OPTIONS, ...customBackgrounds],
-    [customBackgrounds]
+  const [aiBackgroundUrl, setAiBackgroundUrl] = useState<string | null>(null);
+  const [aiGallery, setAiGallery] = useState<AiGalleryItem[]>([]);
+  const aiBackgroundOption = useMemo(
+    () =>
+      aiBackgroundUrl
+        ? {
+            id: "ai",
+            label: "IA",
+            mode: "image" as const,
+            imagePath: aiBackgroundUrl,
+          }
+        : null,
+    [aiBackgroundUrl]
   );
+  const backgroundOptions = useMemo(() => {
+    const base = [...BACKGROUND_OPTIONS, ...customBackgrounds];
+    return aiBackgroundOption ? [...base, aiBackgroundOption] : base;
+  }, [customBackgrounds, aiBackgroundOption]);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const raw = window.localStorage.getItem(AI_GALLERY_STORAGE_KEY);
+    if (!raw) return;
+    try {
+      const parsed: AiGalleryItem[] = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        setAiGallery(parsed);
+      }
+    } catch {
+      // ignore corrupt data
+    }
+  }, []);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      if (aiGallery.length === 0) {
+        window.localStorage.removeItem(AI_GALLERY_STORAGE_KEY);
+      } else {
+        window.localStorage.setItem(AI_GALLERY_STORAGE_KEY, JSON.stringify(aiGallery));
+      }
+    } catch {
+      console.warn("Impossible d'enregistrer la galerie IA");
+    }
+  }, [aiGallery]);
   const loadCustomBackgrounds = useCallback(() => {
     if (typeof window === "undefined") return;
     const raw = window.localStorage.getItem(CUSTOM_BACKGROUND_STORAGE_KEY);
@@ -1777,6 +1929,43 @@ export default function LiveKitCall({
   useEffect(() => {
     persistCustomBackgrounds();
   }, [persistCustomBackgrounds]);
+
+  const handleAiImageGenerated = useCallback((url: string) => {
+    setAiBackgroundUrl(url);
+    setBackgroundMode("ai");
+  }, []);
+
+  const handleClearAiBackground = useCallback(() => {
+    setAiBackgroundUrl(null);
+    setBackgroundMode((prev) => (prev === "ai" ? "none" : prev));
+  }, []);
+
+  const handleAiGallerySave = useCallback(
+    (prompt: string, image: string) => {
+      const item: AiGalleryItem = {
+        id:
+          typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `${Date.now()}`,
+        prompt,
+        image,
+        createdAt: Date.now(),
+      };
+      setAiGallery((prev) => {
+        const filtered = prev.filter((entry) => entry.image !== image);
+        const nextList = [item, ...filtered].slice(0, 12);
+        return nextList;
+      });
+    },
+    []
+  );
+
+  const handleAiGallerySelect = useCallback(
+    (item: AiGalleryItem) => {
+      handleAiImageGenerated(item.image);
+    },
+    [handleAiImageGenerated]
+  );
   const addCustomBackground = useCallback((file: File | null) => {
     if (!file) return;
     const reader = new FileReader();
@@ -2076,12 +2265,18 @@ export default function LiveKitCall({
             Appel vocal en cours · microphone uniquement
           </div>
         ) : (
-        <LiveKitVideo
+          <LiveKitVideo
             backgroundMode={backgroundMode}
             backgroundOptions={backgroundOptions}
             customBackgrounds={customBackgrounds}
             onAddCustomBackground={addCustomBackground}
             onRemoveCustomBackground={removeCustomBackground}
+            aiBackgroundUrl={aiBackgroundUrl}
+            onAiImageGenerated={handleAiImageGenerated}
+            onClearAiBackground={handleClearAiBackground}
+            aiGallery={aiGallery}
+            onSaveAiBackground={handleAiGallerySave}
+            onAiGallerySelect={handleAiGallerySelect}
             roomId={roomId}
             isHost={isHost}
             onChangeBackground={setBackgroundMode}
@@ -2152,6 +2347,14 @@ type BackgroundOption = {
 const CUSTOM_BACKGROUND_STORAGE_KEY = "bfzoom:custom-backgrounds";
 const CUSTOM_BACKGROUND_PREFIX = "custom";
 const CUSTOM_BACKGROUND_LIMIT = 5;
+const AI_GALLERY_STORAGE_KEY = "bfzoom:ai-gallery";
+
+type AiGalleryItem = {
+  id: string;
+  prompt: string;
+  image: string;
+  createdAt: number;
+};
 const BACKGROUND_OPTIONS: BackgroundOption[] = [
   { id: "none", label: "Normal", mode: "none" },
   { id: "blur", label: "Flou", mode: "blur" },
@@ -2185,6 +2388,12 @@ function LiveKitVideo({
   customBackgrounds,
   onAddCustomBackground,
   onRemoveCustomBackground,
+  aiBackgroundUrl,
+  onAiImageGenerated,
+  onClearAiBackground,
+  aiGallery,
+  onSaveAiBackground,
+  onAiGallerySelect,
   roomId,
   isHost,
   onChangeBackground,
@@ -2228,6 +2437,12 @@ function LiveKitVideo({
   customBackgrounds: BackgroundOption[];
   onAddCustomBackground: (file: File | null) => void;
   onRemoveCustomBackground: (id: string) => void;
+  aiBackgroundUrl: string | null;
+  onAiImageGenerated: (url: string) => void;
+  onClearAiBackground: () => void;
+  aiGallery: AiGalleryItem[];
+  onSaveAiBackground: (prompt: string, image: string) => void;
+  onAiGallerySelect: (item: AiGalleryItem) => void;
   roomId: string;
   isHost: boolean;
   onChangeBackground: (mode: string) => void;
@@ -2285,9 +2500,6 @@ function LiveKitVideo({
   const processorDisabledRef = useRef(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
-  const [mediaLinks, setMediaLinks] = useState<HostMediaLink[]>([]);
-  const [activeMediaId, setActiveMediaId] = useState<string | null>(null);
-  const [mediaShareError, setMediaShareError] = useState("");
   const [drawingEnabled, setDrawingEnabled] = useState(false);
   const [brushColor, setBrushColor] = useState("#f87171");
   const [brushWidth, setBrushWidth] = useState(3);
@@ -2307,9 +2519,6 @@ function LiveKitVideo({
   useEffect(() => {
     brushWidthRef.current = brushWidth;
   }, [brushWidth]);
-  const mediaVideoRef = useRef<HTMLVideoElement | null>(null);
-  const mediaTrackRef = useRef<LocalVideoTrack | null>(null);
-  const cameraWasEnabledRef = useRef(false);
   const realtimeAudioTracks = useTracks(
     [{ source: Track.Source.ScreenShareAudio, withPlaceholder: false }],
     { onlySubscribed: true }
@@ -2347,133 +2556,6 @@ function LiveKitVideo({
   );
   const roomChat = useRoomChat(roomId, widgetState.showChat);
   const roomTimer = useRoomTimer(roomId);
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const raw = window.localStorage.getItem(MEDIA_LINKS_STORAGE_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as HostMediaLink[];
-      if (Array.isArray(parsed)) setMediaLinks(parsed);
-    } catch {
-      setMediaLinks([]);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(MEDIA_LINKS_STORAGE_KEY, JSON.stringify(mediaLinks));
-  }, [mediaLinks]);
-
-  const stopMediaShare = useCallback(async () => {
-    if (!localParticipant) return;
-    setMediaShareError("");
-    const track = mediaTrackRef.current;
-    if (track) {
-      try {
-        await localParticipant.unpublishTrack(track);
-      } catch {}
-      track.stop();
-      mediaTrackRef.current = null;
-    }
-    const video = mediaVideoRef.current;
-    if (video) {
-      video.pause();
-      video.removeAttribute("src");
-      video.load();
-    }
-    setActiveMediaId(null);
-    if (cameraWasEnabledRef.current) {
-      try {
-        await localParticipant.setCameraEnabled(true);
-      } catch {}
-    }
-  }, [localParticipant]);
-
-  const startMediaShare = useCallback(
-    async (item: HostMediaLink) => {
-      if (!localParticipant) return;
-      setMediaShareError("");
-      try {
-        const host = new URL(item.url).hostname.replace("www.", "").toLowerCase();
-        if (["youtube.com", "youtu.be", "vimeo.com"].includes(host)) {
-          setMediaShareError("YouTube/Vimeo: utilise Partager ecran.");
-          return;
-        }
-      } catch {}
-      if (mediaTrackRef.current) {
-        await stopMediaShare();
-      }
-      cameraWasEnabledRef.current = isCameraEnabled;
-      try {
-        await localParticipant.setCameraEnabled(false);
-      } catch {}
-
-      try {
-        let video = mediaVideoRef.current;
-        if (!video) {
-          video = document.createElement("video");
-          video.crossOrigin = "anonymous";
-          video.muted = true;
-          video.playsInline = true;
-          video.loop = true;
-          mediaVideoRef.current = video;
-        }
-        video.src = item.url;
-        await video.play();
-        const stream =
-          (video as HTMLVideoElement & { captureStream?: () => MediaStream }).captureStream?.();
-        if (!stream) throw new Error("Capture video indisponible.");
-        const [videoTrack] = stream.getVideoTracks();
-        if (!videoTrack) throw new Error("Flux video introuvable.");
-        const localTrack = new LocalVideoTrack(videoTrack, undefined, true);
-        mediaTrackRef.current = localTrack;
-        await localParticipant.publishTrack(localTrack, { source: Track.Source.ScreenShare });
-        setActiveMediaId(item.id);
-      } catch (err) {
-        const message =
-          err instanceof Error ? err.message : "Impossible de partager la video.";
-        setMediaShareError(message);
-      }
-    },
-    [isCameraEnabled, localParticipant, stopMediaShare]
-  );
-
-  const addMediaLink = useCallback((url: string, label?: string) => {
-    setMediaLinks((prev) => {
-      const id = typeof crypto !== "undefined" ? crypto.randomUUID() : `${Date.now()}`;
-      let hostLabel = "";
-      try {
-        hostLabel = new URL(url).hostname.replace("www.", "");
-      } catch {
-        hostLabel = "Media";
-      }
-      const nextLabel = label?.trim() || hostLabel || "Media";
-      const next: HostMediaLink = {
-        id,
-        url,
-        label: nextLabel,
-        createdAt: Date.now(),
-      };
-      return [next, ...prev];
-    });
-  }, []);
-
-  const removeMediaLink = useCallback(
-    async (id: string) => {
-      if (activeMediaId === id) {
-        await stopMediaShare();
-      }
-      setMediaLinks((prev) => prev.filter((item) => item.id !== id));
-    },
-    [activeMediaId, stopMediaShare]
-  );
-
-  useEffect(() => {
-    return () => {
-      void stopMediaShare();
-    };
-  }, [stopMediaShare]);
-
   useEffect(() => {
     const track = cameraTrack?.track;
     if (
@@ -2585,7 +2667,7 @@ function LiveKitVideo({
 
   return (
     <>
-      <SettingsDrawer
+        <SettingsDrawer
         roomId={roomId}
         isHost={isHost}
         isOpen={settingsOpen}
@@ -2626,18 +2708,15 @@ function LiveKitVideo({
           ttsError={ttsError}
           captionSize={captionSize}
           onChangeCaptionSize={onChangeCaptionSize}
-          videoFit={videoFit}
-          onChangeVideoFit={onChangeVideoFit}
-          mediaLinks={mediaLinks}
-          activeMediaId={activeMediaId}
-          mediaShareError={mediaShareError}
-          onAddMediaLink={addMediaLink}
-          onRemoveMediaLink={removeMediaLink}
-          onActivateMedia={startMediaShare}
-          onStopMedia={stopMediaShare}
-          onSendToChat={roomChat.sendMessage}
-          timerState={roomTimer.state}
-          timerActions={roomTimer.actions}
+        videoFit={videoFit}
+        onChangeVideoFit={onChangeVideoFit}
+        onSendToChat={roomChat.sendMessage}
+        timerState={roomTimer.state}
+        timerActions={roomTimer.actions}
+        aiBackgroundUrl={aiBackgroundUrl}
+        onAiBackgroundClear={onClearAiBackground}
+        aiGallery={aiGallery}
+        onAiGallerySelect={onAiGallerySelect}
         />
       {useMobileLayout ? (
         <LiveKitConferenceMobile
@@ -2661,6 +2740,13 @@ function LiveKitVideo({
           onChangeSourceLanguage={onChangeSourceLanguage}
           guestCaptionTarget={guestCaptionTarget}
           onChangeGuestCaptionTarget={onChangeGuestCaptionTarget}
+          isSettingsOpen={settingsOpen}
+        aiBackgroundUrl={aiBackgroundUrl}
+        onAiImageGenerated={onAiImageGenerated}
+        onClearAiBackground={onClearAiBackground}
+        aiGallery={aiGallery}
+        onAiGallerySelect={onAiGallerySelect}
+        onSaveAiBackground={onSaveAiBackground}
         />
       ) : (
         <LiveKitConference
@@ -2696,6 +2782,13 @@ function LiveKitVideo({
           onChangeSourceLanguage={onChangeSourceLanguage}
           guestCaptionTarget={guestCaptionTarget}
           onChangeGuestCaptionTarget={onChangeGuestCaptionTarget}
+          aiBackgroundUrl={aiBackgroundUrl}
+          onAiImageGenerated={onAiImageGenerated}
+          onClearAiBackground={onClearAiBackground}
+          aiGallery={aiGallery}
+          onAiGallerySelect={onAiGallerySelect}
+          onSaveAiBackground={onSaveAiBackground}
+          isSettingsOpen={settingsOpen}
         />
       )}
     </>
@@ -2720,13 +2813,6 @@ type SuggestedResponse = {
   id: string;
   text: string;
   heard: string;
-  createdAt: number;
-};
-
-type HostMediaLink = {
-  id: string;
-  url: string;
-  label: string;
   createdAt: number;
 };
 
@@ -2985,6 +3071,13 @@ function LiveKitConference({
   onChangeSourceLanguage,
   guestCaptionTarget,
   onChangeGuestCaptionTarget,
+  aiGallery,
+  onAiGallerySelect,
+  aiBackgroundUrl,
+  onAiImageGenerated,
+  onClearAiBackground,
+  onSaveAiBackground,
+  isSettingsOpen,
 }: {
   roomId: string;
   widgetState: { showChat: boolean; unreadMessages: number; showSettings?: boolean };
@@ -3018,6 +3111,13 @@ function LiveKitConference({
   onChangeSourceLanguage: (value: SourceLanguageOption["code"]) => void;
   guestCaptionTarget: CaptionTarget;
   onChangeGuestCaptionTarget: (target: CaptionTarget) => void;
+  aiBackgroundUrl: string | null;
+  onAiImageGenerated: (url: string) => void;
+  onClearAiBackground: () => void;
+  onSaveAiBackground: (prompt: string, image: string) => void;
+  aiGallery: AiGalleryItem[];
+  onAiGallerySelect: (item: AiGalleryItem) => void;
+  isSettingsOpen: boolean;
 }) {
   const layoutContext = useCreateLayoutContext();
   const [isMobile, setIsMobile] = useState(false);
@@ -3415,9 +3515,14 @@ const captionTargetLabel = useMemo(
     onTtsError("");
     const publishedTtsTrack = ttsTrackRef.current;
     if (publishedTtsTrack && localParticipant) {
-      try {
-        await localParticipant.unpublishTrack(publishedTtsTrack);
-      } catch {}
+      const hasPublication = localParticipant
+        .getTrackPublications()
+        .some((pub) => pub.track === publishedTtsTrack);
+      if (hasPublication) {
+        try {
+          await localParticipant.unpublishTrack(publishedTtsTrack);
+        } catch {}
+      }
       publishedTtsTrack.stop();
       if (ttsTrackRef.current === publishedTtsTrack) {
         ttsTrackRef.current = null;
@@ -4114,6 +4219,11 @@ const captionTargetLabel = useMemo(
             onAnnotationClear={handleAnnotationClear}
             onAnnotationText={handleAnnotationTextDesktop}
             isHost={isHost}
+            drawerOpen={isSettingsOpen}
+            aiBackgroundUrl={aiBackgroundUrl}
+            onAiImageGenerated={onAiImageGenerated}
+            onClearAiBackground={onClearAiBackground}
+            onSaveAiBackground={onSaveAiBackground}
           />
           <TimerOverlay timerState={timerState} />
           {captionStreamState.active && (
@@ -4430,6 +4540,13 @@ function LiveKitConferenceMobile({
   onChangeSourceLanguage,
   guestCaptionTarget,
   onChangeGuestCaptionTarget,
+  aiBackgroundUrl,
+  onAiImageGenerated,
+  onClearAiBackground,
+  aiGallery,
+  onAiGallerySelect,
+  onSaveAiBackground,
+  isSettingsOpen,
 }: {
   roomId: string;
   isHost: boolean;
@@ -4451,6 +4568,13 @@ function LiveKitConferenceMobile({
   onChangeSourceLanguage: (value: SourceLanguageOption["code"]) => void;
   guestCaptionTarget: CaptionTarget;
   onChangeGuestCaptionTarget: (target: CaptionTarget) => void;
+  aiBackgroundUrl: string | null;
+  onAiImageGenerated: (url: string) => void;
+  onClearAiBackground: () => void;
+  aiGallery: AiGalleryItem[];
+  onAiGallerySelect: (item: AiGalleryItem) => void;
+  onSaveAiBackground: (prompt: string, image: string) => void;
+  isSettingsOpen: boolean;
 }) {
   const [controlsHidden, setControlsHidden] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
@@ -4707,9 +4831,14 @@ function LiveKitConferenceMobile({
           onAnnotationStop={handleAnnotationStop}
           onAnnotationUndo={handleAnnotationUndo}
           onAnnotationClear={handleAnnotationClear}
-          onAnnotationText={handleAnnotationTextMobile}
-          isHost={isHost}
-        />
+            onAnnotationText={handleAnnotationTextMobile}
+            isHost={isHost}
+            drawerOpen={isSettingsOpen}
+            aiBackgroundUrl={aiBackgroundUrl}
+            onAiImageGenerated={onAiImageGenerated}
+            onClearAiBackground={onClearAiBackground}
+            onSaveAiBackground={onSaveAiBackground}
+          />
         <TimerOverlay timerState={timerState} />
         {showMobileBadge && (
           <div className="absolute top-3 left-1/2 z-30 -translate-x-1/2 rounded-full border border-sky-400/60 bg-sky-500/20 px-3 py-1 text-[11px] text-sky-100">
@@ -5539,16 +5668,13 @@ function SettingsDrawer({
   onChangeCaptionSize,
   videoFit,
   onChangeVideoFit,
-  mediaLinks,
-  activeMediaId,
-  mediaShareError,
-  onAddMediaLink,
-  onRemoveMediaLink,
-  onActivateMedia,
-  onStopMedia,
   onSendToChat,
   timerState,
   timerActions,
+  aiBackgroundUrl,
+  onAiBackgroundClear,
+  aiGallery,
+  onAiGallerySelect,
 }: {
   roomId: string;
   isHost: boolean;
@@ -5592,16 +5718,13 @@ function SettingsDrawer({
   onChangeCaptionSize: (size: "sm" | "md" | "lg") => void;
   videoFit: "cover" | "contain";
   onChangeVideoFit: (fit: "cover" | "contain") => void;
-  mediaLinks: HostMediaLink[];
-  activeMediaId: string | null;
-  mediaShareError: string;
-  onAddMediaLink: (url: string, label?: string) => void;
-  onRemoveMediaLink: (id: string) => void;
-  onActivateMedia: (item: HostMediaLink) => void;
-  onStopMedia: () => void;
   onSendToChat: (text: string, opts?: { fromName?: string }) => Promise<void>;
   timerState: RoomTimerState;
   timerActions: RoomTimerActions;
+  aiBackgroundUrl: string | null;
+  onAiBackgroundClear: () => void;
+  aiGallery: AiGalleryItem[];
+  onAiGallerySelect: (item: AiGalleryItem) => void;
 }) {
   const appVersion = process.env.NEXT_PUBLIC_APP_VERSION || "dev";
   const [isMobile, setIsMobile] = useState(false);
@@ -5609,10 +5732,9 @@ function SettingsDrawer({
   const [hostOpen, setHostOpen] = useState(false);
   const [coachOpen, setCoachOpen] = useState(false);
   const [timerOpen, setTimerOpen] = useState(false);
-  const [mediaOpen, setMediaOpen] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [mobileSection, setMobileSection] = useState<
-    "background" | "camera" | "media" | "timer" | "coach" | "host"
+    "background" | "camera" | "timer" | "coach" | "host"
   >("background");
 
   useEffect(() => {
@@ -5630,7 +5752,6 @@ function SettingsDrawer({
   const mobileSections = [
     { id: "background", label: "Fond" },
     { id: "camera", label: "Camera" },
-    { id: "media", label: "Media" },
     { id: "timer", label: "Timer" },
     { id: "coach", label: "Coach" },
     { id: "host", label: "Hote" },
@@ -5694,6 +5815,10 @@ function SettingsDrawer({
                   customBackgrounds={customBackgrounds}
                   onAddCustomBackground={onAddCustomBackground}
                   onRemoveCustomBackground={onRemoveCustomBackground}
+                  aiBackgroundUrl={aiBackgroundUrl}
+                  onAiBackgroundClear={onAiBackgroundClear}
+                  aiGallery={aiGallery}
+                  onAiGallerySelect={onAiGallerySelect}
                 />
               )}
               {mobileSection === "camera" && (
@@ -5733,17 +5858,6 @@ function SettingsDrawer({
                   onChangeVideoFit={onChangeVideoFit}
                 />
               )}
-              {mobileSection === "media" && (
-                <HostMediaPanel
-                  items={mediaLinks}
-                  activeId={activeMediaId}
-                  error={mediaShareError}
-                  onAdd={onAddMediaLink}
-                  onRemove={onRemoveMediaLink}
-                  onActivate={onActivateMedia}
-                  onStop={onStopMedia}
-                />
-              )}
               {mobileSection === "timer" && (
                 <TimerPanel timerState={timerState} timerActions={timerActions} />
               )}
@@ -5760,14 +5874,18 @@ function SettingsDrawer({
                 onToggle={() => setBackgroundOpen((value) => !value)}
               />
               {backgroundOpen && (
-                <BackgroundSection
-                  backgroundMode={backgroundMode}
-                  onChangeBackground={onChangeBackground}
-                  disabled={backgroundDisabled}
-                  customBackgrounds={customBackgrounds}
-                  onAddCustomBackground={onAddCustomBackground}
-                  onRemoveCustomBackground={onRemoveCustomBackground}
-                />
+              <BackgroundSection
+                backgroundMode={backgroundMode}
+                onChangeBackground={onChangeBackground}
+                disabled={backgroundDisabled}
+                customBackgrounds={customBackgrounds}
+                onAddCustomBackground={onAddCustomBackground}
+                onRemoveCustomBackground={onRemoveCustomBackground}
+                aiBackgroundUrl={aiBackgroundUrl}
+                onAiBackgroundClear={onAiBackgroundClear}
+                aiGallery={aiGallery}
+                onAiGallerySelect={onAiGallerySelect}
+              />
               )}
               <SectionHeader
                 title="Camera"
@@ -5816,7 +5934,7 @@ function SettingsDrawer({
                 <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3 text-xs text-slate-300">
                   <p className="font-semibold text-slate-100">Options hote</p>
                   <p className="mt-1 text-slate-300">
-                    Media, timer, coach et gestion hote sont reserves a l'hote.
+                    Timer, coach et gestion hote sont reserves a l'hote.
                   </p>
                   <p className="mt-2 text-[11px] text-slate-400">
                     Ouvre le lien de salle en mode hote pour les afficher.
@@ -5826,22 +5944,6 @@ function SettingsDrawer({
 
               {isHost && (
                 <>
-                  <SectionHeader
-                    title="Media"
-                    isOpen={mediaOpen}
-                    onToggle={() => setMediaOpen((value) => !value)}
-                  />
-                  {mediaOpen && (
-                    <HostMediaPanel
-                      items={mediaLinks}
-                      activeId={activeMediaId}
-                      error={mediaShareError}
-                      onAdd={onAddMediaLink}
-                      onRemove={onRemoveMediaLink}
-                      onActivate={onActivateMedia}
-                      onStop={onStopMedia}
-                    />
-                  )}
                   <SectionHeader
                     title="Timer"
                     isOpen={timerOpen}
@@ -5903,6 +6005,10 @@ function BackgroundSection({
   customBackgrounds,
   onAddCustomBackground,
   onRemoveCustomBackground,
+  aiBackgroundUrl,
+  onAiBackgroundClear,
+  aiGallery,
+  onAiGallerySelect,
 }: {
   backgroundMode: string;
   onChangeBackground: (mode: string) => void;
@@ -5910,6 +6016,10 @@ function BackgroundSection({
   customBackgrounds: BackgroundOption[];
   onAddCustomBackground: (file: File | null) => void;
   onRemoveCustomBackground: (id: string) => void;
+  aiBackgroundUrl: string | null;
+  onAiBackgroundClear: () => void;
+  aiGallery: AiGalleryItem[];
+  onAiGallerySelect: (item: AiGalleryItem) => void;
 }) {
   const handleCustomFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     if (disabled) {
@@ -5954,9 +6064,62 @@ function BackgroundSection({
                 ) : (
               opt.label
             )}
-          </button>
-        ))}
-      </div>
+            </button>
+          ))}
+        </div>
+        {aiBackgroundUrl && (
+          <div className="mt-3 flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2">
+            <div
+              className="h-12 w-12 rounded-lg bg-cover bg-center"
+              style={{ backgroundImage: `url(${aiBackgroundUrl})` }}
+            />
+            <div className="flex-1 text-[11px] text-slate-200">
+              Fond IA actif · génère un nouveau prompt pour le remplacer.
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => onChangeBackground("ai")}
+                disabled={disabled}
+                className="rounded-full border border-slate-700 px-3 py-1 text-[11px] text-white disabled:border-slate-600 disabled:text-slate-500 hover:border-slate-500"
+              >
+                Activer
+              </button>
+              <button
+                type="button"
+                onClick={onAiBackgroundClear}
+                disabled={disabled}
+                className="rounded-full border border-rose-500 px-3 py-1 text-[11px] text-rose-300 disabled:border-rose-400 disabled:text-rose-500 hover:border-rose-400"
+              >
+                Supprimer
+              </button>
+            </div>
+          </div>
+        )}
+        {aiGallery.length > 0 && (
+          <div className="space-y-2 rounded-xl border border-slate-800 bg-slate-950/50 p-3">
+            <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Galerie IA</p>
+            <div className="grid grid-cols-2 gap-2">
+              {aiGallery.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => onAiGallerySelect(item)}
+                  disabled={disabled}
+                  className="group flex flex-col gap-1 rounded-xl border border-slate-800 bg-slate-900/60 p-2 text-left transition hover:border-sky-400"
+                >
+                  <div
+                    className="h-16 w-full rounded-md bg-cover bg-center"
+                    style={{ backgroundImage: `url(${item.image})` }}
+                  />
+                  <p className="truncate text-[11px] text-white group-disabled:text-slate-500">
+                    {item.prompt}
+                  </p>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       <div className="flex flex-wrap items-center gap-2 pt-2">
         <label
           className={`lk-button flex items-center gap-2 ${
@@ -6930,160 +7093,6 @@ function CoachPanel({
           >
             Envoyer au chat
           </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function HostMediaPanel({
-  items,
-  activeId,
-  error,
-  onAdd,
-  onRemove,
-  onActivate,
-  onStop,
-}: {
-  items: HostMediaLink[];
-  activeId: string | null;
-  error: string;
-  onAdd: (url: string, label?: string) => void;
-  onRemove: (id: string) => void;
-  onActivate: (item: HostMediaLink) => void;
-  onStop: () => void;
-}) {
-  const [url, setUrl] = useState("");
-  const [label, setLabel] = useState("");
-  const [message, setMessage] = useState("");
-  const [copiedId, setCopiedId] = useState<string | null>(null);
-
-  const isBlockedVideoHost = (value: string) => {
-    try {
-      const host = new URL(value).hostname.replace("www.", "").toLowerCase();
-      return ["youtube.com", "youtu.be", "vimeo.com"].includes(host);
-    } catch {
-      return false;
-    }
-  };
-
-  const handleAdd = () => {
-    setMessage("");
-    if (!url.trim()) {
-      setMessage("Ajoute un lien video valide.");
-      return;
-    }
-    try {
-      const parsed = new URL(url.trim());
-      if (!/^https?:$/.test(parsed.protocol)) {
-        setMessage("Lien invalide.");
-        return;
-      }
-      onAdd(parsed.toString(), label.trim() || parsed.hostname.replace("www.", ""));
-      setUrl("");
-      setLabel("");
-    } catch {
-      setMessage("Lien invalide.");
-    }
-  };
-
-  const copyLink = async (urlToCopy: string, id: string) => {
-    try {
-      await navigator.clipboard.writeText(urlToCopy);
-      setCopiedId(id);
-      setTimeout(() => setCopiedId(null), 1200);
-    } catch {
-      setCopiedId(null);
-    }
-  };
-
-  return (
-    <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-3 space-y-3">
-      <p className="text-[11px] text-slate-400">
-        Colle un lien video direct (mp4), puis partage-le a la place de ta camera.
-      </p>
-      <div className="grid gap-2">
-        <input
-          value={url}
-          onChange={(event) => setUrl(event.target.value)}
-          placeholder="https://.../video.mp4"
-          className="rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100"
-        />
-        <input
-          value={label}
-          onChange={(event) => setLabel(event.target.value)}
-          placeholder="Nom (optionnel)"
-          className="rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100"
-        />
-        <button
-          onClick={handleAdd}
-          className="w-full rounded-lg bg-sky-500 px-3 py-2 text-xs font-semibold text-white hover:bg-sky-400"
-        >
-          Ajouter
-        </button>
-        {(message || error) && (
-          <p className="text-[11px] text-amber-200">{error || message}</p>
-        )}
-      </div>
-      {items.length === 0 ? (
-        <p className="text-xs text-slate-500">Aucun lien memorise.</p>
-      ) : (
-        <div className="space-y-2">
-          {items.map((item) => {
-            const isActive = item.id === activeId;
-            const isBlocked = isBlockedVideoHost(item.url);
-            return (
-              <div key={item.id} className="space-y-2">
-                <div className="flex items-center justify-between gap-2 rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2">
-                  <div className="flex flex-col">
-                    <span className="text-sm text-slate-100">{item.label}</span>
-                    <span className="text-[10px] text-slate-500 truncate max-w-[180px]">
-                      {item.url}
-                    </span>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    {isActive ? (
-                      <button
-                        onClick={onStop}
-                        className="rounded-md bg-rose-500/80 px-2 py-1 text-[11px] text-white hover:bg-rose-500"
-                      >
-                        Revenir camera
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => onActivate(item)}
-                        disabled={isBlocked}
-                        className={`rounded-md px-2 py-1 text-[11px] text-white ${
-                          isBlocked
-                            ? "bg-slate-700/60 text-slate-300 cursor-not-allowed"
-                            : "bg-emerald-500/80 hover:bg-emerald-500"
-                        }`}
-                      >
-                        Presenter
-                      </button>
-                    )}
-                    <button
-                      onClick={() => copyLink(item.url, item.id)}
-                      className="rounded-md border border-slate-700 px-2 py-1 text-[11px] text-slate-200 hover:bg-slate-800"
-                    >
-                      {copiedId === item.id ? "Copie" : "Copier"}
-                    </button>
-                    <button
-                      onClick={() => onRemove(item.id)}
-                      className="rounded-md border border-slate-700 px-2 py-1 text-[11px] text-slate-200 hover:bg-slate-800"
-                    >
-                      Supprimer
-                    </button>
-                  </div>
-                </div>
-                {isBlocked && (
-                  <p className="text-[11px] text-amber-200">
-                    YouTube/Vimeo: utilise Partager ecran.
-                  </p>
-                )}
-              </div>
-            );
-          })}
         </div>
       )}
     </div>

@@ -25,6 +25,9 @@ export default function PeerVideoCall({
     mediaError,
     isRequestingMedia,
     requestMedia,
+    lowBandwidthMode,
+    toggleLowBandwidth,
+    connectionWarning,
   } = useWebRTC(roomId, () => {});
   const {
     isMuted,
@@ -55,17 +58,18 @@ export default function PeerVideoCall({
       </div>
 
       <main className="relative flex-1 flex items-center justify-center w-full mx-auto p-4 sm:p-6 pb-28 sm:pb-6">
-        <div className="w-full max-w-6xl">
-          {(mediaError || !localStream || audioMissing) && (
-            <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50/90 px-4 py-3 text-sm text-amber-900 shadow-sm">
+          <div className="w-full max-w-6xl">
+            {(mediaError || !localStream || audioMissing) && (
+              <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50/90 px-4 py-3 text-sm text-amber-900 shadow-sm">
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                 <div>
                   <p className="font-semibold">Autorisation caméra / micro requise</p>
                   <p className="text-amber-800">
                     {mediaError ??
-                      (audioMissing
-                        ? "Le micro n’est pas actif. Autorise l’accès au micro pour partager l’audio."
-                        : "Clique pour autoriser la caméra et le micro.")}
+                      (connectionWarning ??
+                        (audioMissing
+                          ? "Le micro n’est pas actif. Autorise l’accès au micro pour partager l’audio."
+                          : "Clique pour autoriser la caméra et le micro."))}
                   </p>
                 </div>
                 <button
@@ -80,15 +84,22 @@ export default function PeerVideoCall({
                 >
                   {isRequestingMedia ? "Demande en cours..." : "Autoriser"}
                 </button>
+                </div>
               </div>
-            </div>
-          )}
+            )}
+            {!mediaError && !audioMissing && connectionWarning && (
+              <div className="mb-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-800 shadow-sm">
+                {connectionWarning}
+              </div>
+            )}
           <VideoLayout
             localStream={localStream}
             remoteStreams={remoteStreams}
             isMuted={isMuted}
             cameraOn={cameraOn}
             blurOn={isBlurOn}
+            lowBandwidthMode={lowBandwidthMode}
+            onToggleLowBandwidth={toggleLowBandwidth}
           />
         </div>
 
@@ -101,6 +112,8 @@ export default function PeerVideoCall({
           onLeave={handleLeave}
           isBlurOn={isBlurOn}
           onToggleBlur={() => setIsBlurOn((v) => !v)}
+          lowBandwidthMode={lowBandwidthMode}
+          onToggleLowBandwidth={toggleLowBandwidth}
         />
       </main>
 
