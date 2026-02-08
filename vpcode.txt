@@ -73,3 +73,7 @@ guide moi pas à pas etape par etape , demande moi d'exectuter des choses via mo
 
 
 ubuntu@vps-ac6b333d:~/bfzoom-realtime$ 
+
+
+git push origin update/main
+firebase functions:delete generateAiBackground --region=us-central1 --force --project=bfzoom-90e89

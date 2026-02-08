@@ -1,0 +1,22 @@
+{
+  "name": "bfzoom-functions",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "deploy": "firebase deploy --only functions",
+    "predeploy": "npm run build"
+  },
+  "main": "lib/index.js",
+  "engines": {
+    "node": "22"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.7.0",
+    "firebase-functions": "^5.1.1",
+    "openai": "^4.5.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  }
+}

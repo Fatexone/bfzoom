@@ -892,6 +892,18 @@ const AnnotationLayer = (props: AnnotationLayerProps) => {
   const aiControllerRef = useRef<AbortController | null>(null);
   const [latestAiImage, setLatestAiImage] = useState<string | null>(null);
   const [latestAiPrompt, setLatestAiPrompt] = useState("");
+  const [aiJobId, setAiJobId] = useState<string | null>(null);
+  const [aiStatus, setAiStatus] = useState<"idle" | "pending" | "processing" | "complete" | "error">(
+    "idle"
+  );
+  const aiPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const clearAiPolling = useCallback(() => {
+    if (aiPollingRef.current) {
+      clearInterval(aiPollingRef.current);
+      aiPollingRef.current = null;
+    }
+  }, []);
 
   const prevModeRef = useRef<"draw" | "text">(mode);
   useEffect(() => {
@@ -908,8 +920,9 @@ const AnnotationLayer = (props: AnnotationLayerProps) => {
     return () => {
       aiControllerRef.current?.abort();
       aiControllerRef.current = null;
+      clearAiPolling();
     };
-  }, []);
+  }, [clearAiPolling]);
 
   useEffect(() => {
     if (textAnchor && inputRef.current) {
@@ -945,6 +958,66 @@ const AnnotationLayer = (props: AnnotationLayerProps) => {
     setMode((prev) => (prev === "draw" ? "text" : "draw"));
   };
 
+  const pollAiJobStatus = useCallback(
+    async (jobId: string, prompt: string) => {
+      try {
+        const response = await fetch(`/api/dalle?jobId=${jobId}`, { cache: "no-store" });
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+          throw new Error((payload?.error as string) || "Impossible de vérifier le job.");
+        }
+        const data = (await response.json()) as {
+          status?: "pending" | "processing" | "complete" | "error";
+          imageUrl?: string;
+          errorMessage?: string;
+          prompt?: string;
+        };
+        const nextStatus = data.status || "pending";
+        setAiStatus(nextStatus);
+        if (nextStatus === "complete" && data.imageUrl) {
+          clearAiPolling();
+          const proxiedImage = `/api/dalle/image?jobId=${jobId}`;
+          setLatestAiImage(proxiedImage);
+          setLatestAiPrompt(data.prompt || prompt);
+          onAiImageGenerated(proxiedImage);
+          setAiLoading(false);
+          setAiJobId(null);
+          setAiError("");
+        } else if (nextStatus === "error") {
+          clearAiPolling();
+          setAiLoading(false);
+          setAiJobId(null);
+          setAiError(data.errorMessage || "Erreur lors de la génération.");
+          setAiStatus("error");
+        }
+      } catch (err) {
+        console.error("DALL·E job status :", err);
+        clearAiPolling();
+        setAiLoading(false);
+        setAiJobId(null);
+        setAiStatus("error");
+        setLatestAiImage(null);
+        setLatestAiPrompt("");
+        setAiError(err instanceof Error ? err.message : "Erreur réseau.");
+      }
+    },
+    [clearAiPolling, onAiImageGenerated]
+  );
+
+  const startAiPolling = useCallback(
+    (jobId: string, prompt: string) => {
+      clearAiPolling();
+      setAiJobId(jobId);
+      setAiStatus("pending");
+      const check = () => {
+        void pollAiJobStatus(jobId, prompt);
+      };
+      check();
+      aiPollingRef.current = setInterval(check, 1500);
+    },
+    [clearAiPolling, pollAiJobStatus]
+  );
+
   const handleGenerateAi = useCallback(async () => {
     const trimmed = aiPrompt.trim();
     if (!trimmed) {
@@ -954,7 +1027,10 @@ const AnnotationLayer = (props: AnnotationLayerProps) => {
     aiControllerRef.current?.abort();
     const controller = new AbortController();
     aiControllerRef.current = controller;
+    clearAiPolling();
     setAiError("");
+    setLatestAiImage(null);
+    setLatestAiPrompt(trimmed);
     setAiLoading(true);
     try {
       const response = await fetch("/api/dalle", {
@@ -965,28 +1041,27 @@ const AnnotationLayer = (props: AnnotationLayerProps) => {
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
-        throw new Error(payload?.error || "Impossible de générer l’image.");
+        throw new Error((payload?.error as string) || "Impossible de créer la demande.");
       }
-      const data = (await response.json()) as { image?: string };
-      if (!data.image) {
-        throw new Error("Aucune image reçue.");
+      const payload = await response.json();
+      if (!payload.jobId) {
+        throw new Error("Aucun job id reçu.");
       }
-      setLatestAiImage(data.image);
-      setLatestAiPrompt(trimmed);
-      onAiImageGenerated(data.image);
+      startAiPolling(payload.jobId, trimmed);
     } catch (err) {
       setLatestAiImage(null);
       setLatestAiPrompt("");
       if (controller.signal.aborted) return;
       console.error("DALL·E :", err);
       setAiError(err instanceof Error ? err.message : "Erreur de génération.");
+      setAiStatus("error");
+      setAiLoading(false);
     } finally {
       if (aiControllerRef.current === controller) {
         aiControllerRef.current = null;
       }
-      setAiLoading(false);
     }
-  }, [aiPrompt, onAiImageGenerated]);
+  }, [aiPrompt, clearAiPolling, startAiPolling]);
 
   const handleSaveAiToGallery = useCallback(() => {
     if (!latestAiImage || !latestAiPrompt) return;
@@ -1113,6 +1188,13 @@ const AnnotationLayer = (props: AnnotationLayerProps) => {
     : mode === "text"
     ? "text"
     : "default";
+  const aiStatusMessage =
+    aiError ||
+    (aiStatus === "pending" || aiStatus === "processing"
+      ? "Génération IA en cours…"
+      : aiBackgroundUrl
+      ? "Fond IA actif — tu peux le supprimer ou en générer un autre."
+      : "Décris un décor mental ou un état d’énergie. L’image remplacera ton arrière-plan virtuel.");
 
   return (
     <div className="absolute inset-0 z-30 pointer-events-none">
@@ -1398,12 +1480,7 @@ const AnnotationLayer = (props: AnnotationLayerProps) => {
                 Enregistrer
               </button>
             </div>
-            <p className="text-[11px] text-white/60">
-              {aiError ||
-                (aiBackgroundUrl
-                  ? "Fond IA actif — tu peux le supprimer ou en générer un autre."
-                  : "Décris un décor mental ou un état d’énergie. L’image remplacera ton arrière-plan virtuel.")}
-            </p>
+            <p className="text-[11px] text-white/60">{aiStatusMessage}</p>
             {aiBackgroundUrl && (
               <div className="flex items-center justify-between text-[11px] text-slate-200">
                 <span>Fond IA appliqué.</span>
