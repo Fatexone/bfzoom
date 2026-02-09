@@ -954,8 +954,16 @@ const AnnotationLayer = (props: AnnotationLayerProps) => {
     setTextDraft("");
   };
 
-  const handleModeToggle = () => {
-    setMode((prev) => (prev === "draw" ? "text" : "draw"));
+  const activateDrawMode = () => {
+    setMode("draw");
+    setAiControlsVisible((prevVisible) =>
+      mode === "draw" && prevVisible ? false : true
+    );
+  };
+
+  const activateTextMode = () => {
+    setMode("text");
+    setAiControlsVisible(false);
   };
 
   const pollAiJobStatus = useCallback(
@@ -1079,6 +1087,13 @@ const AnnotationLayer = (props: AnnotationLayerProps) => {
   const selectedSticker = selectedStickerId
     ? STICKER_LIBRARY.find((item) => item.id === selectedStickerId)
     : null;
+  const [aiControlsVisible, setAiControlsVisible] = useState(false);
+
+  useEffect(() => {
+    if (mode === "text") {
+      setAiControlsVisible(false);
+    }
+  }, [mode]);
 
   useEffect(() => {
     if (!overlayRef.current) return;
@@ -1339,14 +1354,27 @@ const AnnotationLayer = (props: AnnotationLayerProps) => {
                 </button>
                 <button
                   type="button"
+                  onClick={activateDrawMode}
+                  className={`rounded-full px-3 py-1 text-sm font-semibold transition ${
+                    mode === "draw"
+                      ? "bg-sky-500 text-white shadow-lg"
+                      : "bg-white/80 text-slate-900 shadow"
+                  }`}
+                  aria-pressed={mode === "draw"}
+                >
+                  Fond DALL·E
+                </button>
+                <button
+                  type="button"
+                  onClick={activateTextMode}
                   className={`rounded-full px-3 py-1 text-sm font-semibold transition ${
                     mode === "text"
                       ? "bg-white text-slate-900 shadow"
                       : "bg-white/80 text-slate-900 shadow"
                   }`}
-                  onClick={handleModeToggle}
+                  aria-pressed={mode === "text"}
                 >
-                  {mode === "text" ? "Mode texte" : "Mode clavier"}
+                  Tag fond écran
                 </button>
                 <button
                   type="button"
@@ -1452,22 +1480,22 @@ const AnnotationLayer = (props: AnnotationLayerProps) => {
           )}
         </div>
       )}
-      {isHost && mode === "text" && (
+      {isHost && aiControlsVisible && (
         <div className="absolute left-1/2 bottom-4 z-40 w-[calc(100%-1.5rem)] max-w-[360px] -translate-x-1/2 rounded-2xl border border-white/20 bg-black/60 p-3 text-white shadow-lg backdrop-blur-lg pointer-events-auto">
           <div className="flex flex-col gap-2">
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <input
                 type="text"
                 value={aiPrompt}
                 onChange={(event) => setAiPrompt(event.target.value)}
                 placeholder="Prompt (ex: lumière douce, studio zen, portraits en mouvement)"
-                className="flex-1 rounded-lg border border-white/30 bg-white/5 px-3 py-2 text-xs text-white placeholder:text-white/50 focus:border-sky-400 focus:outline-none"
+                className="flex-1 min-w-0 rounded-lg border border-white/30 bg-white/5 px-3 py-2 text-xs text-white placeholder:text-white/50 focus:border-sky-400 focus:outline-none"
               />
               <button
                 type="button"
                 onClick={handleGenerateAi}
                 disabled={aiLoading}
-                className="rounded-lg bg-sky-500 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.25em] text-white disabled:opacity-60"
+                className="w-full rounded-lg bg-sky-500 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.25em] text-white disabled:opacity-60 sm:w-auto"
               >
                 {aiLoading ? "Génération..." : "DALL·E"}
               </button>
@@ -1475,12 +1503,21 @@ const AnnotationLayer = (props: AnnotationLayerProps) => {
                 type="button"
                 onClick={handleSaveAiToGallery}
                 disabled={!latestAiImage || !latestAiPrompt || aiLoading}
-                className="rounded-lg border border-white/30 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.25em] text-white disabled:border-slate-700 disabled:text-slate-500"
+                className="w-full rounded-lg border border-white/30 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.25em] text-white disabled:border-slate-700 disabled:text-slate-500 sm:w-auto"
               >
                 Enregistrer
               </button>
             </div>
-            <p className="text-[11px] text-white/60">{aiStatusMessage}</p>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[11px] text-white/60">{aiStatusMessage}</p>
+              <button
+                type="button"
+                onClick={() => setAiControlsVisible(false)}
+                className="text-[11px] font-semibold uppercase tracking-[0.25em] text-white/70 hover:text-white"
+              >
+                Fermer
+              </button>
+            </div>
             {aiBackgroundUrl && (
               <div className="flex items-center justify-between text-[11px] text-slate-200">
                 <span>Fond IA appliqué.</span>
@@ -1947,6 +1984,43 @@ export default function LiveKitCall({
     const base = [...BACKGROUND_OPTIONS, ...customBackgrounds];
     return aiBackgroundOption ? [...base, aiBackgroundOption] : base;
   }, [customBackgrounds, aiBackgroundOption]);
+
+  const handleAiImageGenerated = useCallback((url: string) => {
+    setAiBackgroundUrl(url);
+    setBackgroundMode("ai");
+  }, []);
+
+  const handleClearAiBackground = useCallback(() => {
+    setAiBackgroundUrl(null);
+    setBackgroundMode((prev) => (prev === "ai" ? "none" : prev));
+  }, []);
+
+  const handleAiGallerySave = useCallback(
+    (prompt: string, image: string) => {
+      const item: AiGalleryItem = {
+        id:
+          typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `${Date.now()}`,
+        prompt,
+        image,
+        createdAt: Date.now(),
+      };
+      setAiGallery((prev) => {
+        const filtered = prev.filter((entry) => entry.image !== image);
+        const nextList = [item, ...filtered].slice(0, 12);
+        return nextList;
+      });
+    },
+    []
+  );
+
+  const handleAiGallerySelect = useCallback(
+    (item: AiGalleryItem) => {
+      handleAiImageGenerated(item.image);
+    },
+    [handleAiImageGenerated]
+  );
   useEffect(() => {
     if (typeof window === "undefined") return;
     const raw = window.localStorage.getItem(AI_GALLERY_STORAGE_KEY);
@@ -2007,42 +2081,6 @@ export default function LiveKitCall({
     persistCustomBackgrounds();
   }, [persistCustomBackgrounds]);
 
-  const handleAiImageGenerated = useCallback((url: string) => {
-    setAiBackgroundUrl(url);
-    setBackgroundMode("ai");
-  }, []);
-
-  const handleClearAiBackground = useCallback(() => {
-    setAiBackgroundUrl(null);
-    setBackgroundMode((prev) => (prev === "ai" ? "none" : prev));
-  }, []);
-
-  const handleAiGallerySave = useCallback(
-    (prompt: string, image: string) => {
-      const item: AiGalleryItem = {
-        id:
-          typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-            ? crypto.randomUUID()
-            : `${Date.now()}`,
-        prompt,
-        image,
-        createdAt: Date.now(),
-      };
-      setAiGallery((prev) => {
-        const filtered = prev.filter((entry) => entry.image !== image);
-        const nextList = [item, ...filtered].slice(0, 12);
-        return nextList;
-      });
-    },
-    []
-  );
-
-  const handleAiGallerySelect = useCallback(
-    (item: AiGalleryItem) => {
-      handleAiImageGenerated(item.image);
-    },
-    [handleAiImageGenerated]
-  );
   const addCustomBackground = useCallback((file: File | null) => {
     if (!file) return;
     const reader = new FileReader();
