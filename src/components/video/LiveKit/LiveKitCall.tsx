@@ -761,9 +761,17 @@ type AnnotationLayerProps = {
   onAiImageGenerated: (url: string) => void;
   onClearAiBackground: () => void;
   onSaveAiBackground: (prompt: string, image: string) => void;
+  backgroundMode: string;
+  onChangeBackground: (mode: string) => void;
+  backgroundDisabled: boolean;
+  customBackgrounds: BackgroundOption[];
+  onAddCustomBackground: (file: File | null) => void;
+  onRemoveCustomBackground: (id: string) => void;
+  aiGallery: AiGalleryItem[];
+  onAiGallerySelect: (item: AiGalleryItem) => void;
 };
 
-type ControlTabId = "feutre" | "stickers";
+type ControlTabId = "feutre" | "stickers" | "background";
 
 type StickerLibraryItem = {
   id: string;
@@ -784,6 +792,7 @@ type StickerInstance = {
 const CONTROL_TABS: { id: ControlTabId; label: string }[] = [
   { id: "feutre", label: "Feutre" },
   { id: "stickers", label: "Stickers" },
+  { id: "background", label: "Arrière-plan" },
 ];
 
 const STICKER_LIBRARY: StickerLibraryItem[] = [
@@ -876,6 +885,14 @@ const AnnotationLayer = (props: AnnotationLayerProps) => {
     onAiImageGenerated,
     onClearAiBackground,
     onSaveAiBackground,
+    backgroundMode,
+    onChangeBackground,
+    backgroundDisabled,
+    customBackgrounds,
+    onAddCustomBackground,
+    onRemoveCustomBackground,
+    aiGallery,
+    onAiGallerySelect,
   } = props;
   const [mode, setMode] = useState<"draw" | "text">("draw");
   const [textDraft, setTextDraft] = useState("");
@@ -1437,11 +1454,11 @@ const AnnotationLayer = (props: AnnotationLayerProps) => {
                     </p>
                   </div>
                 )}
-                {activeTab === "stickers" && (
-                  <div className="space-y-3">
-                    <div className="grid grid-cols-4 gap-2">
-                      {STICKER_LIBRARY.map((sticker) => (
-                        <button
+              {activeTab === "stickers" && (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-4 gap-2">
+                    {STICKER_LIBRARY.map((sticker) => (
+                      <button
                           key={sticker.id}
                           type="button"
                           onClick={() => handleStickerSelect(sticker.id)}
@@ -1473,6 +1490,22 @@ const AnnotationLayer = (props: AnnotationLayerProps) => {
                     <p className="text-[11px] text-white/70">
                       Clique sur un sticker pour l'ajouter automatiquement au centre de la scène. Tu peux ensuite glisser le sticker où tu veux sur l’écran.
                     </p>
+                  </div>
+                )}
+                {activeTab === "background" && (
+                  <div className="space-y-3">
+                    <BackgroundSection
+                      backgroundMode={backgroundMode}
+                      onChangeBackground={onChangeBackground}
+                      disabled={backgroundDisabled}
+                      customBackgrounds={customBackgrounds}
+                      onAddCustomBackground={onAddCustomBackground}
+                      onRemoveCustomBackground={onRemoveCustomBackground}
+                      aiBackgroundUrl={aiBackgroundUrl}
+                      onAiBackgroundClear={onClearAiBackground}
+                      aiGallery={aiGallery}
+                      onAiGallerySelect={onAiGallerySelect}
+                    />
                   </div>
                 )}
               </div>
@@ -2787,12 +2820,6 @@ function LiveKitVideo({
         isHost={isHost}
         isOpen={settingsOpen}
         onClose={() => setSettingsOpen(false)}
-        backgroundMode={backgroundMode}
-        customBackgrounds={customBackgrounds}
-        onAddCustomBackground={onAddCustomBackground}
-        onRemoveCustomBackground={onRemoveCustomBackground}
-        onChangeBackground={onChangeBackground}
-        backgroundDisabled={isIPhone}
         autoFrame={autoFrame}
         onToggleAutoFrame={onToggleAutoFrame}
         captionsEnabled={captionsEnabled}
@@ -2818,20 +2845,16 @@ function LiveKitVideo({
         guestCaptionTarget={guestCaptionTarget}
         onChangeGuestCaptionTarget={onChangeGuestCaptionTarget}
         guestTtsEnabled={guestTtsEnabled}
-          guestTtsDisabled={!isHost && hasRealtimeAudio}
-          onToggleGuestTts={onToggleGuestTts}
-          ttsError={ttsError}
-          captionSize={captionSize}
-          onChangeCaptionSize={onChangeCaptionSize}
+        guestTtsDisabled={!isHost && hasRealtimeAudio}
+        onToggleGuestTts={onToggleGuestTts}
+        ttsError={ttsError}
+        captionSize={captionSize}
+        onChangeCaptionSize={onChangeCaptionSize}
         videoFit={videoFit}
         onChangeVideoFit={onChangeVideoFit}
         onSendToChat={roomChat.sendMessage}
         timerState={roomTimer.state}
         timerActions={roomTimer.actions}
-        aiBackgroundUrl={aiBackgroundUrl}
-        onAiBackgroundClear={onClearAiBackground}
-        aiGallery={aiGallery}
-        onAiGallerySelect={onAiGallerySelect}
         />
       {useMobileLayout ? (
         <LiveKitConferenceMobile
@@ -2855,6 +2878,11 @@ function LiveKitVideo({
           onChangeSourceLanguage={onChangeSourceLanguage}
           guestCaptionTarget={guestCaptionTarget}
           onChangeGuestCaptionTarget={onChangeGuestCaptionTarget}
+          backgroundMode={backgroundMode}
+          onChangeBackground={onChangeBackground}
+          customBackgrounds={customBackgrounds}
+          onAddCustomBackground={onAddCustomBackground}
+          onRemoveCustomBackground={onRemoveCustomBackground}
           isSettingsOpen={settingsOpen}
         aiBackgroundUrl={aiBackgroundUrl}
         onAiImageGenerated={onAiImageGenerated}
@@ -2895,9 +2923,14 @@ function LiveKitVideo({
           sourceLanguageOption={sourceLanguageOption}
           sourceLanguage={sourceLanguage}
           onChangeSourceLanguage={onChangeSourceLanguage}
-          guestCaptionTarget={guestCaptionTarget}
-          onChangeGuestCaptionTarget={onChangeGuestCaptionTarget}
-          aiBackgroundUrl={aiBackgroundUrl}
+        guestCaptionTarget={guestCaptionTarget}
+        onChangeGuestCaptionTarget={onChangeGuestCaptionTarget}
+        backgroundMode={backgroundMode}
+        onChangeBackground={onChangeBackground}
+        customBackgrounds={customBackgrounds}
+        onAddCustomBackground={onAddCustomBackground}
+        onRemoveCustomBackground={onRemoveCustomBackground}
+        aiBackgroundUrl={aiBackgroundUrl}
           onAiImageGenerated={onAiImageGenerated}
           onClearAiBackground={onClearAiBackground}
           aiGallery={aiGallery}
@@ -3186,6 +3219,11 @@ function LiveKitConference({
   onChangeSourceLanguage,
   guestCaptionTarget,
   onChangeGuestCaptionTarget,
+  backgroundMode,
+  onChangeBackground,
+  customBackgrounds,
+  onAddCustomBackground,
+  onRemoveCustomBackground,
   aiGallery,
   onAiGallerySelect,
   aiBackgroundUrl,
@@ -3226,6 +3264,11 @@ function LiveKitConference({
   onChangeSourceLanguage: (value: SourceLanguageOption["code"]) => void;
   guestCaptionTarget: CaptionTarget;
   onChangeGuestCaptionTarget: (target: CaptionTarget) => void;
+  backgroundMode: string;
+  onChangeBackground: (mode: string) => void;
+  customBackgrounds: BackgroundOption[];
+  onAddCustomBackground: (file: File | null) => void;
+  onRemoveCustomBackground: (id: string) => void;
   aiBackgroundUrl: string | null;
   onAiImageGenerated: (url: string) => void;
   onClearAiBackground: () => void;
@@ -4339,6 +4382,14 @@ const captionTargetLabel = useMemo(
             onAiImageGenerated={onAiImageGenerated}
             onClearAiBackground={onClearAiBackground}
             onSaveAiBackground={onSaveAiBackground}
+            backgroundMode={backgroundMode}
+            onChangeBackground={onChangeBackground}
+            backgroundDisabled={isIPhone}
+            customBackgrounds={customBackgrounds}
+            onAddCustomBackground={onAddCustomBackground}
+            onRemoveCustomBackground={onRemoveCustomBackground}
+            aiGallery={aiGallery}
+            onAiGallerySelect={onAiGallerySelect}
           />
           <TimerOverlay timerState={timerState} />
           {captionStreamState.active && (
@@ -4655,6 +4706,11 @@ function LiveKitConferenceMobile({
   onChangeSourceLanguage,
   guestCaptionTarget,
   onChangeGuestCaptionTarget,
+  backgroundMode,
+  onChangeBackground,
+  customBackgrounds,
+  onAddCustomBackground,
+  onRemoveCustomBackground,
   aiBackgroundUrl,
   onAiImageGenerated,
   onClearAiBackground,
@@ -4683,6 +4739,11 @@ function LiveKitConferenceMobile({
   onChangeSourceLanguage: (value: SourceLanguageOption["code"]) => void;
   guestCaptionTarget: CaptionTarget;
   onChangeGuestCaptionTarget: (target: CaptionTarget) => void;
+  backgroundMode: string;
+  onChangeBackground: (mode: string) => void;
+  customBackgrounds: BackgroundOption[];
+  onAddCustomBackground: (file: File | null) => void;
+  onRemoveCustomBackground: (id: string) => void;
   aiBackgroundUrl: string | null;
   onAiImageGenerated: (url: string) => void;
   onClearAiBackground: () => void;
@@ -4953,6 +5014,14 @@ function LiveKitConferenceMobile({
             onAiImageGenerated={onAiImageGenerated}
             onClearAiBackground={onClearAiBackground}
             onSaveAiBackground={onSaveAiBackground}
+            backgroundMode={backgroundMode}
+            onChangeBackground={onChangeBackground}
+            backgroundDisabled={isIPhone}
+            customBackgrounds={customBackgrounds}
+            onAddCustomBackground={onAddCustomBackground}
+            onRemoveCustomBackground={onRemoveCustomBackground}
+            aiGallery={aiGallery}
+            onAiGallerySelect={onAiGallerySelect}
           />
         <TimerOverlay timerState={timerState} />
         {showMobileBadge && (
@@ -5745,12 +5814,6 @@ function SettingsDrawer({
   isHost,
   isOpen,
   onClose,
-  backgroundMode,
-  onChangeBackground,
-  backgroundDisabled,
-  customBackgrounds,
-  onAddCustomBackground,
-  onRemoveCustomBackground,
   autoFrame,
   onToggleAutoFrame,
   captionsEnabled,
@@ -5786,21 +5849,11 @@ function SettingsDrawer({
   onSendToChat,
   timerState,
   timerActions,
-  aiBackgroundUrl,
-  onAiBackgroundClear,
-  aiGallery,
-  onAiGallerySelect,
 }: {
   roomId: string;
   isHost: boolean;
   isOpen: boolean;
   onClose: () => void;
-  backgroundMode: string;
-  onChangeBackground: (mode: string) => void;
-  backgroundDisabled: boolean;
-  customBackgrounds: BackgroundOption[];
-  onAddCustomBackground: (file: File | null) => void;
-  onRemoveCustomBackground: (id: string) => void;
   autoFrame: boolean;
   onToggleAutoFrame: () => void;
   captionsEnabled: boolean;
@@ -5836,21 +5889,16 @@ function SettingsDrawer({
   onSendToChat: (text: string, opts?: { fromName?: string }) => Promise<void>;
   timerState: RoomTimerState;
   timerActions: RoomTimerActions;
-  aiBackgroundUrl: string | null;
-  onAiBackgroundClear: () => void;
-  aiGallery: AiGalleryItem[];
-  onAiGallerySelect: (item: AiGalleryItem) => void;
 }) {
   const appVersion = process.env.NEXT_PUBLIC_APP_VERSION || "dev";
   const [isMobile, setIsMobile] = useState(false);
-  const [backgroundOpen, setBackgroundOpen] = useState(true);
   const [hostOpen, setHostOpen] = useState(false);
   const [coachOpen, setCoachOpen] = useState(false);
   const [timerOpen, setTimerOpen] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [mobileSection, setMobileSection] = useState<
-    "background" | "camera" | "timer" | "coach" | "host"
-  >("background");
+    "camera" | "timer" | "coach" | "host"
+  >("camera");
 
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 768px)");
@@ -5865,7 +5913,6 @@ function SettingsDrawer({
   }, []);
 
   const mobileSections = [
-    { id: "background", label: "Fond" },
     { id: "camera", label: "Camera" },
     { id: "timer", label: "Timer" },
     { id: "coach", label: "Coach" },
@@ -5922,20 +5969,6 @@ function SettingsDrawer({
                   </button>
                 ))}
               </div>
-              {mobileSection === "background" && (
-                <BackgroundSection
-                  backgroundMode={backgroundMode}
-                  onChangeBackground={onChangeBackground}
-                  disabled={backgroundDisabled}
-                  customBackgrounds={customBackgrounds}
-                  onAddCustomBackground={onAddCustomBackground}
-                  onRemoveCustomBackground={onRemoveCustomBackground}
-                  aiBackgroundUrl={aiBackgroundUrl}
-                  onAiBackgroundClear={onAiBackgroundClear}
-                  aiGallery={aiGallery}
-                  onAiGallerySelect={onAiGallerySelect}
-                />
-              )}
               {mobileSection === "camera" && (
                 <CameraSection
                   autoFrame={autoFrame}
@@ -5983,25 +6016,6 @@ function SettingsDrawer({
             </>
           ) : (
             <>
-              <SectionHeader
-                title="Arriere-plan"
-                isOpen={backgroundOpen}
-                onToggle={() => setBackgroundOpen((value) => !value)}
-              />
-              {backgroundOpen && (
-              <BackgroundSection
-                backgroundMode={backgroundMode}
-                onChangeBackground={onChangeBackground}
-                disabled={backgroundDisabled}
-                customBackgrounds={customBackgrounds}
-                onAddCustomBackground={onAddCustomBackground}
-                onRemoveCustomBackground={onRemoveCustomBackground}
-                aiBackgroundUrl={aiBackgroundUrl}
-                onAiBackgroundClear={onAiBackgroundClear}
-                aiGallery={aiGallery}
-                onAiGallerySelect={onAiGallerySelect}
-              />
-              )}
               <SectionHeader
                 title="Camera"
                 isOpen={cameraOpen}
