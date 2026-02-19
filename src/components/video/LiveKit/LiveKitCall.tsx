@@ -1,6 +1,5 @@
 "use client";
 
-/* eslint-disable react-hooks/set-state-in-effect */
 /* eslint-disable react/no-unescaped-entities */
 
 import {
@@ -25,7 +24,6 @@ import {
   CarouselLayout,
   ConnectionStateToast,
   ChatToggle,
-  DisconnectButton,
   FocusLayout,
   FocusLayoutContainer,
   GridLayout,
@@ -52,7 +50,7 @@ import {
   isTrackReferencePinned,
 } from "@livekit/components-core";
 import type { LocalParticipant, Participant } from "livekit-client";
-import { LocalAudioTrack, Room, RoomEvent, Track } from "livekit-client";
+import { ConnectionState, DisconnectReason, LocalAudioTrack, Room, RoomEvent, Track } from "livekit-client";
 import {
   Camera,
   CameraOff,
@@ -115,6 +113,44 @@ const REALTIME_URL = process.env.NEXT_PUBLIC_REALTIME_URL;
 const normalizeRealtimeUrl = (value?: string) => (value ?? "").trim().replace(/\/+$/, "");
 const REALTIME_RETRY_DELAYS_MS = [2000, 4000, 8000];
 const REALTIME_MAX_RETRIES = REALTIME_RETRY_DELAYS_MS.length;
+const REALTIME_STABLE_CONNECTION_MS = 3500;
+const REALTIME_NON_RETRYABLE_CLOSE_CODES = new Set([1002, 1003, 1007, 1008, 1010, 1011]);
+const REALTIME_OUTGOING_CHUNK_MS = 80;
+const REALTIME_OUTGOING_FLUSH_MS = 120;
+const REALTIME_OUTGOING_CHUNK_SAMPLES = Math.floor(
+  (REALTIME_SAMPLE_RATE * REALTIME_OUTGOING_CHUNK_MS) / 1000
+);
+const REALTIME_MAX_BUFFERED_SAMPLES = REALTIME_SAMPLE_RATE * 2;
+const REALTIME_WS_BACKLOG_LIMIT_BYTES = 512_000;
+const TRANSLATOR_IDENTITY_PREFIX = "bfzoom-translator-";
+const safeRandomId = () => {
+  // Keep client IDs deterministic enough for UI/session needs without Web Crypto,
+  // to avoid Safari iOS randomUUID context issues in some environments.
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+};
+
+const getDisconnectNotice = (reason?: DisconnectReason) => {
+  switch (reason) {
+    case DisconnectReason.CLIENT_INITIATED:
+      return "";
+    case DisconnectReason.USER_REJECTED:
+      return "Appel interrompu: un autre appel a ete refuse par le systeme.";
+    case DisconnectReason.USER_UNAVAILABLE:
+      return "Appel interrompu: utilisateur temporairement indisponible (appel telephonique en cours).";
+    case DisconnectReason.SIGNAL_CLOSE:
+      return "Connexion interrompue (signal). Reprends la session en un clic.";
+    case DisconnectReason.JOIN_FAILURE:
+      return "La session a ete interrompue. Tente une reconnexion.";
+    case DisconnectReason.STATE_MISMATCH:
+      return "Session desynchronisee apres interruption. Reconnexion requise.";
+    case DisconnectReason.UNKNOWN_REASON:
+    default:
+      return "Session interrompue (souvent apres un appel entrant iPhone).";
+  }
+};
+
+const AUTO_RESUME_MAX_ATTEMPTS = 6;
+const AUTO_RESUME_RETRY_DELAYS_MS = [1200, 2200, 3500, 5000, 7000, 9000];
 
 type AnnotationPoint = { x: number; y: number };
 type AnnotationStroke = {
@@ -144,6 +180,11 @@ type CaptionPayload = {
   sourceLang?: string;
   sourceLangName?: string;
 };
+
+const isTranslatorParticipantIdentity = (identity: string) =>
+  identity.trim().toLowerCase().startsWith(TRANSLATOR_IDENTITY_PREFIX);
+const isRealtimeNonRetryableCloseCode = (code: number) =>
+  REALTIME_NON_RETRYABLE_CLOSE_CODES.has(code);
 
 type CaptionStreamOverlayProps = {
   text: string;
@@ -616,12 +657,17 @@ const useAnnotationSync = ({ roomId, isHost }: { roomId: string; isHost: boolean
   const { addStroke, addTextEntry, setAnnotations, getAnnotations, undoAnnotation, clearAnnotations } =
     annotationOverlay;
   const { message, send } = useDataChannel(ANNOTATION_TOPIC);
+  const room = useRoomContext();
   const { localParticipant } = useLocalParticipant();
   const localIdentity = localParticipant?.identity;
+  const canSendAnnotations =
+    room.state === ConnectionState.Connected ||
+    room.state === ConnectionState.Reconnecting ||
+    room.state === ConnectionState.SignalReconnecting;
 
   const broadcast = useCallback(
     async (payload: AnnotationMessage) => {
-      if (!roomId || !send) return;
+      if (!roomId || !send || !canSendAnnotations) return;
       const encoder = new TextEncoder();
       try {
         await send(
@@ -632,10 +678,19 @@ const useAnnotationSync = ({ roomId, isHost }: { roomId: string; isHost: boolean
           }
         );
       } catch (err) {
+        const errorName = (err as { name?: string } | null)?.name || "";
+        const errorMessage =
+          err instanceof Error ? `${err.name}: ${err.message}` : String(err ?? "");
+        if (
+          errorName === "UnexpectedConnectionState" ||
+          /UnexpectedConnectionState|PC manager is closed|connection.+closed/i.test(errorMessage)
+        ) {
+          return;
+        }
         console.warn("Impossible d'envoyer la payload d'annotation", err);
       }
     },
-    [roomId, send]
+    [canSendAnnotations, roomId, send]
   );
 
   useEffect(() => {
@@ -904,6 +959,7 @@ const AnnotationLayer = (props: AnnotationLayerProps) => {
   } | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [aiPrompt, setAiPrompt] = useState("");
+  const [aiPromptText, setAiPromptText] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState("");
   const aiControllerRef = useRef<AbortController | null>(null);
@@ -1043,25 +1099,35 @@ const AnnotationLayer = (props: AnnotationLayerProps) => {
     [clearAiPolling, pollAiJobStatus]
   );
 
+  const buildAiPrompt = useCallback((basePrompt: string, textOverlay: string | null) => {
+    const trimmedBase = basePrompt.trim();
+    const overlay = textOverlay?.trim();
+    const overlayInstruction = overlay
+      ? `Ajoute le texte « ${overlay.replace(/"/g, "'")} » au centre, en lettres contrastées, lisibles, alignées de gauche à droite et sans effet miroir.`
+      : "";
+    return [trimmedBase, overlayInstruction].filter(Boolean).join(" ").trim();
+  }, []);
+
   const handleGenerateAi = useCallback(async () => {
     const trimmed = aiPrompt.trim();
     if (!trimmed) {
       setAiError("Décris l’ambiance que tu veux créer.");
       return;
     }
+    const fullPrompt = buildAiPrompt(trimmed, aiPromptText);
     aiControllerRef.current?.abort();
     const controller = new AbortController();
     aiControllerRef.current = controller;
     clearAiPolling();
     setAiError("");
     setLatestAiImage(null);
-    setLatestAiPrompt(trimmed);
+    setLatestAiPrompt(fullPrompt);
     setAiLoading(true);
     try {
       const response = await fetch("/api/dalle", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: trimmed }),
+        body: JSON.stringify({ prompt: fullPrompt }),
         signal: controller.signal,
       });
       if (!response.ok) {
@@ -1072,7 +1138,7 @@ const AnnotationLayer = (props: AnnotationLayerProps) => {
       if (!payload.jobId) {
         throw new Error("Aucun job id reçu.");
       }
-      startAiPolling(payload.jobId, trimmed);
+      startAiPolling(payload.jobId, fullPrompt);
     } catch (err) {
       setLatestAiImage(null);
       setLatestAiPrompt("");
@@ -1086,7 +1152,7 @@ const AnnotationLayer = (props: AnnotationLayerProps) => {
         aiControllerRef.current = null;
       }
     }
-  }, [aiPrompt, clearAiPolling, startAiPolling]);
+  }, [aiPrompt, aiPromptText, buildAiPrompt, clearAiPolling, startAiPolling]);
 
   const handleSaveAiToGallery = useCallback(() => {
     if (!latestAiImage || !latestAiPrompt) return;
@@ -1220,6 +1286,7 @@ const AnnotationLayer = (props: AnnotationLayerProps) => {
     : mode === "text"
     ? "text"
     : "default";
+  const showAiTextOverlay = backgroundMode === "ai" && aiPromptText.trim() && !drawingEnabled;
   const aiStatusMessage =
     aiError ||
     (aiStatus === "pending" || aiStatus === "processing"
@@ -1245,6 +1312,15 @@ const AnnotationLayer = (props: AnnotationLayerProps) => {
         onTouchMove={handleCanvasMove}
         onTouchEnd={handleCanvasUp}
       />
+      {showAiTextOverlay && (
+        <div className="absolute inset-0 flex items-center justify-center px-4">
+          <div className="rounded-3xl bg-black/60 px-5 py-3 text-center text-xl font-semibold tracking-wide text-white shadow-2xl backdrop-blur transition">
+            <span className="text-2xl font-bold uppercase leading-tight tracking-[0.3em]">
+              {aiPromptText.trim()}
+            </span>
+          </div>
+        </div>
+      )}
       {stickersOnScreen.length > 0 && (
         <div className="absolute inset-0 pointer-events-none">
           {stickersOnScreen.map((sticker) => {
@@ -1541,6 +1617,26 @@ const AnnotationLayer = (props: AnnotationLayerProps) => {
                 Enregistrer
               </button>
             </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] uppercase tracking-[0.2em] text-white/60">
+                Texte à intégrer (optionnel)
+              </label>
+              <input
+                type="text"
+                value={aiPromptText}
+                onChange={(event) => setAiPromptText(event.target.value)}
+                placeholder="Ex: respire, merci / majuscules, style néon"
+                className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-[11px] text-white placeholder:text-white/40 focus:border-sky-400 focus:outline-none"
+              />
+              <p className="text-[10px] text-white/50">
+                DALL·E tentera d’inscrire ce texte au centre avec des lettres lisibles, mais la police et la mise en page peuvent varier.
+              </p>
+              {aiPromptText.trim() && (
+                <p className="text-[10px] text-amber-200">
+                  Texte ajouté : «{aiPromptText.trim()}» (vérifie la casse/style avant génération).
+                </p>
+              )}
+            </div>
             <div className="flex items-center justify-between gap-2">
               <p className="text-[11px] text-white/60">{aiStatusMessage}</p>
               <button
@@ -1587,7 +1683,7 @@ const pcm16ToFloat = (buffer: Int16Array) => {
   return output;
 };
 
-const base64FromArrayBuffer = (buffer: ArrayBuffer) => {
+const base64FromArrayBuffer = (buffer: ArrayBufferLike) => {
   let binary = "";
   const bytes = new Uint8Array(buffer);
   const chunkSize = 0x8000;
@@ -1617,6 +1713,7 @@ const useRealtimeTranslation = ({
   localParticipant,
   onError,
   onStatus,
+  onUnavailable,
 }: {
   enabled: boolean;
   isHost: boolean;
@@ -1626,6 +1723,7 @@ const useRealtimeTranslation = ({
   localParticipant?: LocalParticipant;
   onError: (message: string) => void;
   onStatus?: (status: RealtimeStatus) => void;
+  onUnavailable?: (reason: string) => void;
 }) => {
   const wsRef = useRef<WebSocket | null>(null);
   const wsOpeningRef = useRef(false);
@@ -1640,6 +1738,16 @@ const useRealtimeTranslation = ({
   const outputTimeRef = useRef(0);
   const retryStateRef = useRef({ attempts: 0 });
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stableOpenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const outgoingPcmQueueRef = useRef<number[]>([]);
+  const outgoingFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const droppedChunksRef = useRef(false);
+  const clearStableOpenTimer = useCallback(() => {
+    if (stableOpenTimerRef.current) {
+      clearTimeout(stableOpenTimerRef.current);
+      stableOpenTimerRef.current = null;
+    }
+  }, []);
 
   const buildSessionUpdate = useCallback(() => {
     return {
@@ -1652,7 +1760,12 @@ const useRealtimeTranslation = ({
         output_audio_format: "pcm16",
         voice: realtimeVoice,
         modalities: ["audio"],
-        turn_detection: { type: "server_vad" },
+        turn_detection: {
+          type: "server_vad",
+          threshold: 0.45,
+          prefix_padding_ms: 120,
+          silence_duration_ms: 260,
+        },
       },
     };
   }, [captionTargetName, captionSourceName, realtimeVoice]);
@@ -1684,6 +1797,13 @@ const useRealtimeTranslation = ({
       wsRef.current = null;
       wsOpeningRef.current = false;
     }
+    clearStableOpenTimer();
+    if (outgoingFlushTimerRef.current) {
+      clearTimeout(outgoingFlushTimerRef.current);
+      outgoingFlushTimerRef.current = null;
+    }
+    outgoingPcmQueueRef.current = [];
+    droppedChunksRef.current = false;
     const publishedTrack = trackRef.current;
     if (publishedTrack && localParticipant) {
       const hasPublication = localParticipant
@@ -1715,7 +1835,7 @@ const useRealtimeTranslation = ({
       realtimeWorkletRef.current = null;
     }
     outputTimeRef.current = 0;
-  }, [localParticipant]);
+  }, [clearStableOpenTimer, localParticipant]);
 
   useEffect(() => {
     if (!enabled || !isHost) {
@@ -1808,6 +1928,70 @@ const useRealtimeTranslation = ({
         wsRef.current = ws;
         wsOpeningRef.current = true;
         outputTimeRef.current = 0;
+        const scheduleReconnect = (reason: string) => {
+          if (cancelled) return;
+          if (retryTimerRef.current) return;
+          if (retryStateRef.current.attempts >= REALTIME_MAX_RETRIES) {
+            onError(`Realtime indisponible (${reason}). Coupe Start Realtime puis utilise Start Translate.`);
+            onStatus?.("error");
+            onUnavailable?.(reason);
+            return;
+          }
+          const delay =
+            REALTIME_RETRY_DELAYS_MS[
+              Math.min(retryStateRef.current.attempts, REALTIME_RETRY_DELAYS_MS.length - 1)
+            ];
+          retryStateRef.current.attempts += 1;
+          retryTimerRef.current = setTimeout(() => {
+            retryTimerRef.current = null;
+            if (cancelled) return;
+            void startRealtime();
+          }, delay);
+        };
+
+        const clearOutgoingFlushTimer = () => {
+          if (outgoingFlushTimerRef.current) {
+            clearTimeout(outgoingFlushTimerRef.current);
+            outgoingFlushTimerRef.current = null;
+          }
+        };
+
+        const sendAudioChunk = (pcm16: Int16Array) => {
+          const currentWs = wsRef.current;
+          if (!currentWs || currentWs.readyState !== WebSocket.OPEN) return;
+          if (currentWs.bufferedAmount > REALTIME_WS_BACKLOG_LIMIT_BYTES) {
+            if (!droppedChunksRef.current) {
+              droppedChunksRef.current = true;
+              onError("Realtime: reseau surcharge, reprise en mode faible latence.");
+            }
+            return;
+          }
+          if (droppedChunksRef.current && currentWs.bufferedAmount < REALTIME_WS_BACKLOG_LIMIT_BYTES / 4) {
+            droppedChunksRef.current = false;
+            onError("");
+          }
+          const base64 = base64FromArrayBuffer(pcm16.buffer);
+          currentWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: base64 }));
+        };
+
+        const flushOutgoingQueue = () => {
+          clearOutgoingFlushTimer();
+          const queue = outgoingPcmQueueRef.current;
+          if (!queue.length) return;
+          while (queue.length > 0) {
+            const chunk = Int16Array.from(queue.splice(0, REALTIME_OUTGOING_CHUNK_SAMPLES));
+            if (!chunk.length) break;
+            sendAudioChunk(chunk);
+          }
+        };
+
+        const scheduleFlushOutgoingQueue = () => {
+          if (outgoingFlushTimerRef.current) return;
+          outgoingFlushTimerRef.current = setTimeout(() => {
+            flushOutgoingQueue();
+          }, REALTIME_OUTGOING_FLUSH_MS);
+        };
+
         await context.audioWorklet.addModule("/audio/realtime-processor.js");
         const workletNode = new AudioWorkletNode(context, "realtime-processor");
         realtimeWorkletRef.current = workletNode;
@@ -1817,8 +2001,18 @@ const useRealtimeTranslation = ({
           const downsampled = downsampleBuffer(input, context.sampleRate, REALTIME_SAMPLE_RATE);
           if (!downsampled) return;
           const pcm16 = floatToPcm16(downsampled);
-          const base64 = base64FromArrayBuffer(pcm16.buffer);
-          wsRef.current.send(JSON.stringify({ type: "input_audio_buffer.append", audio: base64 }));
+          const queue = outgoingPcmQueueRef.current;
+          for (let i = 0; i < pcm16.length; i += 1) {
+            queue.push(pcm16[i]);
+          }
+          if (queue.length > REALTIME_MAX_BUFFERED_SAMPLES) {
+            queue.splice(0, queue.length - REALTIME_SAMPLE_RATE);
+          }
+          while (queue.length >= REALTIME_OUTGOING_CHUNK_SAMPLES) {
+            const chunk = Int16Array.from(queue.splice(0, REALTIME_OUTGOING_CHUNK_SAMPLES));
+            sendAudioChunk(chunk);
+          }
+          scheduleFlushOutgoingQueue();
         };
 
         source.connect(workletNode);
@@ -1826,10 +2020,17 @@ const useRealtimeTranslation = ({
         gain.connect(context.destination);
 
         ws.onopen = () => {
-          retryStateRef.current.attempts = 0;
           onStatus?.("open");
           console.log("[realtime] ws.onopen");
           wsOpeningRef.current = false;
+          clearOutgoingFlushTimer();
+          clearStableOpenTimer();
+          stableOpenTimerRef.current = setTimeout(() => {
+            retryStateRef.current.attempts = 0;
+            stableOpenTimerRef.current = null;
+          }, REALTIME_STABLE_CONNECTION_MS);
+          outgoingPcmQueueRef.current = [];
+          droppedChunksRef.current = false;
           if (pendingStopRef.current) {
             pendingStopRef.current = false;
             void stopRealtime();
@@ -1869,42 +2070,35 @@ const useRealtimeTranslation = ({
 
         ws.onerror = () => {
           if (cancelled) return;
+          clearOutgoingFlushTimer();
+          outgoingPcmQueueRef.current = [];
           onError("Realtime: connexion impossible.");
           onStatus?.("error");
-          if (retryStateRef.current.attempts < REALTIME_MAX_RETRIES) {
-            const delay =
-              REALTIME_RETRY_DELAYS_MS[
-                Math.min(retryStateRef.current.attempts, REALTIME_RETRY_DELAYS_MS.length - 1)
-              ];
-            retryStateRef.current.attempts += 1;
-            retryTimerRef.current = setTimeout(() => {
-              if (cancelled) return;
-              void startRealtime();
-            }, delay);
-          }
+          scheduleReconnect("connexion websocket");
         };
         ws.onclose = (event) => {
           console.log("[realtime] ws.onclose", { code: event.code, reason: event.reason });
           wsOpeningRef.current = false;
+          clearStableOpenTimer();
+          clearOutgoingFlushTimer();
+          outgoingPcmQueueRef.current = [];
+          droppedChunksRef.current = false;
           if (pendingStopRef.current) {
             pendingStopRef.current = false;
           }
           wsRef.current = null;
           if (cancelled) return;
+          if (event.code && isRealtimeNonRetryableCloseCode(event.code)) {
+            const reason = `fermeture websocket ${event.code}`;
+            onError(`Realtime indisponible (${reason}). Bascule auto vers Traduction vocale.`);
+            onStatus?.("error");
+            onUnavailable?.(reason);
+            return;
+          }
           if (event.code && event.code !== 1000) {
             onError(`Realtime: connexion fermee (${event.code}).`);
             onStatus?.("error");
-            if (retryStateRef.current.attempts < REALTIME_MAX_RETRIES) {
-              const delay =
-                REALTIME_RETRY_DELAYS_MS[
-                  Math.min(retryStateRef.current.attempts, REALTIME_RETRY_DELAYS_MS.length - 1)
-                ];
-              retryStateRef.current.attempts += 1;
-              retryTimerRef.current = setTimeout(() => {
-                if (cancelled) return;
-                void startRealtime();
-              }, delay);
-            }
+            scheduleReconnect(`fermeture websocket ${event.code}`);
             return;
           }
           onStatus?.("closed");
@@ -1924,9 +2118,20 @@ const useRealtimeTranslation = ({
         clearTimeout(retryTimerRef.current);
         retryTimerRef.current = null;
       }
+      clearStableOpenTimer();
       void stopRealtime();
     };
-  }, [enabled, isHost, localParticipant, onError, onStatus, stopRealtime, buildSessionUpdate]);
+  }, [
+    enabled,
+    isHost,
+    localParticipant,
+    onError,
+    onStatus,
+    stopRealtime,
+    buildSessionUpdate,
+    clearStableOpenTimer,
+    onUnavailable,
+  ]);
 
   useEffect(() => {
     if (!enabled || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
@@ -1992,11 +2197,122 @@ export default function LiveKitCall({
   const [token, setToken] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [tokenRetryTrigger, setTokenRetryTrigger] = useState(0);
-  const handleRetryToken = useCallback(() => {
+  const [roomMountKey, setRoomMountKey] = useState(0);
+  const [disconnectNotice, setDisconnectNotice] = useState("");
+  const [autoResumeActive, setAutoResumeActive] = useState(false);
+  const [autoResumeAttempt, setAutoResumeAttempt] = useState(0);
+  const manualLeaveRef = useRef(false);
+  const autoResumeAttemptsRef = useRef(0);
+  const autoResumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoResumeInFlightRef = useRef(false);
+  const handleResumeAfterInterrupt = useCallback(() => {
+    manualLeaveRef.current = false;
+    setDisconnectNotice("");
     setToken("");
     setError("");
+    setRoomMountKey((prev) => prev + 1);
     setTokenRetryTrigger((prev) => prev + 1);
   }, []);
+  const clearAutoResumeState = useCallback(() => {
+    if (autoResumeTimerRef.current) {
+      clearTimeout(autoResumeTimerRef.current);
+      autoResumeTimerRef.current = null;
+    }
+    autoResumeInFlightRef.current = false;
+    autoResumeAttemptsRef.current = 0;
+    setAutoResumeAttempt(0);
+    setAutoResumeActive(false);
+  }, []);
+  const handleRetryToken = useCallback(() => {
+    clearAutoResumeState();
+    setToken("");
+    setError("");
+    setDisconnectNotice("");
+    setTokenRetryTrigger((prev) => prev + 1);
+  }, [clearAutoResumeState]);
+  const handleManualLeave = useCallback(() => {
+    manualLeaveRef.current = true;
+    clearAutoResumeState();
+    setDisconnectNotice("");
+  }, [clearAutoResumeState]);
+  const handleQuitAfterInterrupt = useCallback(() => {
+    handleManualLeave();
+    if (onLeave) {
+      onLeave();
+      return;
+    }
+    router.push("/");
+  }, [handleManualLeave, onLeave, router]);
+  const triggerAutoResumeNow = useCallback(() => {
+    if (manualLeaveRef.current) return;
+    if (autoResumeInFlightRef.current) return;
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    if (typeof navigator !== "undefined" && !navigator.onLine) return;
+    if (autoResumeAttemptsRef.current >= AUTO_RESUME_MAX_ATTEMPTS) {
+      setAutoResumeActive(false);
+      return;
+    }
+    autoResumeAttemptsRef.current += 1;
+    setAutoResumeAttempt(autoResumeAttemptsRef.current);
+    autoResumeInFlightRef.current = true;
+    handleResumeAfterInterrupt();
+  }, [handleResumeAfterInterrupt]);
+  const scheduleAutoResume = useCallback(
+    (customDelayMs?: number) => {
+      if (manualLeaveRef.current) return;
+      if (autoResumeAttemptsRef.current >= AUTO_RESUME_MAX_ATTEMPTS) {
+        setAutoResumeActive(false);
+        return;
+      }
+      if (autoResumeTimerRef.current) {
+        clearTimeout(autoResumeTimerRef.current);
+        autoResumeTimerRef.current = null;
+      }
+      setAutoResumeActive(true);
+      const delay =
+        customDelayMs ??
+        AUTO_RESUME_RETRY_DELAYS_MS[
+          Math.min(autoResumeAttemptsRef.current, AUTO_RESUME_RETRY_DELAYS_MS.length - 1)
+        ];
+      autoResumeTimerRef.current = setTimeout(() => {
+        autoResumeTimerRef.current = null;
+        triggerAutoResumeNow();
+      }, delay);
+    },
+    [triggerAutoResumeNow]
+  );
+  useEffect(() => {
+    return () => {
+      if (autoResumeTimerRef.current) {
+        clearTimeout(autoResumeTimerRef.current);
+        autoResumeTimerRef.current = null;
+      }
+    };
+  }, []);
+  useEffect(() => {
+    if (!autoResumeActive) return;
+    if (typeof window === "undefined" || typeof document === "undefined") return;
+    const tryReconnectWhenForeground = () => {
+      if (!autoResumeActive) return;
+      if (document.visibilityState !== "visible") return;
+      if (typeof navigator !== "undefined" && !navigator.onLine) return;
+      if (autoResumeTimerRef.current) {
+        clearTimeout(autoResumeTimerRef.current);
+        autoResumeTimerRef.current = null;
+      }
+      triggerAutoResumeNow();
+    };
+    document.addEventListener("visibilitychange", tryReconnectWhenForeground);
+    window.addEventListener("focus", tryReconnectWhenForeground);
+    window.addEventListener("online", tryReconnectWhenForeground);
+    window.addEventListener("pageshow", tryReconnectWhenForeground);
+    return () => {
+      document.removeEventListener("visibilitychange", tryReconnectWhenForeground);
+      window.removeEventListener("focus", tryReconnectWhenForeground);
+      window.removeEventListener("online", tryReconnectWhenForeground);
+      window.removeEventListener("pageshow", tryReconnectWhenForeground);
+    };
+  }, [autoResumeActive, triggerAutoResumeNow]);
   const [backgroundMode, setBackgroundMode] = useState<string>("none");
   const [customBackgrounds, setCustomBackgrounds] = useState<BackgroundOption[]>([]);
   const [aiBackgroundUrl, setAiBackgroundUrl] = useState<string | null>(null);
@@ -2031,10 +2347,7 @@ export default function LiveKitCall({
   const handleAiGallerySave = useCallback(
     (prompt: string, image: string) => {
       const item: AiGalleryItem = {
-        id:
-          typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-            ? crypto.randomUUID()
-            : `${Date.now()}`,
+        id: safeRandomId(),
         prompt,
         image,
         createdAt: Date.now(),
@@ -2170,6 +2483,8 @@ export default function LiveKitCall({
   const [realtimeError, setRealtimeError] = useState("");
   const [ttsError, setTtsError] = useState("");
   const [videoFit, setVideoFit] = useState<"cover" | "contain">("cover");
+  const forcedContainRef = useRef(false);
+  const aiVideoFitRestoreRef = useRef<"cover" | "contain">("cover");
   const realtimeAvailable = Boolean(REALTIME_URL);
   const onRealtimeError = useCallback((message: string) => setRealtimeError(message), []);
   const onTtsError = useCallback((message: string) => setTtsError(message), []);
@@ -2177,6 +2492,21 @@ export default function LiveKitCall({
     () => CAPTION_TARGETS_CONFIG.find((item) => item.code === captionTarget)?.name || "English",
     [captionTarget]
   );
+  useEffect(() => {
+    if (backgroundMode === "ai") {
+      if (!forcedContainRef.current && videoFit !== "contain") {
+        forcedContainRef.current = true;
+        aiVideoFitRestoreRef.current = videoFit;
+        setVideoFit("contain");
+      }
+      return;
+    }
+    if (!forcedContainRef.current) return;
+    forcedContainRef.current = false;
+    if (videoFit === "contain") {
+      setVideoFit(aiVideoFitRestoreRef.current);
+    }
+  }, [backgroundMode, videoFit]);
   const prevHostCaptionTargetRef = useRef<CaptionTarget>(captionTarget);
   useEffect(() => {
     if (guestCaptionTarget === prevHostCaptionTargetRef.current) {
@@ -2215,10 +2545,19 @@ export default function LiveKitCall({
     if (typeof window === "undefined") return false;
     return "SpeechRecognition" in window || "webkitSpeechRecognition" in window;
   }, []);
+  const insecureHttpMediaContext = useMemo(() => {
+    if (typeof window === "undefined") return false;
+    const { protocol, hostname } = window.location;
+    const isLoopbackHost =
+      hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      hostname === "::1";
+    return protocol === "http:" && !isLoopbackHost;
+  }, []);
 
 
   const identity = useMemo(
-    () => (typeof crypto !== "undefined" ? crypto.randomUUID() : `${Date.now()}`),
+    () => safeRandomId(),
     []
   );
   const isMobileDevice = useMemo(() => {
@@ -2250,6 +2589,83 @@ export default function LiveKitCall({
     if (ttsError) setTtsError("");
     if (shareMicToGuests) setShareMicToGuests(false);
   }, [realtimeEnabled, ttsError, shareMicToGuests]);
+
+  useEffect(() => {
+    if (!isHost || !realtimeEnabled) return;
+    if (captionsEnabled) return;
+    setCaptionsEnabled(true);
+  }, [captionsEnabled, isHost, realtimeEnabled]);
+
+  useEffect(() => {
+    if (!isHost || !roomId) return;
+
+    let cancelled = false;
+    const action = realtimeEnabled ? "ensure" : "release";
+
+    const syncTranslatorWorker = async () => {
+      try {
+        const authHeader = await getAuthHeader();
+        const response = await fetch("/api/livekit/translator/session", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...authHeader,
+          },
+          body: JSON.stringify({
+            action,
+            room: roomId,
+            sourceLanguage,
+            targetLanguage: captionTarget,
+            voice: realtimeVoiceInput,
+          }),
+        });
+        if (!response.ok) {
+          const raw = await response.text().catch(() => "");
+          throw new Error(raw || `Translator orchestrator error (${response.status})`);
+        }
+      } catch (error) {
+        if (cancelled) return;
+        if (realtimeEnabled) {
+          onRealtimeError(
+            error instanceof Error
+              ? `Worker traducteur indisponible: ${error.message}`
+              : "Worker traducteur indisponible."
+          );
+        }
+      }
+    };
+
+    void syncTranslatorWorker();
+
+    return () => {
+      cancelled = true;
+      if (!realtimeEnabled) return;
+      void (async () => {
+        try {
+          const authHeader = await getAuthHeader();
+          await fetch("/api/livekit/translator/session", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...authHeader,
+            },
+            body: JSON.stringify({
+              action: "release",
+              room: roomId,
+            }),
+          });
+        } catch {}
+      })();
+    };
+  }, [
+    captionTarget,
+    isHost,
+    onRealtimeError,
+    realtimeEnabled,
+    realtimeVoiceInput,
+    roomId,
+    sourceLanguage,
+  ]);
 
   useEffect(() => {
     if (realtimeEnabled) return;
@@ -2299,13 +2715,36 @@ export default function LiveKitCall({
         if (!nextToken || nextToken.split(".").length !== 3) {
           throw new Error("Token LiveKit invalide");
         }
-        if (!cancelled) setToken(nextToken);
+        if (!cancelled) {
+          autoResumeInFlightRef.current = false;
+          if (autoResumeActive) {
+            clearAutoResumeState();
+            setDisconnectNotice("");
+          }
+          setToken(nextToken);
+        }
       } catch (err) {
         if (cancelled) return;
         const message =
           err instanceof Error
             ? err.message
             : "Erreur inconnue lors de la génération du token.";
+        autoResumeInFlightRef.current = false;
+        const shouldAutoRetry = autoResumeActive && !manualLeaveRef.current;
+        if (shouldAutoRetry && autoResumeAttemptsRef.current < AUTO_RESUME_MAX_ATTEMPTS) {
+          setError("");
+          setDisconnectNotice(
+            `Reconnexion automatique en cours (${autoResumeAttemptsRef.current}/${AUTO_RESUME_MAX_ATTEMPTS})...`
+          );
+          scheduleAutoResume();
+          return;
+        }
+        if (shouldAutoRetry) {
+          setAutoResumeActive(false);
+          setDisconnectNotice(
+            "Reconnexion automatique impossible pour le moment. Reprends manuellement la visioconference."
+          );
+        }
         setError(message);
       }
     };
@@ -2316,7 +2755,16 @@ export default function LiveKitCall({
       cancelled = true;
       controller.abort();
     };
-  }, [roomId, identity, isHost, preJoinChoices?.username, tokenRetryTrigger]);
+  }, [
+    roomId,
+    identity,
+    isHost,
+    preJoinChoices?.username,
+    tokenRetryTrigger,
+    autoResumeActive,
+    clearAutoResumeState,
+    scheduleAutoResume,
+  ]);
 
   if (!LK_URL) {
     return (
@@ -2339,6 +2787,44 @@ export default function LiveKitCall({
             Réessayer la connexion
           </button>
           <span>Si cela persiste, vérifie la configuration LiveKit (NEXT_PUBLIC_LIVEKIT_URL, token).</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (disconnectNotice) {
+    return (
+      <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4 text-amber-900">
+        <p className="font-semibold">Visioconference interrompue</p>
+        <p className="mt-1 text-sm text-amber-900/80">{disconnectNotice}</p>
+        <p className="mt-1 text-xs text-amber-900/70">
+          iOS ne permet pas de gerer les appels telephoniques entrants depuis le navigateur. BFZoom peut par contre reprendre la session juste apres l'appel.
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          {!autoResumeActive && (
+            <button
+              type="button"
+              onClick={() => {
+                clearAutoResumeState();
+                handleResumeAfterInterrupt();
+              }}
+              className="rounded-full border border-amber-300 bg-white px-3 py-1 text-xs font-semibold text-amber-900 hover:bg-amber-100"
+            >
+              Reprendre la visioconference
+            </button>
+          )}
+          {autoResumeActive && (
+            <p className="rounded-full border border-amber-300 bg-white px-3 py-1 text-xs font-semibold text-amber-900">
+              Reconnexion automatique ({autoResumeAttempt}/{AUTO_RESUME_MAX_ATTEMPTS})
+            </p>
+          )}
+          <button
+            type="button"
+            onClick={handleQuitAfterInterrupt}
+            className="rounded-full border border-amber-300 bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-900 hover:bg-amber-200"
+          >
+            Quitter
+          </button>
         </div>
       </div>
     );
@@ -2371,6 +2857,12 @@ export default function LiveKitCall({
           <p className="mt-4 text-xs text-slate-400 text-center">
             Active ton micro et ta camera puis clique sur Rejoindre.
           </p>
+          {insecureHttpMediaContext && (
+            <p className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
+              HTTP sur reseau local detecte. Safari/Chrome peuvent bloquer micro/camera.
+              Utilise HTTPS (tunnel) ou l'app iOS native.
+            </p>
+          )}
         </div>
       </div>
     );
@@ -2392,18 +2884,38 @@ export default function LiveKitCall({
   return (
     <div className="w-full">
       <LiveKitRoom
+        key={`lk-room-${roomId}-${roomMountKey}`}
         token={token}
         serverUrl={LK_URL}
         connect
         audio={audioOptions}
         video={videoOptions}
         options={roomOptions}
-        onDisconnected={() => {
-          if (onLeave) {
-            onLeave();
+        onDisconnected={(reason) => {
+          const clientInitiated =
+            manualLeaveRef.current || reason === DisconnectReason.CLIENT_INITIATED;
+          manualLeaveRef.current = false;
+          if (clientInitiated) {
+            if (onLeave) {
+              onLeave();
+              return;
+            }
+            router.push("/");
             return;
           }
-          router.push("/");
+          const notice = getDisconnectNotice(reason);
+          if (autoResumeTimerRef.current) {
+            clearTimeout(autoResumeTimerRef.current);
+            autoResumeTimerRef.current = null;
+          }
+          autoResumeInFlightRef.current = false;
+          autoResumeAttemptsRef.current = 0;
+          setAutoResumeAttempt(0);
+          setAutoResumeActive(true);
+          setDisconnectNotice(
+            notice || "Session interrompue. Tentative de reconnexion automatique..."
+          );
+          scheduleAutoResume(700);
         }}
         className="lk-room rounded-2xl border border-slate-200 bg-black"
       >
@@ -2462,6 +2974,7 @@ export default function LiveKitCall({
             onChangeCaptionSize={setCaptionSize}
             videoFit={videoFit}
             onChangeVideoFit={setVideoFit}
+            onLeaveSession={handleManualLeave}
           />
         )}
         <RoomAudioRenderer />
@@ -2579,6 +3092,7 @@ function LiveKitVideo({
   onChangeCaptionSize,
   videoFit,
   onChangeVideoFit,
+  onLeaveSession,
 }: {
   backgroundMode: string;
   backgroundOptions: BackgroundOption[];
@@ -2628,6 +3142,7 @@ function LiveKitVideo({
   onChangeCaptionSize: (size: "sm" | "md" | "lg") => void;
   videoFit: "cover" | "contain";
   onChangeVideoFit: (fit: "cover" | "contain") => void;
+  onLeaveSession: () => void;
 }) {
   const isMobileDevice = useIsMobileViewport();
   const isIPhone = useMemo(() => {
@@ -2635,8 +3150,21 @@ function LiveKitVideo({
     const ua = navigator.userAgent;
     return /iPhone|iPod/i.test(ua);
   }, []);
+  const backgroundEffectsDisabled = useMemo(() => {
+    if (typeof navigator === "undefined") return false;
+    const ua = navigator.userAgent;
+    const isIOSWebKit = /iPhone|iPad|iPod/i.test(ua);
+    const isDesktopSafari =
+      /Safari/i.test(ua) && !/Chrome|Chromium|CriOS|Edg|OPR|Firefox/i.test(ua);
+    return isIOSWebKit || isDesktopSafari;
+  }, []);
   const useMobileLayout = isMobileDevice || isIPhone;
   const { cameraTrack, isCameraEnabled, localParticipant } = useLocalParticipant();
+  const [realtimeStatus, setRealtimeStatus] = useState<RealtimeStatus>("idle");
+  const realtimeCaptionTargetName = useMemo(
+    () => CAPTION_TARGETS_CONFIG.find((item) => item.code === captionTarget)?.name || "English",
+    [captionTarget]
+  );
   const processorRef = useRef<{
     switchTo?: (options: {
       mode: "disabled" | "background-blur" | "virtual-background";
@@ -2651,6 +3179,7 @@ function LiveKitVideo({
   const [drawingEnabled, setDrawingEnabled] = useState(false);
   const [brushColor, setBrushColor] = useState("#f87171");
   const [brushWidth, setBrushWidth] = useState(3);
+  const realtimeFallbackTriggeredRef = useRef(false);
   const isDrawingRef = useRef(false);
   const currentStrokeRef = useRef<number | null>(null);
 
@@ -2671,10 +3200,13 @@ function LiveKitVideo({
     [{ source: Track.Source.ScreenShareAudio, withPlaceholder: false }],
     { onlySubscribed: true }
   );
-  const hasRealtimeAudio = useMemo(
+  const hasServerTranslatorAudio = useMemo(
     () =>
       realtimeAudioTracks.some(
-        (track) => isTrackReference(track) && !track.participant.isLocal
+        (track) =>
+          isTrackReference(track) &&
+          !track.participant.isLocal &&
+          isTranslatorParticipantIdentity(track.participant.identity || "")
       ),
     [realtimeAudioTracks]
   );
@@ -2704,6 +3236,47 @@ function LiveKitVideo({
   );
   const roomChat = useRoomChat(roomId, widgetState.showChat);
   const roomTimer = useRoomTimer(roomId);
+  const handleRealtimeUnavailable = useCallback(
+    (reason: string) => {
+      if (realtimeFallbackTriggeredRef.current) return;
+      realtimeFallbackTriggeredRef.current = true;
+      if (realtimeEnabled) onToggleRealtime();
+      if (shareMicToGuests) onToggleShareMicToGuests();
+      if (!captionsEnabled) onToggleCaptions();
+      if (!ttsEnabled) onToggleTts();
+      onTtsError(`Realtime indisponible (${reason}). Traduction vocale activee automatiquement.`);
+    },
+    [
+      captionsEnabled,
+      onToggleCaptions,
+      onToggleRealtime,
+      onToggleShareMicToGuests,
+      onToggleTts,
+      onTtsError,
+      realtimeEnabled,
+      shareMicToGuests,
+      ttsEnabled,
+    ]
+  );
+
+  useEffect(() => {
+    if (!realtimeEnabled) {
+      realtimeFallbackTriggeredRef.current = false;
+    }
+  }, [realtimeEnabled]);
+
+  useRealtimeTranslation({
+    enabled: realtimeEnabled && realtimeAvailable,
+    isHost,
+    captionTargetName: realtimeCaptionTargetName,
+    captionSourceName: sourceLanguageOption.name,
+    realtimeVoice,
+    localParticipant,
+    onError: onRealtimeError,
+    onStatus: setRealtimeStatus,
+    onUnavailable: handleRealtimeUnavailable,
+  });
+
   useEffect(() => {
     const track = cameraTrack?.track;
     if (
@@ -2713,7 +3286,7 @@ function LiveKitVideo({
       return;
     }
 
-    if (isIPhone) {
+    if (backgroundEffectsDisabled) {
       processorRef.current?.destroy?.();
       processorRef.current = null;
       processorDisabledRef.current = true;
@@ -2724,10 +3297,23 @@ function LiveKitVideo({
     }
 
     let cancelled = false;
+    const mediaStreamTrack = (
+      track as unknown as { mediaStreamTrack?: MediaStreamTrack }
+    ).mediaStreamTrack;
+    const onCaptureEnded = () => {
+      processorDisabledRef.current = true;
+      if (processorRef.current?.switchTo) {
+        void processorRef.current.switchTo({ mode: "disabled" }).catch(() => {});
+      }
+      if (backgroundMode !== "none") {
+        onChangeBackground("none");
+      }
+    };
+    mediaStreamTrack?.addEventListener("ended", onCaptureEnded);
 
     const applyProcessor = async () => {
       if (processorDisabledRef.current) return;
-      if (isIPhone) return;
+      if (backgroundEffectsDisabled) return;
 
       let processorModule: typeof import("@livekit/track-processors");
       try {
@@ -2810,8 +3396,16 @@ function LiveKitVideo({
 
     return () => {
       cancelled = true;
+      mediaStreamTrack?.removeEventListener("ended", onCaptureEnded);
     };
-  }, [backgroundMode, backgroundOptions, cameraTrack?.track, isMobileDevice, isIPhone, onChangeBackground]);
+  }, [
+    backgroundEffectsDisabled,
+    backgroundMode,
+    backgroundOptions,
+    cameraTrack?.track,
+    isMobileDevice,
+    onChangeBackground,
+  ]);
 
   return (
     <>
@@ -2836,7 +3430,7 @@ function LiveKitVideo({
         realtimeVoice={realtimeVoice}
         onChangeRealtimeVoice={onChangeRealtimeVoice}
         onToggleRealtime={onToggleRealtime}
-        realtimeStatus={realtimeError ? "error" : realtimeEnabled ? "connecting" : "idle"}
+        realtimeStatus={realtimeStatus}
         realtimeError={realtimeError}
         hostLocalTtsEnabled={hostLocalTtsEnabled}
         onToggleHostLocalTts={onToggleHostLocalTts}
@@ -2845,7 +3439,7 @@ function LiveKitVideo({
         guestCaptionTarget={guestCaptionTarget}
         onChangeGuestCaptionTarget={onChangeGuestCaptionTarget}
         guestTtsEnabled={guestTtsEnabled}
-        guestTtsDisabled={!isHost && hasRealtimeAudio}
+        guestTtsDisabled={!isHost && hasServerTranslatorAudio}
         onToggleGuestTts={onToggleGuestTts}
         ttsError={ttsError}
         captionSize={captionSize}
@@ -2871,6 +3465,7 @@ function LiveKitVideo({
           roomChat={roomChat}
           timerState={roomTimer.state}
           onOpenSettings={() => setSettingsOpen(true)}
+          onLeaveSession={onLeaveSession}
           autoFrame={autoFrame}
           captionSize={captionSize}
           videoFit={videoFit}
@@ -2884,12 +3479,12 @@ function LiveKitVideo({
           onAddCustomBackground={onAddCustomBackground}
           onRemoveCustomBackground={onRemoveCustomBackground}
           isSettingsOpen={settingsOpen}
-        aiBackgroundUrl={aiBackgroundUrl}
-        onAiImageGenerated={onAiImageGenerated}
-        onClearAiBackground={onClearAiBackground}
-        aiGallery={aiGallery}
-        onAiGallerySelect={onAiGallerySelect}
-        onSaveAiBackground={onSaveAiBackground}
+          aiBackgroundUrl={aiBackgroundUrl}
+          onAiImageGenerated={onAiImageGenerated}
+          onClearAiBackground={onClearAiBackground}
+          aiGallery={aiGallery}
+          onAiGallerySelect={onAiGallerySelect}
+          onSaveAiBackground={onSaveAiBackground}
         />
       ) : (
         <LiveKitConference
@@ -2899,6 +3494,7 @@ function LiveKitVideo({
           roomChat={roomChat}
           timerState={roomTimer.state}
           onOpenSettings={() => setSettingsOpen(true)}
+          onLeaveSession={onLeaveSession}
           autoFrame={autoFrame}
           captionsEnabled={captionsEnabled}
           captionsSupported={captionsSupported}
@@ -2907,7 +3503,6 @@ function LiveKitVideo({
           realtimeEnabled={realtimeEnabled}
           realtimeAvailable={realtimeAvailable}
           realtimeVoice={realtimeVoice}
-          onRealtimeStatus={() => {}}
           onRealtimeError={onRealtimeError}
           hostLocalTtsEnabled={hostLocalTtsEnabled}
           shareMicToGuests={shareMicToGuests}
@@ -2926,11 +3521,11 @@ function LiveKitVideo({
         guestCaptionTarget={guestCaptionTarget}
         onChangeGuestCaptionTarget={onChangeGuestCaptionTarget}
         backgroundMode={backgroundMode}
-        onChangeBackground={onChangeBackground}
-        customBackgrounds={customBackgrounds}
-        onAddCustomBackground={onAddCustomBackground}
-        onRemoveCustomBackground={onRemoveCustomBackground}
-        aiBackgroundUrl={aiBackgroundUrl}
+          onChangeBackground={onChangeBackground}
+          customBackgrounds={customBackgrounds}
+          onAddCustomBackground={onAddCustomBackground}
+          onRemoveCustomBackground={onRemoveCustomBackground}
+          aiBackgroundUrl={aiBackgroundUrl}
           onAiImageGenerated={onAiImageGenerated}
           onClearAiBackground={onClearAiBackground}
           aiGallery={aiGallery}
@@ -3032,7 +3627,7 @@ function useRoomChat(roomId: string, isChatOpen: boolean) {
     const text = typeof input === "string" ? input.trim() : input.text.trim();
     if (!text) return;
     const payload: ChatMessage & { roomId: string } = {
-      id: typeof crypto !== "undefined" ? crypto.randomUUID() : `${Date.now()}`,
+      id: safeRandomId(),
       text,
       originalText: typeof input === "string" ? undefined : input.originalText,
       translatedText: typeof input === "string" ? undefined : input.translatedText,
@@ -3193,6 +3788,7 @@ function LiveKitConference({
   roomChat,
   timerState,
   onOpenSettings,
+  onLeaveSession,
   autoFrame,
   captionsEnabled,
   captionsSupported,
@@ -3201,7 +3797,6 @@ function LiveKitConference({
   realtimeEnabled,
   realtimeAvailable,
   realtimeVoice,
-  onRealtimeStatus,
   onRealtimeError,
   hostLocalTtsEnabled,
   shareMicToGuests,
@@ -3238,6 +3833,7 @@ function LiveKitConference({
   roomChat: ReturnType<typeof useRoomChat>;
   timerState: RoomTimerState;
   onOpenSettings: () => void;
+  onLeaveSession: () => void;
   autoFrame: boolean;
   captionsEnabled: boolean;
   captionsSupported: boolean;
@@ -3246,7 +3842,6 @@ function LiveKitConference({
   realtimeEnabled: boolean;
   realtimeAvailable: boolean;
   realtimeVoice: string;
-  onRealtimeStatus: (status: RealtimeStatus) => void;
   onRealtimeError: (message: string) => void;
   hostLocalTtsEnabled: boolean;
   shareMicToGuests: boolean;
@@ -3292,6 +3887,14 @@ function LiveKitConference({
     if (typeof navigator === "undefined") return false;
     return /iPhone|iPad|iPod/i.test(navigator.userAgent);
   }, []);
+  const backgroundEffectsDisabled = useMemo(() => {
+    if (typeof navigator === "undefined") return false;
+    const ua = navigator.userAgent;
+    const isIOSWebKit = /iPhone|iPad|iPod/i.test(ua);
+    const isDesktopSafari =
+      /Safari/i.test(ua) && !/Chrome|Chromium|CriOS|Edg|OPR|Firefox/i.test(ua);
+    return isIOSWebKit || isDesktopSafari;
+  }, []);
   const { send: sendAction } = useDataChannel("bfzoom-actions");
   const sendActionItem = useCallback(
     async (type: string) => {
@@ -3299,7 +3902,7 @@ function LiveKitConference({
       const text = actionControlsState.lastAction;
       if (!text) return;
       const payload = {
-        id: typeof crypto !== "undefined" ? crypto.randomUUID() : `${Date.now()}`,
+        id: safeRandomId(),
         type,
         text,
         roomId,
@@ -3322,6 +3925,7 @@ function LiveKitConference({
     setInviteOpen(true);
   }, [isHost, roomId]);
   const [isFlippingCamera, setIsFlippingCamera] = useState(false);
+  const [isTogglingCamera, setIsTogglingCamera] = useState(false);
   const remoteParticipants = useRemoteParticipants();
   const {
     localParticipant,
@@ -3346,6 +3950,10 @@ function LiveKitConference({
     return null;
   }, [remoteParticipants, localParticipant?.identity]);
   const room = useRoomContext();
+  const handleLeaveRoom = useCallback(() => {
+    onLeaveSession();
+    void room.disconnect();
+  }, [onLeaveSession, room]);
   const lastCameraRefreshRef = useRef(0);
   const initialPageShowRef = useRef(true);
   const lastAutoPinnedParticipantRef = useRef<string | null>(null);
@@ -3398,16 +4006,6 @@ const captionTargetLabel = useMemo(
   );
   const sourceLanguageName = sourceLanguageOption.name;
   const sourceLanguageLocale = sourceLanguageOption.recognitionLocale;
-  useRealtimeTranslation({
-    enabled: realtimeEnabled && realtimeAvailable,
-    isHost,
-    captionTargetName,
-    captionSourceName: sourceLanguageOption.name,
-    realtimeVoice,
-    localParticipant,
-    onError: onRealtimeError,
-    onStatus: onRealtimeStatus,
-  });
   const positioningGuide = useMemo(() => {
     const company = rumeurPositioning.company;
     const expertise = rumeurPositioning.expertise.join(", ");
@@ -3780,7 +4378,15 @@ const captionTargetLabel = useMemo(
       ttsPlayingRef.current = false;
       void playNextTts();
     }
-  }, [captionTarget, ensureTtsTrack, hostLocalTtsEnabled, onTtsError, speakGuestCaption, ttsEnabled]);
+  }, [
+    captionTarget,
+    ensureTtsTrack,
+    hostLocalTtsEnabled,
+    onTtsError,
+    realtimeVoice,
+    speakGuestCaption,
+    ttsEnabled,
+  ]);
 
   const enqueueTts = useCallback(
     (text: string) => {
@@ -3943,7 +4549,7 @@ const captionTargetLabel = useMemo(
         if (captionTimerRef.current) clearTimeout(captionTimerRef.current);
         captionTimerRef.current = setTimeout(() => setCaptionText(""), 15000);
         const payload = {
-          id: typeof crypto !== "undefined" ? crypto.randomUUID() : `${Date.now()}`,
+          id: safeRandomId(),
           text: translated,
           target: captionTarget,
           sourceText: trimmed,
@@ -3967,6 +4573,13 @@ const captionTargetLabel = useMemo(
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : "Erreur traduction";
+        const isAbort =
+          (err as { name?: string } | null)?.name === "AbortError" ||
+          /aborted|aborterror/i.test(message);
+        if (isAbort) {
+          setCaptionStreamState({ active: false, text: "", error: "" });
+          return;
+        }
         setCaptionError(`Traduction: ${message}`);
         setCaptionStreamState({ active: false, text: "", error: message });
         console.warn("Erreur traduction", err);
@@ -4053,14 +4666,53 @@ const captionTargetLabel = useMemo(
     sourceLanguageLocale,
     sourceLanguageOption,
     speakGuestCaption,
-    translateWithOpenAi,
   ]);
 
   const retryMicrophone = async () => {
+    if (!localParticipant) return;
     try {
       await localParticipant.setMicrophoneEnabled(true);
     } catch (err) {
       setMediaError(err instanceof Error ? err.message : "Erreur micro inconnue.");
+    }
+  };
+
+  const toggleCamera = async () => {
+    if (!localParticipant) return;
+    if (isTogglingCamera) return;
+    setIsTogglingCamera(true);
+    setMediaError("");
+
+    const nextEnabled = !isCameraEnabled;
+    try {
+      if (
+        nextEnabled &&
+        typeof navigator !== "undefined" &&
+        navigator.mediaDevices?.getUserMedia
+      ) {
+        // iOS Safari sometimes needs an explicit media request before publishing camera.
+        const warmup = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false,
+        });
+        warmup.getTracks().forEach((track) => track.stop());
+      }
+
+      await localParticipant.setCameraEnabled(nextEnabled);
+
+      if (nextEnabled) {
+        const publication = localParticipant.getTrackPublication(Track.Source.Camera);
+        if (!publication?.track) {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          await localParticipant.setCameraEnabled(true);
+        }
+      }
+    } catch (err) {
+      setMediaError(
+        err instanceof Error ? err.message : "Impossible d'activer la camera."
+      );
+    } finally {
+      setIsTogglingCamera(false);
     }
   };
 
@@ -4384,7 +5036,7 @@ const captionTargetLabel = useMemo(
             onSaveAiBackground={onSaveAiBackground}
             backgroundMode={backgroundMode}
             onChangeBackground={onChangeBackground}
-            backgroundDisabled={isIPhone}
+            backgroundDisabled={backgroundEffectsDisabled}
             customBackgrounds={customBackgrounds}
             onAddCustomBackground={onAddCustomBackground}
             onRemoveCustomBackground={onRemoveCustomBackground}
@@ -4575,14 +5227,22 @@ const captionTargetLabel = useMemo(
                   )}
                   <span className="hidden sm:inline">Micro</span>
                 </TrackToggle>
-                <TrackToggle source={Track.Source.Camera} showIcon={false}>
+                <button
+                  type="button"
+                  onClick={toggleCamera}
+                  disabled={isTogglingCamera}
+                  className="lk-button"
+                  aria-label={isCameraEnabled ? "Couper la camera" : "Activer la camera"}
+                >
                   {isCameraEnabled ? (
                     <Camera className="h-4 w-4" />
                   ) : (
                     <CameraOff className="h-4 w-4 text-red-300" />
                   )}
-                  <span className="hidden sm:inline">Camera</span>
-                </TrackToggle>
+                  <span className="hidden sm:inline">
+                    {isTogglingCamera ? "Camera..." : "Camera"}
+                  </span>
+                </button>
                 {isMobile && (
                   <button
                     onClick={flipCamera}
@@ -4615,21 +5275,34 @@ const captionTargetLabel = useMemo(
                   </span>
                 )}
               </div>
-              <DisconnectButton className="lk-disconnect-button !bg-rose-600/90 !text-white hover:!bg-rose-600">
+              <button
+                type="button"
+                onClick={handleLeaveRoom}
+                className="lk-disconnect-button !bg-rose-600/90 !text-white hover:!bg-rose-600"
+              >
                 <LogOut className="h-4 w-4" />
                 <span className="hidden sm:inline">Quitter</span>
-              </DisconnectButton>
+              </button>
             </div>
             {mediaError && (
               <div className="mt-2 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-200">
                 <div className="flex items-center justify-between gap-2">
                   <span>Micro/camera: {mediaError}</span>
-                  <button
-                    onClick={retryMicrophone}
-                    className="rounded-md border border-rose-400/60 px-2 py-1 text-[11px] text-rose-100"
-                  >
-                    Debloquer micro
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={retryMicrophone}
+                      className="rounded-md border border-rose-400/60 px-2 py-1 text-[11px] text-rose-100"
+                    >
+                      Debloquer micro
+                    </button>
+                    <button
+                      onClick={toggleCamera}
+                      disabled={isTogglingCamera}
+                      className="rounded-md border border-rose-400/60 px-2 py-1 text-[11px] text-rose-100 disabled:opacity-60"
+                    >
+                      {isTogglingCamera ? "Camera..." : "Debloquer camera"}
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -4699,6 +5372,7 @@ function LiveKitConferenceMobile({
   roomChat,
   timerState,
   onOpenSettings,
+  onLeaveSession,
   autoFrame,
   captionSize,
   videoFit,
@@ -4732,6 +5406,7 @@ function LiveKitConferenceMobile({
   roomChat: ReturnType<typeof useRoomChat>;
   timerState: RoomTimerState;
   onOpenSettings: () => void;
+  onLeaveSession: () => void;
   autoFrame: boolean;
   captionSize: "sm" | "md" | "lg";
   videoFit: "cover" | "contain";
@@ -4761,6 +5436,14 @@ function LiveKitConferenceMobile({
     if (typeof navigator === "undefined") return false;
     return /iPhone|iPad|iPod/i.test(navigator.userAgent);
   }, []);
+  const backgroundEffectsDisabled = useMemo(() => {
+    if (typeof navigator === "undefined") return false;
+    const ua = navigator.userAgent;
+    const isIOSWebKit = /iPhone|iPad|iPod/i.test(ua);
+    const isDesktopSafari =
+      /Safari/i.test(ua) && !/Chrome|Chromium|CriOS|Edg|OPR|Firefox/i.test(ua);
+    return isIOSWebKit || isDesktopSafari;
+  }, []);
 
   useEffect(() => {
     if (!isHost || !roomId || typeof window === "undefined") return;
@@ -4772,10 +5455,15 @@ function LiveKitConferenceMobile({
   const [showMobileBadge, setShowMobileBadge] = useState(true);
   const { localParticipant, isMicrophoneEnabled, isCameraEnabled, lastMicrophoneError, lastCameraError } =
     useLocalParticipant();
+  const room = useRoomContext();
   const captionTargetName = useMemo(
     () => CAPTION_TARGETS_CONFIG.find((item) => item.code === captionTarget)?.name || "English",
     [captionTarget]
   );
+  const handleLeaveRoom = useCallback(() => {
+    onLeaveSession();
+    void room.disconnect();
+  }, [onLeaveSession, room]);
 
   useEffect(() => {
     if (!isHost || shareMicToGuests) return;
@@ -4783,6 +5471,7 @@ function LiveKitConferenceMobile({
     void localParticipant.setMicrophoneEnabled(false);
   }, [isHost, localParticipant, shareMicToGuests]);
   const [mediaError, setMediaError] = useState<string>("");
+  const [isTogglingCamera, setIsTogglingCamera] = useState(false);
   const [captionText, setCaptionText] = useState("");
   const captionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { message: captionIncoming } = useDataChannel("bfzoom-captions");
@@ -4872,6 +5561,43 @@ function LiveKitConferenceMobile({
       setScreenShareError(message);
     }
   }, [isIPhone, isScreenSharing, localParticipant]);
+
+  const toggleCamera = useCallback(async () => {
+    if (!localParticipant) return;
+    if (isTogglingCamera) return;
+    setIsTogglingCamera(true);
+    setMediaError("");
+
+    const nextEnabled = !isCameraEnabled;
+    try {
+      if (
+        nextEnabled &&
+        typeof navigator !== "undefined" &&
+        navigator.mediaDevices?.getUserMedia
+      ) {
+        const warmup = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false,
+        });
+        warmup.getTracks().forEach((track) => track.stop());
+      }
+
+      await localParticipant.setCameraEnabled(nextEnabled);
+      if (nextEnabled) {
+        const publication = localParticipant.getTrackPublication(Track.Source.Camera);
+        if (!publication?.track) {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          await localParticipant.setCameraEnabled(true);
+        }
+      }
+    } catch (err) {
+      setMediaError(
+        err instanceof Error ? err.message : "Impossible d'activer la camera."
+      );
+    } finally {
+      setIsTogglingCamera(false);
+    }
+  }, [isCameraEnabled, isTogglingCamera, localParticipant]);
 
   useEffect(() => {
     const pub = localParticipant?.getTrackPublication(Track.Source.ScreenShare);
@@ -5016,7 +5742,7 @@ function LiveKitConferenceMobile({
             onSaveAiBackground={onSaveAiBackground}
             backgroundMode={backgroundMode}
             onChangeBackground={onChangeBackground}
-            backgroundDisabled={isIPhone}
+            backgroundDisabled={backgroundEffectsDisabled}
             customBackgrounds={customBackgrounds}
             onAddCustomBackground={onAddCustomBackground}
             onRemoveCustomBackground={onRemoveCustomBackground}
@@ -5133,14 +5859,22 @@ function LiveKitConferenceMobile({
                 )}
                 <span className="hidden sm:inline">Micro</span>
               </TrackToggle>
-              <TrackToggle source={Track.Source.Camera} showIcon={false}>
+              <button
+                type="button"
+                onClick={toggleCamera}
+                disabled={isTogglingCamera}
+                className="lk-button"
+                aria-label={isCameraEnabled ? "Couper la camera" : "Activer la camera"}
+              >
                 {isCameraEnabled ? (
                   <Camera className="h-4 w-4" />
                 ) : (
                   <CameraOff className="h-4 w-4 text-red-300" />
                 )}
-                <span className="hidden sm:inline">Camera</span>
-              </TrackToggle>
+                <span className="hidden sm:inline">
+                  {isTogglingCamera ? "Camera..." : "Camera"}
+                </span>
+              </button>
               <button
                 onClick={handleToggleScreenShare}
                 className={`lk-button ${isScreenSharing ? "bg-sky-600" : ""}`}
@@ -5162,15 +5896,26 @@ function LiveKitConferenceMobile({
                 <span className="hidden sm:inline">Reglages</span>
               </button>
             </div>
-            <DisconnectButton className="lk-disconnect-button !bg-rose-600/90 !text-white hover:!bg-rose-600">
+            <button
+              type="button"
+              onClick={handleLeaveRoom}
+              className="lk-disconnect-button !bg-rose-600/90 !text-white hover:!bg-rose-600"
+            >
               <LogOut className="h-4 w-4" />
               <span className="hidden sm:inline">Quitter</span>
-            </DisconnectButton>
+            </button>
           </div>
           {mediaError && (
             <div className="mt-2 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-200">
               <div className="flex items-center justify-between gap-2">
                 <span>Micro/camera: {mediaError}</span>
+                <button
+                  onClick={toggleCamera}
+                  disabled={isTogglingCamera}
+                  className="rounded-md border border-rose-400/60 px-2 py-1 text-[11px] text-rose-100 disabled:opacity-60"
+                >
+                  {isTogglingCamera ? "Camera..." : "Debloquer camera"}
+                </button>
               </div>
             </div>
           )}
@@ -5281,6 +6026,7 @@ function ChatDrawer({
     "Anglais",
     "Chinois",
     "Espagnol",
+    "Japonais",
     "Persan (Farsi)",
     "Hebreu",
     "Italien",
@@ -6163,7 +6909,7 @@ function BackgroundSection({
     <div className="flex flex-col gap-2">
       {disabled && (
         <p className="text-[11px] text-amber-200">
-          Effets indisponibles sur iPhone Safari. Utilise un ordinateur pour les activer.
+          Effets indisponibles sur iOS/Safari (WebKit). Utilise Chrome desktop pour les activer.
         </p>
       )}
       <div className="flex items-center gap-2 flex-wrap">
@@ -6199,7 +6945,7 @@ function BackgroundSection({
         {aiBackgroundUrl && (
           <div className="mt-3 flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2">
             <div
-              className="h-12 w-12 rounded-lg bg-cover bg-center"
+              className="h-12 w-12 rounded-lg bg-center bg-contain bg-no-repeat"
               style={{ backgroundImage: `url(${aiBackgroundUrl})` }}
             />
             <div className="flex-1 text-[11px] text-slate-200">
@@ -6238,7 +6984,7 @@ function BackgroundSection({
                   className="group flex flex-col gap-1 rounded-xl border border-slate-800 bg-slate-900/60 p-2 text-left transition hover:border-sky-400"
                 >
                   <div
-                    className="h-16 w-full rounded-md bg-cover bg-center"
+                    className="h-16 w-full rounded-md bg-center bg-contain bg-no-repeat"
                     style={{ backgroundImage: `url(${item.image})` }}
                   />
                   <p className="truncate text-[11px] text-white group-disabled:text-slate-500">
@@ -6949,10 +7695,10 @@ function CameraSection({
           Sous-titres indisponibles sur ce navigateur.
         </p>
       )}
-      <div className="flex flex-col gap-1 rounded-xl border border-slate-700 bg-slate-900/40 px-3 py-2 text-xs text-slate-200">
-        <div className="flex items-center justify-between">
-          <span className="flex items-center gap-2">
-            Cadrage video
+        <div className="flex flex-col gap-1 rounded-xl border border-slate-700 bg-slate-900/40 px-3 py-2 text-xs text-slate-200">
+          <div className="flex items-center justify-between">
+            <span className="flex items-center gap-2">
+              Cadrage video
             <span
               title="Remplir coupe l'image, Entier affiche toute l'image."
               className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-600 text-[10px] text-slate-300"
@@ -6976,7 +7722,20 @@ function CameraSection({
             ))}
           </div>
         </div>
-      </div>
+        {videoFit !== "contain" && (
+          <div className="mt-3 flex items-center gap-2">
+            <button
+              onClick={() => onChangeVideoFit("contain")}
+              className="rounded-full border border-slate-700 bg-white/10 px-3 py-1 text-[11px] font-semibold text-slate-200"
+            >
+              Forcer l'entier
+            </button>
+            <p className="text-[11px] text-slate-400">
+              Réapplique « Entier » pour voir tout le fond DALL·E.
+            </p>
+          </div>
+        )}
+          </div>
       <button
         onClick={handleFlip}
         disabled={!isCameraEnabled || isFlipping}
