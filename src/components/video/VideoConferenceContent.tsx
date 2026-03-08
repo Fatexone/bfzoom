@@ -5,13 +5,99 @@ import { useSearchParams, useRouter } from "next/navigation";
 import { onAuthStateChanged } from "firebase/auth";
 import { auth } from "@/lib/firebaseConfig";
 import VideoCall from "@/components/video/VideoCall";
+import { setAuthGuardCookie } from "@/lib/authGuard";
+import { useUiLocale, type UiLocale } from "@/components/ui/UiLocaleProvider";
 
 /* =======================================================
    🎥 BFZoom — Version stable & responsive (2025)
    - Compatible Mac, iPhone, Android, iPad
    - Séparation claire Lobby / Salle active
 ======================================================= */
+
+const GUEST_NAME_STORAGE_KEY = "bfzoom:guest-name";
+
+type VideoConferenceCopy = {
+  guestDefaultName: string;
+  unauthorizedCreate: string;
+  sessionLoading: string;
+  loginNeeded: string;
+  allowlistChecking: string;
+  allowlistErrorRetry: string;
+  allowlistDenied: string;
+  allowlistUnfinished: string;
+  allowlistDeniedByStatus: (status: number) => string;
+  allowlistDeniedGeneric: string;
+  allowlistDeniedCreate: string;
+  allowlistUnknownError: string;
+  allowlistRetryAction: string;
+  createRoomOrJoin: string;
+  createRoom: string;
+  joinRoomPlaceholder: string;
+  joinRoomAction: string;
+  joinRoomEmptyError: string;
+  checkingRights: string;
+  checkingRightsHint: string;
+  guestNameLabel: string;
+  guestNamePlaceholder: string;
+  guestNameVisibleHint: string;
+};
+
+const VIDEO_COPY: Record<UiLocale, VideoConferenceCopy> = {
+  fr: {
+    guestDefaultName: "Invité BFZoom",
+    unauthorizedCreate: "Tu n’es pas autorisé à créer une salle pour le moment.",
+    sessionLoading: "Chargement de la session...",
+    loginNeeded: "Connexion requise.",
+    allowlistChecking: "Vérification des droits en cours, réessaie dans un instant.",
+    allowlistErrorRetry: "Impossible de vérifier tes droits, clique sur « Vérifier mes droits ».",
+    allowlistDenied: "Ton compte n'est pas autorisé à créer une salle.",
+    allowlistUnfinished: "Vérification non terminée.",
+    allowlistDeniedByStatus: (status: number) => `Autorisation refusée (${status})`,
+    allowlistDeniedGeneric: "Impossible de vérifier tes droits. Réessaie dans un instant.",
+    allowlistDeniedCreate: "Ton compte n'est pas autorisé pour le moment.",
+    allowlistUnknownError: "Impossible de vérifier tes droits.",
+    allowlistRetryAction: "Réessayer la vérification",
+    createRoomOrJoin: "Crée une salle ou rejoins-en une existante.",
+    createRoom: "➕ Créer une salle",
+    joinRoomPlaceholder: "Code de salle (ex: room-ab12cd)",
+    joinRoomAction: "🔗 Rejoindre en invité",
+    joinRoomEmptyError: "Entre un code de salle pour rejoindre.",
+    checkingRights: "Vérification en cours…",
+    checkingRightsHint: "🔄 Vérification des droits en cours, patiente juste une seconde…",
+    guestNameLabel: "Nom invité",
+    guestNamePlaceholder: "Ex: Marie",
+    guestNameVisibleHint: "Visible pour les participants.",
+  },
+  en: {
+    guestDefaultName: "BFZoom Guest",
+    unauthorizedCreate: "You are not allowed to create a room right now.",
+    sessionLoading: "Loading session...",
+    loginNeeded: "Sign-in required.",
+    allowlistChecking: "Checking permissions, please try again in a moment.",
+    allowlistErrorRetry: "Unable to verify permissions, click “Check my permissions”.",
+    allowlistDenied: "Your account is not allowed to create a room.",
+    allowlistUnfinished: "Verification is not completed yet.",
+    allowlistDeniedByStatus: (status: number) => `Authorization denied (${status})`,
+    allowlistDeniedGeneric: "Unable to verify permissions. Try again in a moment.",
+    allowlistDeniedCreate: "Your account is not currently allowed.",
+    allowlistUnknownError: "Unable to verify your permissions.",
+    allowlistRetryAction: "Retry verification",
+    createRoomOrJoin: "Create a room or join an existing one.",
+    createRoom: "➕ Create room",
+    joinRoomPlaceholder: "Room code (e.g. room-ab12cd)",
+    joinRoomAction: "🔗 Join as guest",
+    joinRoomEmptyError: "Enter a room code to join.",
+    checkingRights: "Checking permissions…",
+    checkingRightsHint: "🔄 Verifying permissions, please wait a second…",
+    guestNameLabel: "Guest name",
+    guestNamePlaceholder: "Ex: Maria",
+    guestNameVisibleHint: "Visible to participants.",
+  },
+};
+
 export default function VideoConferenceContent() {
+  const { locale } = useUiLocale();
+  const t = VIDEO_COPY[locale];
   const [roomId, setRoomId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string>("");
   const [authReady, setAuthReady] = useState(false);
@@ -21,21 +107,57 @@ export default function VideoConferenceContent() {
   const [allowlistError, setAllowlistError] = useState("");
   const [allowlistRefetchTrigger, setAllowlistRefetchTrigger] = useState(0);
   const [createError, setCreateError] = useState("");
+  const [guestDisplayName, setGuestDisplayName] = useState("");
+  const [joinRoomInput, setJoinRoomInput] = useState("");
 
   const searchParams = useSearchParams();
   const router = useRouter();
   const wantsHost = searchParams.get("host") === "1";
   const isHost = wantsHost && allowlistStatus === "allowed";
   const wantsCreate = searchParams.get("create") === "1";
+  const roomFromQuery = searchParams.get("room")?.trim() || "";
+  const canJoinAsGuestByLink = Boolean(roomFromQuery) && !wantsHost;
+  const guestNameFromQuery =
+    searchParams.get("name")?.trim() || searchParams.get("guest")?.trim() || "";
 
   /* 🔐 Vérifie la connexion Firebase */
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (user) => {
+      setAuthGuardCookie(Boolean(user));
       setUserEmail(user?.email || "");
       setAuthReady(true);
     });
     return () => unsub();
   }, []);
+
+  useEffect(() => {
+    if (!authReady) return;
+    if (userEmail) return;
+    if (canJoinAsGuestByLink) return;
+    const search = searchParams.toString();
+    const next = `/videoconference${search ? `?${search}` : ""}`;
+    router.replace(`/login?next=${encodeURIComponent(next)}`);
+  }, [authReady, canJoinAsGuestByLink, router, searchParams, userEmail]);
+
+  useEffect(() => {
+    if (!authReady || !canJoinAsGuestByLink) return;
+    const emailPrefix = userEmail.split("@")[0]?.trim() || "";
+    let fallback = emailPrefix;
+    if (!fallback && typeof window !== "undefined") {
+      const saved = window.localStorage.getItem(GUEST_NAME_STORAGE_KEY)?.trim() || "";
+      fallback = saved;
+    }
+    const fromQuery = guestNameFromQuery;
+    const localizedDefault = (fromQuery || fallback || t.guestDefaultName).slice(0, 80);
+    setGuestDisplayName((current) => (current.trim() ? current : localizedDefault));
+  }, [authReady, canJoinAsGuestByLink, guestNameFromQuery, t.guestDefaultName, userEmail]);
+
+  useEffect(() => {
+    if (!canJoinAsGuestByLink || typeof window === "undefined") return;
+    const trimmed = guestDisplayName.trim();
+    if (!trimmed) return;
+    window.localStorage.setItem(GUEST_NAME_STORAGE_KEY, trimmed.slice(0, 80));
+  }, [canJoinAsGuestByLink, guestDisplayName]);
 
   useEffect(() => {
     let cancelled = false;
@@ -55,7 +177,7 @@ export default function VideoConferenceContent() {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!res.ok) {
-          throw new Error(`Autorisation refusée (${res.status})`);
+          throw new Error(t.allowlistDeniedByStatus(res.status));
         }
         const data = (await res.json()) as { allowed?: boolean };
         if (cancelled) return;
@@ -64,14 +186,14 @@ export default function VideoConferenceContent() {
           setAllowlistError("");
         } else {
           setAllowlistStatus("denied");
-          setAllowlistError("Ton compte n'est pas autorisé à créer une salle.");
+          setAllowlistError(t.allowlistDenied);
         }
       } catch (err) {
         if (cancelled) return;
         const message =
           err instanceof Error
             ? err.message
-            : "Impossible de vérifier tes droits. Réessaie dans un instant.";
+            : t.allowlistDeniedGeneric;
         setAllowlistStatus("error");
         setAllowlistError(message);
       }
@@ -81,7 +203,7 @@ export default function VideoConferenceContent() {
       cancelled = true;
       controller.abort();
     };
-  }, [userEmail, authReady, allowlistRefetchTrigger]);
+  }, [userEmail, authReady, allowlistRefetchTrigger, t]);
 
   /* 🔗 Récupère ou génère un roomId depuis l'URL */
   useEffect(() => {
@@ -105,7 +227,7 @@ export default function VideoConferenceContent() {
     if (allowlistStatus === "loading" || allowlistStatus === "idle") return;
     if (allowlistStatus === "error") return;
     if (allowlistStatus === "denied" || allowlistStatus !== "allowed") {
-      setCreateError("Tu n’es pas autorisé à créer une salle pour le moment.");
+      setCreateError(t.unauthorizedCreate);
       router.replace("/videoconference");
       return;
     }
@@ -119,13 +241,14 @@ export default function VideoConferenceContent() {
     allowlistStatus,
     router,
     authReady,
+    t.unauthorizedCreate,
   ]);
 
   /* 🚀 Créer une nouvelle salle */
   const handleCreateRoom = useCallback(() => {
     setCreateError("");
     if (!authReady) {
-      setCreateError("Chargement de la session...");
+      setCreateError(t.sessionLoading);
       return;
     }
     if (!userEmail) {
@@ -133,30 +256,40 @@ export default function VideoConferenceContent() {
       return;
     }
     if (allowlistStatus === "loading") {
-      setCreateError("Vérification des droits en cours, réessaie dans un instant.");
+      setCreateError(t.allowlistChecking);
       return;
     }
     if (allowlistStatus === "error") {
-      setCreateError("Impossible de vérifier tes droits, clique sur « Vérifier mes droits ».");
+      setCreateError(t.allowlistErrorRetry);
       return;
     }
     if (allowlistStatus === "denied") {
-      setCreateError("Ton compte n'est pas autorisé à créer une salle.");
+      setCreateError(t.allowlistDenied);
       return;
     }
     if (allowlistStatus !== "allowed") {
-      setCreateError("Vérification non terminée.");
+      setCreateError(t.allowlistUnfinished);
       return;
     }
     const id = generateRoomId();
     router.push(`/videoconference?room=${id}&host=1`);
     setRoomId(id);
-  }, [router, userEmail, allowlistStatus, authReady]);
+  }, [router, userEmail, allowlistStatus, authReady, t.allowlistChecking, t.allowlistDenied, t.allowlistErrorRetry, t.allowlistUnfinished, t.sessionLoading]);
 
   const handleRetryAllowlist = useCallback(() => {
     setAllowlistRefetchTrigger((prev) => prev + 1);
     setCreateError("");
   }, [setAllowlistRefetchTrigger, setCreateError]);
+
+  const handleJoinRoom = useCallback(() => {
+    const target = joinRoomInput.trim();
+    if (!target) {
+      setCreateError(t.joinRoomEmptyError);
+      return;
+    }
+    setCreateError("");
+    router.push(`/videoconference?room=${encodeURIComponent(target)}`);
+  }, [joinRoomInput, router, t.joinRoomEmptyError]);
 
   /* 🚪 Quitter la salle proprement */
   const handleLeaveRoom = useCallback(() => {
@@ -168,9 +301,9 @@ export default function VideoConferenceContent() {
   const allowlistLocked = allowlistStatus !== "allowed";
   const allowlistMessage =
     allowlistStatus === "denied"
-      ? allowlistError || "Ton compte n'est pas autorisé pour le moment."
+      ? allowlistError || t.allowlistDeniedCreate
       : allowlistStatus === "error"
-      ? allowlistError || "Impossible de vérifier tes droits."
+      ? allowlistError || t.allowlistUnknownError
       : "";
   const showRetryAllowlist = allowlistStatus === "error";
 
@@ -185,7 +318,7 @@ export default function VideoConferenceContent() {
             🎥 BFZoom
           </h1>
           <p className="text-center text-gray-500 text-sm mb-6">
-            Crée une salle ou rejoins-en une existante.
+            {t.createRoomOrJoin}
           </p>
           <button
             onClick={handleCreateRoom}
@@ -203,19 +336,35 @@ export default function VideoConferenceContent() {
                   aria-hidden
                   className="h-3 w-3 animate-spin rounded-full border-2 border-white border-t-transparent"
                 />
-                <span>Vérification en cours…</span>
+                <span>{t.checkingRights}</span>
               </>
             ) : (
-              "➕ Créer une salle"
+              t.createRoom
             )}
           </button>
+
+          <div className="mt-3 flex items-center gap-2">
+            <input
+              value={joinRoomInput}
+              onChange={(event) => setJoinRoomInput(event.target.value.slice(0, 80))}
+              placeholder={t.joinRoomPlaceholder}
+              className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-800 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-sky-400/60"
+            />
+            <button
+              onClick={handleJoinRoom}
+              className="shrink-0 rounded-lg border border-slate-300 bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-200"
+            >
+              {t.joinRoomAction}
+            </button>
+          </div>
+
           {allowlistBusy && (
             <p
               className="mt-3 text-xs font-semibold text-slate-500"
               role="status"
               aria-live="polite"
             >
-              🔄 Vérification des droits en cours, patiente juste une seconde…
+              {t.checkingRightsHint}
             </p>
           )}
           {allowlistMessage && (
@@ -226,7 +375,7 @@ export default function VideoConferenceContent() {
                   onClick={handleRetryAllowlist}
                   className="text-[11px] font-semibold text-amber-700 hover:text-amber-900"
                 >
-                  Réessayer la vérification
+                  {t.allowlistRetryAction}
                 </button>
               )}
             </div>
@@ -243,11 +392,34 @@ export default function VideoConferenceContent() {
      🧭 SALLE ACTIVE
   ======================================================= */
   return (
-    <div className="flex flex-col min-h-dvh bg-gray-900 text-white">
+    <div className="flex h-[100dvh] min-h-[100dvh] flex-col overflow-hidden bg-gray-900 text-white">
+      {canJoinAsGuestByLink && (
+        <div className="shrink-0 px-3 pt-3 sm:px-6">
+          <div className="mx-auto w-full max-w-7xl rounded-xl border border-white/15 bg-black/25 p-3">
+            <label className="text-xs font-semibold uppercase tracking-wide text-gray-200">
+              {t.guestNameLabel}
+            </label>
+            <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
+              <input
+                value={guestDisplayName}
+                onChange={(event) => setGuestDisplayName(event.target.value.slice(0, 80))}
+                placeholder={t.guestNamePlaceholder}
+                className="w-full rounded-lg border border-white/20 bg-black/30 px-3 py-2 text-sm text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-amber-400/60"
+              />
+              <p className="text-[11px] text-gray-300">{t.guestNameVisibleHint}</p>
+            </div>
+          </div>
+        </div>
+      )}
       {/* 🎦 Zone vidéo responsive */}
-      <div className="flex-1 flex items-center justify-center p-2 sm:p-4 md:p-6">
-        <div className="w-full h-full max-w-7xl mx-auto rounded-xl overflow-hidden shadow-2xl border border-gray-800 bg-gray-950">
-          <VideoCall roomId={roomId} isHost={isHost} onLeave={handleLeaveRoom} />
+      <div className="flex min-h-0 flex-1 items-center justify-center p-1.5 sm:p-4 md:p-6">
+        <div className="mx-auto h-full min-h-0 w-full max-w-7xl overflow-hidden rounded-xl border border-gray-800 bg-gray-950 shadow-2xl">
+          <VideoCall
+            roomId={roomId}
+            isHost={isHost}
+            defaultDisplayName={guestDisplayName}
+            onLeave={handleLeaveRoom}
+          />
         </div>
       </div>
 

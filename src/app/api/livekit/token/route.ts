@@ -1,15 +1,56 @@
 import { NextResponse } from "next/server";
 import { AccessToken } from "livekit-server-sdk";
+import { canUseRoomFeatures } from "@/lib/roomAccess";
 import { getVerifiedUser, isEmailAllowlisted } from "@/lib/serverAuth";
 import { addCorsHeaders, getAllowedOrigin } from "@/lib/cors";
+import { buildTranslatorMetadata, isTranslatorIdentity } from "@/lib/livekitTranslator";
+import { createGuestTtsToken } from "@/lib/guestTtsToken";
+import { upsertLivekitRoomHost } from "@/lib/livekitRoomRegistry";
+import { checkRateLimit, getClientIp } from "@/lib/rateLimit";
 
 export const runtime = "nodejs";
+
+const GUEST_TOKEN_RATE_LIMIT = 30;
+const GUEST_TOKEN_RATE_WINDOW_MS = 60_000;
 
 type TokenRequest = {
   room: string;
   identity: string;
   name?: string;
-  role?: "host" | "guest";
+  role?: "host" | "guest" | "translator";
+  sourceLanguage?: string;
+  targetLanguage?: string;
+  voice?: string;
+  includeGuestTtsToken?: boolean;
+};
+
+const isWebOrigin = (value: string) => {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+};
+
+const extractRequestHost = (req: Request) => {
+  const forwardedHost = req.headers.get("x-forwarded-host")?.trim();
+  if (forwardedHost) {
+    return forwardedHost.split(",")[0]?.trim().toLowerCase() || "";
+  }
+  return (req.headers.get("host") || "").trim().toLowerCase();
+};
+
+const isSameHostOrigin = (req: Request, requestOrigin: string) => {
+  try {
+    const originHost = new URL(requestOrigin).host.trim().toLowerCase();
+    if (!originHost) return false;
+    const requestHost = extractRequestHost(req);
+    if (!requestHost) return false;
+    return originHost === requestHost;
+  } catch {
+    return false;
+  }
 };
 
 export async function OPTIONS(req: Request) {
@@ -23,8 +64,14 @@ export async function OPTIONS(req: Request) {
 }
 
 export async function POST(req: Request) {
-  const origin = getAllowedOrigin(req.headers.get("origin"));
-  if (!origin) {
+  const requestOrigin = req.headers.get("origin");
+  const sameHostOrigin =
+    requestOrigin && isWebOrigin(requestOrigin) && isSameHostOrigin(req, requestOrigin)
+      ? requestOrigin
+      : null;
+  const origin = sameHostOrigin || (requestOrigin ? getAllowedOrigin(requestOrigin) : null);
+  // Keep strict checks for browser origins, but don't block native app schemes.
+  if (requestOrigin && isWebOrigin(requestOrigin) && !origin) {
     return new Response("Forbidden", { status: 403 });
   }
   const apiKey = process.env.LIVEKIT_API_KEY;
@@ -32,7 +79,9 @@ export async function POST(req: Request) {
 
   if (!apiKey || !apiSecret) {
     const response = NextResponse.json({ error: "LiveKit server keys missing" }, { status: 500 });
-    addCorsHeaders(response.headers, origin);
+    if (origin) {
+      addCorsHeaders(response.headers, origin);
+    }
     return response;
   }
 
@@ -41,35 +90,101 @@ export async function POST(req: Request) {
     body = (await req.json()) as TokenRequest;
   } catch {
     const response = NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-    addCorsHeaders(response.headers, origin);
+    if (origin) {
+      addCorsHeaders(response.headers, origin);
+    }
     return response;
   }
 
   const { room, identity, name } = body;
   if (!room || !identity) {
     const response = NextResponse.json({ error: "Missing room/identity" }, { status: 400 });
-    addCorsHeaders(response.headers, origin);
+    if (origin) {
+      addCorsHeaders(response.headers, origin);
+    }
     return response;
   }
 
-  if (body.role === "host") {
-    const user = await getVerifiedUser(req);
-    if (!user.ok) {
-      const response = NextResponse.json({ error: user.error }, { status: user.status });
-      addCorsHeaders(response.headers, origin);
-      return response;
-    }
-    const allowed = await isEmailAllowlisted(user.email);
-    if (!allowed) {
-      const response = NextResponse.json({ error: "Forbidden" }, { status: 403 });
-      addCorsHeaders(response.headers, origin);
+  const requestedRole = body.role || "guest";
+  const hasAuthorization = Boolean((req.headers.get("authorization") || "").trim());
+
+  if (requestedRole === "guest" && !hasAuthorization) {
+    const ip = getClientIp(req);
+    const roomKey = room.trim().toLowerCase().slice(0, 64);
+    const verdict = checkRateLimit(
+      `livekit:guest-token:${ip}:${roomKey}`,
+      GUEST_TOKEN_RATE_LIMIT,
+      GUEST_TOKEN_RATE_WINDOW_MS
+    );
+    if (!verdict.ok) {
+      const response = NextResponse.json(
+        { error: "Too many guest token requests. Retry later." },
+        {
+          status: 429,
+          headers: {
+            "Retry-After": String(verdict.retryAfter),
+          },
+        }
+      );
+      if (origin) {
+        addCorsHeaders(response.headers, origin);
+      }
       return response;
     }
   }
+
+  const workerSecret = (process.env.TRANSLATOR_WORKER_SECRET || "").trim();
+  const workerAuthorized =
+    requestedRole === "translator" &&
+    Boolean(workerSecret) &&
+    (req.headers.get("x-translator-worker-secret") || "").trim() === workerSecret;
+  let verifiedUser:
+    | {
+        uid: string;
+        email: string;
+      }
+    | null = null;
+
+  if (requestedRole === "host" || (requestedRole === "translator" && !workerAuthorized)) {
+    const user = await getVerifiedUser(req);
+    if (!user.ok) {
+      const response = NextResponse.json({ error: user.error }, { status: user.status });
+      if (origin) {
+        addCorsHeaders(response.headers, origin);
+      }
+      return response;
+    }
+    const allowlisted = await isEmailAllowlisted(user.email);
+    const allowed = canUseRoomFeatures(allowlisted);
+    if (!allowed) {
+      const response = NextResponse.json(
+        { error: "Forbidden", detail: "Host account is not authorized for room creation." },
+        { status: 403 }
+      );
+      if (origin) {
+        addCorsHeaders(response.headers, origin);
+      }
+      return response;
+    }
+    verifiedUser = { uid: user.uid, email: user.email };
+  }
+
+  const metadata =
+    requestedRole === "translator" || isTranslatorIdentity(identity)
+      ? JSON.stringify(
+          buildTranslatorMetadata({
+            room,
+            sourceLanguage: body.sourceLanguage,
+            targetLanguage: body.targetLanguage || "en",
+            voice: body.voice,
+          })
+        )
+      : undefined;
 
   const token = new AccessToken(apiKey, apiSecret, {
     identity,
     name,
+    metadata,
   });
   token.addGrant({
     roomJoin: true,
@@ -78,7 +193,7 @@ export async function POST(req: Request) {
     canPublishData: true,
     canSubscribe: true,
   });
-  if (body.role === "host") {
+  if (requestedRole === "host") {
     token.addGrant({
       roomAdmin: true,
       room,
@@ -86,12 +201,62 @@ export async function POST(req: Request) {
   }
 
   const jwt = await token.toJwt();
+
+  if (requestedRole === "host" && verifiedUser) {
+    try {
+      await upsertLivekitRoomHost({
+        room,
+        hostUid: verifiedUser.uid,
+        hostEmail: verifiedUser.email,
+        hostIdentity: identity,
+      });
+    } catch {
+      const response = NextResponse.json(
+        { error: "Unable to register room host ownership." },
+        { status: 500 }
+      );
+      if (origin) {
+        addCorsHeaders(response.headers, origin);
+      }
+      return response;
+    }
+  }
+
+  if (body.includeGuestTtsToken) {
+    const guestTtsToken =
+      requestedRole === "translator"
+        ? null
+        : createGuestTtsToken({
+            room,
+            identity,
+            role: requestedRole === "host" ? "host" : "guest",
+          });
+
+    const response = NextResponse.json(
+      {
+        token: jwt,
+        guestTtsToken,
+      },
+      {
+        headers: {
+          "Cache-Control": "no-store",
+        },
+      }
+    );
+    if (origin) {
+      addCorsHeaders(response.headers, origin);
+    }
+    return response;
+  }
+
   const response = new NextResponse(jwt, {
     headers: {
       "Content-Type": "text/plain; charset=utf-8",
       "Cache-Control": "no-store",
     },
   });
-  addCorsHeaders(response.headers, origin);
+  if (origin) {
+    addCorsHeaders(response.headers, origin);
+  }
   return response;
 }

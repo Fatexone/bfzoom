@@ -7,10 +7,10 @@ import { auth } from "./src/services/firebase";
 import { CallScreen } from "./src/screens/CallScreen";
 import { ChatScreen } from "./src/screens/ChatScreen";
 import { ConferenceLobbyScreen } from "./src/screens/ConferenceLobbyScreen";
+import { CoachConversationScreen } from "./src/screens/CoachConversationScreen";
 import { DashboardScreen } from "./src/screens/DashboardScreen";
 import { LandingScreen } from "./src/screens/LandingScreen";
 import { LoginOtpScreen } from "./src/screens/LoginOtpScreen";
-import { TrainingScreen } from "./src/screens/TrainingScreen";
 import { env } from "./src/config/env";
 import { fetchLiveKitToken } from "./src/services/livekit";
 import { initializeNotifications, registerPushTokenForUser } from "./src/services/notifications";
@@ -23,8 +23,8 @@ import {
 import type { LiveKitRole } from "./src/types/livekit";
 import type { MobileCallSession } from "./src/types/session";
 
-type AppModule = "home" | "login" | "dashboard" | "conference" | "training" | "chat";
-const PROTECTED_MODULES: AppModule[] = ["dashboard", "conference", "training", "chat"];
+type AppModule = "home" | "login" | "dashboard" | "conference" | "coach" | "chat";
+const PROTECTED_MODULES: AppModule[] = ["dashboard", "conference", "coach", "chat"];
 const normalizeUrl = (value: string) => value.trim().replace(/\/+$/, "");
 const randomIdentity = (prefix: string) => `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
 const randomRoomId = (prefix: string) => `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
@@ -84,6 +84,10 @@ export default function App() {
   const [activeVoipCallUUID, setActiveVoipCallUUID] = useState("");
   const [deepLinkRoomId, setDeepLinkRoomId] = useState("");
   const [deepLinkAutoJoinGuest, setDeepLinkAutoJoinGuest] = useState(false);
+  const [voipStatus, setVoipStatus] = useState<
+    "checking" | "active" | "inactive" | "error" | "unsupported"
+  >("checking");
+  const [voipMessage, setVoipMessage] = useState("");
 
   const currentUserRef = useRef<User | null>(null);
   const sessionRef = useRef<MobileCallSession | null>(null);
@@ -173,7 +177,7 @@ export default function App() {
       payload.bearerToken?.trim() ||
       (user ? await user.getIdToken().catch(() => "") : "");
 
-    const livekitToken = await fetchLiveKitToken({
+    const livekitAuth = await fetchLiveKitToken({
       apiBaseUrl,
       payload: {
         room: roomId,
@@ -191,7 +195,7 @@ export default function App() {
       role,
       identity,
       displayName,
-      livekitToken,
+      livekitToken: livekitAuth.token,
       bearerToken: bearerToken || undefined,
       callMode: payload.callMode || "audio",
       originModule: "conference",
@@ -244,7 +248,7 @@ export default function App() {
       const roomId = randomRoomId("chat");
       const identity = user.uid ? `${user.uid}-caller` : randomIdentity("caller");
       const displayName = user.email || "BFZoom caller";
-      const livekitToken = await fetchLiveKitToken({
+      const livekitAuth = await fetchLiveKitToken({
         apiBaseUrl,
         payload: {
           room: roomId,
@@ -262,7 +266,7 @@ export default function App() {
         role: "guest",
         identity,
         displayName,
-        livekitToken,
+        livekitToken: livekitAuth.token,
         bearerToken,
         callMode: mode,
         originModule: "chat",
@@ -379,7 +383,14 @@ export default function App() {
   }, [conferenceCreateIntent, currentUser]);
 
   useEffect(() => {
-    if (!isVoipCallNativeAvailable()) return;
+    if (!isVoipCallNativeAvailable()) {
+      setVoipStatus("unsupported");
+      setVoipMessage("Bridge VoIP natif indisponible sur cet appareil.");
+      return;
+    }
+
+    setVoipStatus("checking");
+    setVoipMessage("");
 
     const bridge = createVoipCallBridge({
       onToken: (token) => {
@@ -409,15 +420,27 @@ export default function App() {
         setActiveModule(sessionRef.current?.originModule || "conference");
       },
       onError: (message) => {
+        setVoipStatus("error");
+        setVoipMessage(message || "Erreur bridge VoIP.");
         console.warn(message);
       },
     });
 
     voipBridgeRef.current = bridge;
-    void bridge.start().catch(() => {});
+    void bridge
+      .start()
+      .then(() => {
+        setVoipStatus("active");
+        setVoipMessage("");
+      })
+      .catch((error) => {
+        setVoipStatus("error");
+        setVoipMessage(error instanceof Error ? error.message : "Impossible d'activer la VoIP.");
+      });
     return () => {
       bridge.dispose();
       voipBridgeRef.current = null;
+      setVoipStatus("inactive");
     };
   }, [joinFromVoipAnswer, registerVoipToken]);
 
@@ -428,9 +451,8 @@ export default function App() {
     void bridge
       .getVoipToken()
       .then((token) => {
-        if (token) {
-          return registerVoipToken(token);
-        }
+        if (!token) return Promise.resolve();
+        return registerVoipToken(token);
       })
       .catch(() => {});
   }, [currentUser, registerVoipToken]);
@@ -441,7 +463,7 @@ export default function App() {
         { id: "home" as AppModule, label: "Accueil" },
         { id: "dashboard" as AppModule, label: "Dashboard" },
         { id: "conference" as AppModule, label: "Conférence" },
-        { id: "training" as AppModule, label: "Training" },
+        { id: "coach" as AppModule, label: "Coach IA" },
         { id: "chat" as AppModule, label: "Chat" },
       ];
     }
@@ -468,22 +490,6 @@ export default function App() {
               setLoginTargetModule("conference");
               setActiveModule("login");
             }}
-            onOpenTraining={() => {
-              if (currentUser) {
-                setActiveModule("training");
-                return;
-              }
-              setLoginTargetModule("training");
-              setActiveModule("login");
-            }}
-            onOpenChat={() => {
-              if (currentUser) {
-                setActiveModule("chat");
-                return;
-              }
-              setLoginTargetModule("chat");
-              setActiveModule("login");
-            }}
           />
         );
       case "login":
@@ -507,12 +513,8 @@ export default function App() {
         return (
           <DashboardScreen
             user={currentUser}
-            onCreateRoom={() => {
-              setConferenceCreateIntent(true);
-              setActiveModule("conference");
-            }}
-            onTraining={() => setActiveModule("training")}
-            onChat={() => setActiveModule("chat")}
+            voipStatus={voipStatus}
+            voipMessage={voipMessage}
             onSignOut={() => {
               if (!auth) return;
               void signOut(auth).finally(() => {
@@ -549,16 +551,16 @@ export default function App() {
             }}
           />
         );
-      case "training":
+      case "coach":
         if (!currentUser) {
           return (
             <LoginOtpScreen
-              onLoggedIn={() => setActiveModule("training")}
+              onLoggedIn={() => setActiveModule("coach")}
               onBack={() => setActiveModule("home")}
             />
           );
         }
-        return <TrainingScreen />;
+        return <CoachConversationScreen user={currentUser} />;
       case "chat":
         if (!currentUser) {
           return (
@@ -582,22 +584,6 @@ export default function App() {
                 return;
               }
               setLoginTargetModule("conference");
-              setActiveModule("login");
-            }}
-            onOpenTraining={() => {
-              if (currentUser) {
-                setActiveModule("training");
-                return;
-              }
-              setLoginTargetModule("training");
-              setActiveModule("login");
-            }}
-            onOpenChat={() => {
-              if (currentUser) {
-                setActiveModule("chat");
-                return;
-              }
-              setLoginTargetModule("chat");
               setActiveModule("login");
             }}
           />
