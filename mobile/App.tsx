@@ -7,7 +7,7 @@ import { auth } from "./src/services/firebase";
 import { CallScreen } from "./src/screens/CallScreen";
 import { ChatScreen } from "./src/screens/ChatScreen";
 import { ConferenceLobbyScreen } from "./src/screens/ConferenceLobbyScreen";
-import { CoachConversationScreen } from "./src/screens/CoachConversationScreen";
+import { CoachPracticeScreen } from "./src/screens/CoachPracticeScreen";
 import { DashboardScreen } from "./src/screens/DashboardScreen";
 import { LandingScreen } from "./src/screens/LandingScreen";
 import { LoginOtpScreen } from "./src/screens/LoginOtpScreen";
@@ -463,7 +463,7 @@ export default function App() {
         { id: "home" as AppModule, label: "Accueil" },
         { id: "dashboard" as AppModule, label: "Dashboard" },
         { id: "conference" as AppModule, label: "Conférence" },
-        { id: "coach" as AppModule, label: "Coach IA" },
+        { id: "coach" as AppModule, label: "Exercice IA" },
         { id: "chat" as AppModule, label: "Chat" },
       ];
     }
@@ -560,7 +560,15 @@ export default function App() {
             />
           );
         }
-        return <CoachConversationScreen user={currentUser} />;
+        return (
+          <CoachPracticeScreen
+            user={currentUser}
+            onStart={(nextSession) => {
+              setSession(nextSession);
+              setActiveModule("coach");
+            }}
+          />
+        );
       case "chat":
         if (!currentUser) {
           return (
