@@ -282,6 +282,11 @@ type AccordionPanelKey = "controls" | "translation";
 type CoachModeId = (typeof COACH_MODES)[number]["id"];
 type CoachTone = (typeof COACH_TONES)[number];
 type TalkieUiState = "idle" | "starting" | "recording" | "stopping";
+type CoachReplySuggestion = {
+  id: string;
+  targetText: string;
+  sourceText: string;
+};
 
 type StoredCallPrefs = {
   sourceLanguage?: string;
@@ -505,6 +510,89 @@ const splitWords = (value: string) =>
     .trim()
     .split(/\s+/)
     .filter(Boolean);
+
+const parseCoachSuggestions = (value: string) => {
+  const cleanRaw = value
+    .replace(/```json\s*/gi, "")
+    .replace(/```/g, "")
+    .trim();
+
+  const extractSuggestionArray = (parsed: unknown): string[] => {
+    if (!parsed) return [];
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map((item) => (typeof item === "string" ? item.trim() : ""))
+        .filter(Boolean)
+        .slice(0, 3);
+    }
+    if (typeof parsed !== "object") return [];
+
+    const candidate = parsed as {
+      suggestions?: unknown;
+      data?: { suggestions?: unknown };
+      result?: { suggestions?: unknown };
+      output?: { suggestions?: unknown };
+      choices?: { message?: { content?: string } }[];
+    };
+
+    const direct = [
+      candidate.suggestions,
+      candidate.data?.suggestions,
+      candidate.result?.suggestions,
+      candidate.output?.suggestions,
+    ];
+    for (const entry of direct) {
+      if (Array.isArray(entry)) {
+        const normalized = entry
+          .map((item) => (typeof item === "string" ? item.trim() : ""))
+          .filter(Boolean)
+          .slice(0, 3);
+        if (normalized.length > 0) return normalized;
+      }
+    }
+
+    const nestedContent = candidate.choices?.[0]?.message?.content;
+    if (typeof nestedContent === "string" && nestedContent.trim()) {
+      return parseCoachSuggestions(nestedContent);
+    }
+
+    return [];
+  };
+
+  const extractEmbeddedJson = (raw: string) => {
+    const start = raw.indexOf("{");
+    const end = raw.lastIndexOf("}");
+    if (start < 0 || end <= start) return null;
+    try {
+      return JSON.parse(raw.slice(start, end + 1)) as unknown;
+    } catch {
+      return null;
+    }
+  };
+
+  const parsedJson = (() => {
+    try {
+      return JSON.parse(cleanRaw) as unknown;
+    } catch {
+      return extractEmbeddedJson(cleanRaw);
+    }
+  })();
+  const fromJson = extractSuggestionArray(parsedJson);
+  if (fromJson.length > 0) return fromJson.slice(0, 3);
+
+  return cleanRaw
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^[-*\d.)\s]+/, "").trim())
+    .filter(
+      (line) =>
+        Boolean(line) &&
+        !/[{}\[\]"]/.test(line) &&
+        !/^(id|object|created|model|usage|prompt_tokens|completion_tokens|total_tokens|message|role|choices?)\s*[:=]/i.test(
+          line
+        )
+    )
+    .slice(0, 3);
+};
 
 const normalizeNoiseGuardText = (value: string) =>
   value
@@ -795,6 +883,9 @@ function RoomView({
   const [coachPartnerError, setCoachPartnerError] = useState("");
   const [coachPartnerReply, setCoachPartnerReply] = useState("");
   const [coachPartnerReplyTranslation, setCoachPartnerReplyTranslation] = useState("");
+  const [coachReplySuggestions, setCoachReplySuggestions] = useState<CoachReplySuggestion[]>([]);
+  const [coachReplySuggestionsLoading, setCoachReplySuggestionsLoading] = useState(false);
+  const [coachSuggestionSpeakingId, setCoachSuggestionSpeakingId] = useState("");
   const [coachPartnerSpeakActive, setCoachPartnerSpeakActive] = useState(false);
   const [coachModeId, setCoachModeId] = useState<CoachModeId>(COACH_MODES[0].id);
   const [coachPrompt, setCoachPrompt] = useState("");
@@ -1410,6 +1501,14 @@ function RoomView({
     setTranslationPanelOpen(true);
   }, [manualDraftVisible]);
 
+  useEffect(() => {
+    if (!isCoachSession || !coachConversationEnabled || isChatCall) return;
+    setVideoFullscreen(false);
+    setControlsOpen(false);
+    setTranslationPanelOpen(true);
+    setShowTranslationInfo(false);
+  }, [coachConversationEnabled, isChatCall, isCoachSession]);
+
   const setIosRemoteAudioTrackVolume = useCallback(async (volume: number) => {
     if (Platform.OS !== "ios") return;
     const safeVolume = Number.isFinite(volume) ? Math.min(1, Math.max(0, volume)) : 1;
@@ -1693,6 +1792,8 @@ function RoomView({
     setCoachPartnerError("");
     setCoachPartnerReply("");
     setCoachPartnerReplyTranslation("");
+    setCoachReplySuggestions([]);
+    setCoachReplySuggestionsLoading(false);
     setCoachPartnerSpeakActive(false);
     if (coachPartnerSpeakTimerRef.current) {
       clearTimeout(coachPartnerSpeakTimerRef.current);
@@ -2557,13 +2658,19 @@ function RoomView({
   ]);
 
   const speakText = useCallback(
-    async (text: string) => {
+    async (text: string, languageOverride?: LanguageCode) => {
       if (!ttsEnabled || !text.trim()) return;
       if (realtimeEnabled) return;
       if (recordingActive && !realtimeEnabled) {
         setTranslationError("Stop recording before voice playback.");
         return;
       }
+
+      const effectiveLanguage = languageOverride || targetLanguage;
+      const effectiveLocale =
+        LANGUAGE_OPTIONS.find((opt) => opt.code === effectiveLanguage)?.speechLocale ||
+        targetSpeechLocale;
+      const useSelectedVoice = !languageOverride || languageOverride === targetLanguage;
 
       const textToSpeak = text.trim().slice(0, AI_TTS_MAX_CHARS);
       const ttsSessionId = ++ttsPlaybackSessionRef.current;
@@ -2575,11 +2682,13 @@ function RoomView({
       };
       const speakWithDeviceVoice = (fallback: boolean) => {
         const locale = fallback
-          ? (targetLanguage || "en").trim().toLowerCase() || "en"
-          : targetSpeechLocale;
+          ? (effectiveLanguage || "en").trim().toLowerCase() || "en"
+          : effectiveLocale;
         const selectedVoice = fallback
           ? undefined
-          : voiceId === AUTO_VOICE_ID
+          : !useSelectedVoice
+            ? undefined
+            : voiceId === AUTO_VOICE_ID
             ? undefined
             : voiceId;
 
@@ -2725,6 +2834,7 @@ function RoomView({
       targetLanguage,
       targetSpeechLocale,
       ttsEnabled,
+      setCoachSuggestionSpeakingId,
       voiceId,
       clearTtsPlaybackWatchdog,
     ]
@@ -2759,6 +2869,26 @@ function RoomView({
     }, 1100);
     void speakText(text);
   }, [coachPartnerReply, speakText]);
+
+  const playCoachSuggestion = useCallback(
+    (entry: CoachReplySuggestion) => {
+      const text = entry.targetText.trim();
+      if (!text) return;
+      setCoachSuggestionSpeakingId(entry.id);
+      if (coachPartnerSpeakTimerRef.current) {
+        clearTimeout(coachPartnerSpeakTimerRef.current);
+        coachPartnerSpeakTimerRef.current = null;
+      }
+      coachPartnerSpeakTimerRef.current = setTimeout(() => {
+        setCoachSuggestionSpeakingId((current) => (current === entry.id ? "" : current));
+        coachPartnerSpeakTimerRef.current = null;
+      }, 1100);
+      void speakText(text, targetLanguage).finally(() => {
+        setCoachSuggestionSpeakingId((current) => (current === entry.id ? "" : current));
+      });
+    },
+    [speakText, targetLanguage]
+  );
 
   const requestCoachPartnerReply = useCallback(
     async (userMessage: string, userLang: LanguageCode) => {
@@ -2828,6 +2958,8 @@ function RoomView({
         if (!text) throw new Error("Aucune reponse IA.");
         if (requestId !== coachPartnerRequestSeqRef.current) return;
 
+        setCoachReplySuggestions([]);
+        setCoachReplySuggestionsLoading(true);
         setCoachPartnerReply(
           choice?.finish_reason === "length" ? `${text}\n\n[Reponse tronquee]` : text
         );
@@ -2853,6 +2985,75 @@ function RoomView({
             if (requestId !== coachPartnerRequestSeqRef.current) return;
           }
         }
+
+        try {
+            const suggestionsResponse = await fetch(`${publicApiBase}/api/openai`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${bearerToken}`,
+              },
+              body: JSON.stringify({
+                intent: "coach_conversation_suggestions_mobile",
+                roomId: session.roomId,
+                messages: [
+                  {
+                    role: "system",
+                    content:
+                      `Tu proposes 3 reponses courtes que l'utilisateur peut dire ensuite. ` +
+                      `Ecris UNIQUEMENT en ${getPromptLanguageName(targetLanguage)}. ` +
+                      'Retourne strictement du JSON: {"suggestions":["...","...","..."]}.',
+                  },
+                  {
+                    role: "user",
+                    content: `Message du partenaire IA: ${text}`,
+                  },
+                ],
+              }),
+            });
+
+            const suggestionsRaw = await suggestionsResponse.text();
+            if (!suggestionsResponse.ok) {
+              throw new Error(suggestionsRaw || `Erreur suggestions (${suggestionsResponse.status})`);
+            }
+            if (requestId !== coachPartnerRequestSeqRef.current) return;
+
+            const suggestionTargets = parseCoachSuggestions(suggestionsRaw).slice(0, 3);
+            if (suggestionTargets.length === 0) {
+              setCoachReplySuggestions([]);
+              return;
+            }
+
+            const translatedSuggestions = await Promise.all(
+              suggestionTargets.map(async (entry, index) => {
+                if (userLang === targetLanguage) {
+                  return {
+                    id: `${requestId}-${index}`,
+                    targetText: entry,
+                    sourceText: entry,
+                  };
+                }
+                const translated = await translateText({
+                  apiBaseUrl: publicApiBase,
+                  bearerToken: session.bearerToken,
+                  guestTtsToken: session.guestTtsToken,
+                  text: entry,
+                  fromLanguage: getPromptLanguageName(targetLanguage),
+                  toLanguage: getPromptLanguageName(userLang),
+                }).catch(() => "");
+                return {
+                  id: `${requestId}-${index}`,
+                  targetText: entry,
+                  sourceText: translated.trim() || entry,
+                };
+              })
+            );
+            if (requestId !== coachPartnerRequestSeqRef.current) return;
+            setCoachReplySuggestions(translatedSuggestions);
+          } catch {
+            if (requestId !== coachPartnerRequestSeqRef.current) return;
+            setCoachReplySuggestions([]);
+        }
       } catch (error) {
         if (requestId !== coachPartnerRequestSeqRef.current) return;
         const rawMessage = error instanceof Error ? error.message : "Erreur coach conversation IA.";
@@ -2861,9 +3062,11 @@ function RoomView({
         } else {
           setCoachPartnerError(rawMessage);
         }
+        setCoachReplySuggestions([]);
       } finally {
         if (requestId === coachPartnerRequestSeqRef.current) {
           setCoachPartnerLoading(false);
+          setCoachReplySuggestionsLoading(false);
         }
       }
     },
@@ -4496,7 +4699,7 @@ function RoomView({
           </ScrollView>
         ) : null}
 
-        {shouldShowAccordionPanel("controls") ? (
+        {!coachConversationLayoutActive && shouldShowAccordionPanel("controls") ? (
         <View style={styles.accordionCard}>
           <Pressable
             style={styles.accordionHeader}
@@ -4574,39 +4777,59 @@ function RoomView({
         ) : null}
 
         {shouldShowAccordionPanel("translation") ? (
-        <View style={styles.accordionCard}>
-          <Pressable
-            style={styles.accordionHeader}
-            onPress={() => toggleAccordionPanel("translation")}
-          >
-            <View style={styles.accordionHeaderText}>
-              <Text style={styles.accordionTitle}>Traduction</Text>
-              <Text style={styles.accordionMeta}>{sourceLanguageLabel} → {targetLanguageLabel} · Talkie</Text>
-            </View>
-            <Text style={styles.accordionIcon}>{translationPanelOpen ? "−" : "+"}</Text>
-          </Pressable>
-
-          {translationPanelOpen ? (
-            <View style={styles.translationPanel}>
-              <Text style={styles.panelTitle}>Traduction</Text>
-              <View style={styles.translationInfoHeader}>
-                <Text style={styles.realtimeStatus}>Talkie traduction actif</Text>
-                <Pressable
-                  onPress={() => setShowTranslationInfo((current) => !current)}
-                  style={styles.translationInfoButton}
-                >
-                  <Text style={styles.translationInfoButtonText}>i</Text>
-                </Pressable>
+        <View
+          style={[
+            styles.accordionCard,
+            coachConversationLayoutActive && styles.accordionCardCoachMode,
+          ]}
+        >
+          {!coachConversationLayoutActive ? (
+            <Pressable
+              style={styles.accordionHeader}
+              onPress={() => toggleAccordionPanel("translation")}
+            >
+              <View style={styles.accordionHeaderText}>
+                <Text style={styles.accordionTitle}>Traduction</Text>
+                <Text style={styles.accordionMeta}>{sourceLanguageLabel} → {targetLanguageLabel} · Talkie</Text>
               </View>
-              {showTranslationInfo ? (
-                <View style={styles.translationInfoBox}>
-                  <Text style={styles.realtimeStatus}>
-                    Maintiens "Maintenir pour parler", parle, puis relache pour traduire.
-                  </Text>
-                  <Text style={styles.realtimeStatus}>
-                    Les sous-titres sont partages avec tous les participants.
-                  </Text>
-                </View>
+              <Text style={styles.accordionIcon}>{translationPanelOpen ? "−" : "+"}</Text>
+            </Pressable>
+          ) : null}
+
+          {translationPanelOpen || coachConversationLayoutActive ? (
+            <ScrollView
+              style={[
+                styles.translationPanelScroll,
+                coachConversationLayoutActive && styles.translationPanelScrollCoach,
+              ]}
+              contentContainerStyle={styles.translationPanel}
+              nestedScrollEnabled
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator
+            >
+              {!coachConversationLayoutActive ? (
+                <>
+                  <Text style={styles.panelTitle}>Traduction</Text>
+                  <View style={styles.translationInfoHeader}>
+                    <Text style={styles.realtimeStatus}>Talkie traduction actif</Text>
+                    <Pressable
+                      onPress={() => setShowTranslationInfo((current) => !current)}
+                      style={styles.translationInfoButton}
+                    >
+                      <Text style={styles.translationInfoButtonText}>i</Text>
+                    </Pressable>
+                  </View>
+                  {showTranslationInfo ? (
+                    <View style={styles.translationInfoBox}>
+                      <Text style={styles.realtimeStatus}>
+                        Maintiens "Maintenir pour parler", parle, puis relache pour traduire.
+                      </Text>
+                      <Text style={styles.realtimeStatus}>
+                        Les sous-titres sont partages avec tous les participants.
+                      </Text>
+                    </View>
+                  ) : null}
+                </>
               ) : null}
 
               {isCoachSession ? (
@@ -4675,6 +4898,62 @@ function RoomView({
                         </Text>
                       </View>
                     ) : null}
+                    {coachReplySuggestionsLoading ? (
+                      <Text style={styles.realtimeStatus}>Suggestions de reponse en cours...</Text>
+                    ) : null}
+                    {coachReplySuggestions.length > 0 ? (
+                      <View style={styles.infoStack}>
+                        <Text style={styles.realtimeStatus}>
+                          Suggestions de reponse ({targetLanguageLabel})
+                        </Text>
+                        {coachReplySuggestions.map((entry) => (
+                          <View key={entry.id} style={styles.coachSuggestionCard}>
+                            <Text
+                              style={[
+                                styles.coachPartnerReplyText,
+                                coachPartnerReplyLanguageIsRtl && styles.rtlText,
+                              ]}
+                            >
+                              {entry.targetText}
+                            </Text>
+                            {entry.sourceText.trim() ? (
+                              <Text
+                                style={[
+                                  styles.coachPartnerTranslationText,
+                                  coachPartnerTranslationLanguageIsRtl && styles.rtlText,
+                                ]}
+                              >
+                                {entry.sourceText}
+                              </Text>
+                            ) : null}
+                            <View style={styles.row}>
+                              <Pressable
+                                style={({ pressed }) => [
+                                  styles.controlButton,
+                                  styles.controlButtonSecondary,
+                                  coachSuggestionSpeakingId === entry.id && styles.controlButtonActive,
+                                  pressed && styles.controlButtonPressed,
+                                ]}
+                                onPress={() => playCoachSuggestion(entry)}
+                              >
+                                <View style={styles.controlButtonContent}>
+                                  <View style={styles.controlButtonSpinnerSlot}>
+                                    {coachSuggestionSpeakingId === entry.id ? (
+                                      <ActivityIndicator size="small" color="#ffffff" />
+                                    ) : null}
+                                  </View>
+                                  <Text style={styles.controlButtonText} numberOfLines={1}>
+                                    {coachSuggestionSpeakingId === entry.id
+                                      ? "Lecture..."
+                                      : `Lire (${targetLanguageLabel})`}
+                                  </Text>
+                                </View>
+                              </Pressable>
+                            </View>
+                          </View>
+                        ))}
+                      </View>
+                    ) : null}
                     {coachPartnerError ? <Text style={styles.error}>{coachPartnerError}</Text> : null}
                     <View style={styles.row}>
                       <Pressable
@@ -4733,7 +5012,9 @@ function RoomView({
                     ))}
                   </ScrollView>
                   <Text style={styles.langSelectorLabel}>
-                    Langue de reception: {targetLanguageLabel}
+                    {coachConversationLayoutActive
+                      ? `Langue du coach: ${targetLanguageLabel}`
+                      : `Langue de reception: ${targetLanguageLabel}`}
                   </Text>
                   <ScrollView
                     horizontal
@@ -4858,7 +5139,9 @@ function RoomView({
                     ))}
                   </ScrollView>
                   <Text style={styles.langSelectorLabel}>
-                    Langue de reception: {targetLanguageLabel}
+                    {coachConversationLayoutActive
+                      ? `Langue du coach: ${targetLanguageLabel}`
+                      : `Langue de reception: ${targetLanguageLabel}`}
                   </Text>
                   <ScrollView
                     horizontal
@@ -5000,7 +5283,11 @@ function RoomView({
               ) : null}
               {captionText ? (
                 <View style={styles.infoStack}>
-                  <Text style={styles.realtimeStatus}>Traduction ({targetLanguageLabel})</Text>
+                  <Text style={styles.realtimeStatus}>
+                    {coachConversationLayoutActive
+                      ? `Reponse en langue du coach (${targetLanguageLabel})`
+                      : `Traduction (${targetLanguageLabel})`}
+                  </Text>
                   <Text style={[styles.captionLine, targetLanguageIsRtl && styles.rtlText]}>
                     {captionText}
                   </Text>
@@ -5009,6 +5296,7 @@ function RoomView({
                       style={({ pressed }) => [
                         styles.controlButton,
                         styles.controlButtonSplit,
+                        isCompactPhone && styles.controlButtonSplitStack,
                         styles.realtimeButton,
                         retranslateButtonActive && styles.controlButtonPrimaryActive,
                         pressed && styles.controlButtonPrimaryPressed,
@@ -5034,6 +5322,7 @@ function RoomView({
                       style={({ pressed }) => [
                         styles.controlButton,
                         styles.controlButtonSplit,
+                        isCompactPhone && styles.controlButtonSplitStack,
                         styles.controlButtonSecondary,
                         replayButtonActive && styles.controlButtonActive,
                         pressed && styles.controlButtonPressed,
@@ -5064,7 +5353,7 @@ function RoomView({
               {recordingError ? <Text style={styles.error}>{recordingError}</Text> : null}
               {translationError ? <Text style={styles.error}>{translationError}</Text> : null}
               {voiceLoadError ? <Text style={styles.error}>{voiceLoadError}</Text> : null}
-            </View>
+            </ScrollView>
           ) : null}
         </View>
         ) : null}
@@ -5610,6 +5899,10 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(2,6,23,0.88)",
     overflow: "hidden",
   },
+  accordionCardCoachMode: {
+    flex: 1,
+    minHeight: 260,
+  },
   accordionHeader: {
     flexDirection: "row",
     alignItems: "center",
@@ -5691,7 +5984,11 @@ const styles = StyleSheet.create({
   },
   controlButtonSplit: {
     flex: 1,
+    flexBasis: "48%",
     minWidth: 0,
+  },
+  controlButtonSplitStack: {
+    flexBasis: "100%",
   },
   controlButtonDisabled: {
     opacity: 0.6,
@@ -5768,6 +6065,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingBottom: 12,
     gap: 8,
+  },
+  translationPanelScroll: {
+    maxHeight: 380,
+  },
+  translationPanelScrollCoach: {
+    minHeight: 260,
   },
   translationInfoHeader: {
     flexDirection: "row",
@@ -5887,6 +6190,15 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 18,
   },
+  coachSuggestionCard: {
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#334155",
+    backgroundColor: "#0b1220",
+    paddingHorizontal: 8,
+    paddingVertical: 7,
+    gap: 4,
+  },
   panelTitle: {
     color: "#e2e8f0",
     fontSize: 14,
@@ -5899,7 +6211,7 @@ const styles = StyleSheet.create({
   },
   rowSplit: {
     flexDirection: "row",
-    flexWrap: "nowrap",
+    flexWrap: "wrap",
     gap: 8,
     width: "100%",
   },
