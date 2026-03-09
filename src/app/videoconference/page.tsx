@@ -32,10 +32,9 @@ function ResponsiveLayout({ children }: { children: React.ReactNode }) {
     <div
       className={`relative text-slate-900 ${
         isRoomView
-          ? "flex min-h-screen flex-col bg-slate-950"
+          ? "h-[100dvh] min-h-[100dvh] bg-slate-950"
           : "min-h-screen bg-gradient-to-b from-blue-50 via-sky-50 to-sky-100"
       }`}
-      style={isRoomView ? { minHeight: "100dvh" } : undefined}
     >
       <div className="absolute right-4 top-4 z-20">
         <UiLocaleSwitch />
@@ -43,7 +42,7 @@ function ResponsiveLayout({ children }: { children: React.ReactNode }) {
       <main
         className={`flex flex-1 flex-col items-center ${
           isRoomView
-            ? "min-h-0 justify-stretch p-0"
+            ? "h-full min-h-0 justify-stretch p-0"
             : "justify-center px-4 py-6 sm:px-8 sm:py-10"
         }`}
       >
@@ -51,7 +50,7 @@ function ResponsiveLayout({ children }: { children: React.ReactNode }) {
           initial={{ opacity: 0, y: 24 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.35 }}
-          className={isRoomView ? "h-full min-h-0 w-full max-w-none" : "w-full max-w-6xl"}
+          className={isRoomView ? "h-full w-full max-w-none" : "w-full max-w-6xl"}
         >
           {children}
         </motion.div>

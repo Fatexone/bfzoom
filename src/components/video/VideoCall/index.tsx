@@ -51,8 +51,8 @@ function LiveKitVideoCall({
   const [userCount, setUserCount] = useState(1);
 
   return (
-    <div className="flex h-full min-h-0 bg-gray-950 text-slate-100 safe-bottom safe-x">
-      <div className="h-full min-h-0 w-full">
+    <div className="flex min-h-dvh bg-gradient-to-b from-sky-50 via-blue-50 to-sky-100 text-slate-800 safe-bottom safe-x">
+      <div className="w-full max-w-6xl mx-auto p-4 sm:p-6">
         <LiveKitCall
           roomId={roomId}
           onParticipantCount={setUserCount}
