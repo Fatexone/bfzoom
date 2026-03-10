@@ -9,11 +9,12 @@ import {
   updateDoc,
 } from "firebase/firestore";
 
-type CreditType = "improve" | "summary";
+type CreditType = "improve" | "summary" | "translation";
 
 const LIMITS: Record<CreditType, number> = {
   improve: 30,
   summary: 10,
+  translation: 120,
 };
 
 const getMonthKey = () => {
@@ -37,7 +38,7 @@ export const getUsage = async (uid: string) => {
   const monthKey = getMonthKey();
 
   if (!snap.exists()) {
-    const base = { monthKey, improveUsed: 0, summaryUsed: 0 };
+    const base = { monthKey, improveUsed: 0, summaryUsed: 0, translationUsed: 0 };
     await setDoc(ref, { ...base, updatedAt: serverTimestamp() });
     return base;
   }
@@ -46,10 +47,11 @@ export const getUsage = async (uid: string) => {
     monthKey?: string;
     improveUsed?: number;
     summaryUsed?: number;
+    translationUsed?: number;
   };
 
   if (data.monthKey !== monthKey) {
-    const reset = { monthKey, improveUsed: 0, summaryUsed: 0 };
+    const reset = { monthKey, improveUsed: 0, summaryUsed: 0, translationUsed: 0 };
     await setDoc(ref, { ...reset, updatedAt: serverTimestamp() }, { merge: true });
     return reset;
   }
@@ -58,6 +60,7 @@ export const getUsage = async (uid: string) => {
     monthKey,
     improveUsed: data.improveUsed ?? 0,
     summaryUsed: data.summaryUsed ?? 0,
+    translationUsed: data.translationUsed ?? 0,
   };
 };
 
@@ -66,7 +69,12 @@ export const canUseCredit = async (uid: string, type: CreditType) => {
     return { ok: true, remaining: Infinity, limit: Infinity };
   }
   const usage = await getUsage(uid);
-  const used = type === "improve" ? usage.improveUsed : usage.summaryUsed;
+  const used =
+    type === "improve"
+      ? usage.improveUsed
+      : type === "summary"
+      ? usage.summaryUsed
+      : usage.translationUsed;
   const limit = LIMITS[type];
   return { ok: used < limit, remaining: Math.max(limit - used, 0), limit };
 };
@@ -74,8 +82,15 @@ export const canUseCredit = async (uid: string, type: CreditType) => {
 export const incrementCredit = async (uid: string, type: CreditType) => {
   const ref = usageRef(uid);
   const usage = await getUsage(uid);
-  const field = type === "improve" ? "improveUsed" : "summaryUsed";
-  const nextValue = (type === "improve" ? usage.improveUsed : usage.summaryUsed) + 1;
+  const field =
+    type === "improve" ? "improveUsed" : type === "summary" ? "summaryUsed" : "translationUsed";
+  const currentValue =
+    type === "improve"
+      ? usage.improveUsed
+      : type === "summary"
+      ? usage.summaryUsed
+      : usage.translationUsed;
+  const nextValue = currentValue + 1;
   await updateDoc(ref, { [field]: nextValue, updatedAt: serverTimestamp() });
 };
 

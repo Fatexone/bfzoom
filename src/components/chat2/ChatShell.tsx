@@ -52,6 +52,77 @@ const TOKEN_COSTS: Record<"improve" | "summary", number> = {
   improve: 1,
   summary: 2,
 };
+const CHAT_TRANSLATION_MAX_SECONDS_PER_MESSAGE = 24;
+
+type ChatTranslationEntitlementState = {
+  enabled: boolean;
+  lockReason: string;
+  loading: boolean;
+  isPremium: boolean;
+  totalSecondsRemaining: number;
+  freeSecondsRemaining: number;
+  paidSecondsRemaining: number;
+};
+
+const DEFAULT_CHAT_TRANSLATION_ENTITLEMENT: ChatTranslationEntitlementState = {
+  enabled: true,
+  lockReason: "",
+  loading: true,
+  isPremium: false,
+  totalSecondsRemaining: 180,
+  freeSecondsRemaining: 180,
+  paidSecondsRemaining: 0,
+};
+
+const formatTranslationRemaining = (remainingSeconds?: number | null) => {
+  if (typeof remainingSeconds !== "number" || !Number.isFinite(remainingSeconds)) {
+    return "Synchronisation...";
+  }
+  if (remainingSeconds >= Number.MAX_SAFE_INTEGER / 2) {
+    return "Illimite";
+  }
+  const safe = Math.max(0, Math.floor(remainingSeconds));
+  const minutes = Math.floor(safe / 60);
+  const seconds = safe % 60;
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+};
+
+const normalizeTranslationEntitlement = (
+  payload: unknown
+): ChatTranslationEntitlementState => {
+  const raw = (payload || {}) as Record<string, unknown>;
+  const freeSecondsRemaining =
+    typeof raw.freeSecondsRemaining === "number" && Number.isFinite(raw.freeSecondsRemaining)
+      ? Math.max(0, Math.floor(raw.freeSecondsRemaining))
+      : 0;
+  const paidSecondsRemaining =
+    typeof raw.paidSecondsRemaining === "number" && Number.isFinite(raw.paidSecondsRemaining)
+      ? Math.max(0, Math.floor(raw.paidSecondsRemaining))
+      : 0;
+  const totalSecondsRemaining =
+    typeof raw.totalSecondsRemaining === "number" && Number.isFinite(raw.totalSecondsRemaining)
+      ? Math.max(0, Math.floor(raw.totalSecondsRemaining))
+      : freeSecondsRemaining + paidSecondsRemaining;
+  const enabled =
+    typeof raw.enabled === "boolean" ? raw.enabled : totalSecondsRemaining > 0;
+  const lockReason = typeof raw.lockReason === "string" ? raw.lockReason.trim() : "";
+  return {
+    enabled,
+    lockReason: enabled ? "" : lockReason,
+    loading: false,
+    isPremium: raw.isPremium === true,
+    totalSecondsRemaining,
+    freeSecondsRemaining,
+    paidSecondsRemaining,
+  };
+};
+
+const estimateTranslationSeconds = (text: string) => {
+  const length = text.trim().length;
+  if (!length) return 1;
+  const base = Math.ceil(length / 30) * 3;
+  return Math.max(1, Math.min(CHAT_TRANSLATION_MAX_SECONDS_PER_MESSAGE, base));
+};
 
 const CHAT_LANGUAGE_LABELS = Object.fromEntries(
   CHAT_LANGUAGE_OPTIONS.map((entry) => [entry.code, entry.label])
@@ -113,6 +184,9 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
   const [chatLimit, setChatLimit] = useState(40);
+  const [translationEntitlement, setTranslationEntitlement] = useState<ChatTranslationEntitlementState>(
+    DEFAULT_CHAT_TRANSLATION_ENTITLEMENT
+  );
   const handleTokenLimit = useCallback((message: string) => {
     setErrorBanner(message);
     if (message.toLowerCase().includes("tokens insuffisants")) {
@@ -707,6 +781,80 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
     [currentUser.id]
   );
 
+  const refreshTranslationEntitlement = useCallback(async () => {
+    try {
+      const current = auth.currentUser;
+      if (!current) {
+        setTranslationEntitlement({
+          ...DEFAULT_CHAT_TRANSLATION_ENTITLEMENT,
+          loading: false,
+          enabled: false,
+        });
+        return;
+      }
+      const token = await getIdToken(current, true);
+      const response = await fetch("/api/translation/entitlement", {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const message =
+          typeof (payload as { error?: unknown }).error === "string"
+            ? (payload as { error: string }).error
+            : "Impossible de synchroniser les credits traduction.";
+        setTranslationEntitlement((currentState) => ({
+          ...currentState,
+          loading: false,
+          enabled: false,
+          lockReason: message,
+        }));
+        return;
+      }
+      setTranslationEntitlement(normalizeTranslationEntitlement(payload));
+    } catch {
+      setTranslationEntitlement((currentState) => ({
+        ...currentState,
+        loading: false,
+      }));
+    }
+  }, []);
+
+  const consumeTranslationSeconds = useCallback(
+    async (seconds: number, chatId: string) => {
+      const current = auth.currentUser;
+      if (!current) {
+        throw new Error("Session expiree");
+      }
+      const token = await getIdToken(current, true);
+      const response = await fetch("/api/translation/consume", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          seconds: Math.max(1, Math.floor(seconds)),
+          origin: "chat",
+          roomId: chatId,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const message =
+          typeof (payload as { lockReason?: unknown }).lockReason === "string"
+            ? (payload as { lockReason: string }).lockReason
+            : typeof (payload as { error?: unknown }).error === "string"
+            ? (payload as { error: string }).error
+            : "Credits traduction insuffisants.";
+        throw new Error(message);
+      }
+      setTranslationEntitlement(normalizeTranslationEntitlement(payload));
+    },
+    []
+  );
+
   useEffect(() => {
     const update = () => setIsMobile(window.matchMedia("(max-width: 767px)").matches);
     update();
@@ -723,6 +871,10 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
     });
     return () => unsubscribe();
   }, [currentUser.id]);
+
+  useEffect(() => {
+    void refreshTranslationEntitlement();
+  }, [refreshTranslationEntitlement, isPremium, currentUser.id]);
 
   useEffect(() => {
     callSnapshotByChatRef.current = {};
@@ -1091,8 +1243,9 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
 
     // 2. en arrière-plan, tenter de traduire et mettre à jour
     if (messageId) {
-      translateDraftForChat(cleanText, targetLanguage)
-        .then(async (translated) => {
+      consumeTranslationSeconds(estimateTranslationSeconds(cleanText), chatId)
+        .then(async () => {
+          const translated = await translateDraftForChat(cleanText, targetLanguage);
           try {
             const msgRef = doc(db, `chats/${chatId}/messages/${messageId}`);
             await updateDoc(msgRef, {
@@ -1106,6 +1259,11 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
           }
         })
         .catch((translationError) => {
+          const message =
+            translationError instanceof Error
+              ? translationError.message
+              : "Traduction indisponible pour le moment.";
+          handleTokenLimit(message);
           console.warn("background translation failed", translationError);
         });
     }
@@ -1522,6 +1680,27 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
           >
             ← Menu modules
           </button>
+        </div>
+        <div className="mx-4 mt-3 rounded-xl border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span>
+              {translationEntitlement.loading
+                ? "Synchronisation des credits traduction..."
+                : translationEntitlement.enabled
+                ? `Temps traduction restant: ${formatTranslationRemaining(
+                    translationEntitlement.totalSecondsRemaining
+                  )}`
+                : translationEntitlement.lockReason ||
+                  "Credits traduction indisponibles pour le moment."}
+            </span>
+            <button
+              type="button"
+              onClick={() => router.push("/pricing")}
+              className="rounded-lg border border-amber-300/40 bg-amber-500/20 px-2.5 py-1 text-[11px] font-semibold text-amber-50 hover:bg-amber-500/30"
+            >
+              Recharger
+            </button>
+          </div>
         </div>
         {errorBanner && (
           <div className="m-4 rounded-2xl border border-red-400/40 bg-red-500/10 px-4 py-3 text-sm text-red-100 shadow-lg">
