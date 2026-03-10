@@ -16,11 +16,13 @@ const PeerVideoCall = dynamic(() => import("./PeerVideoCall"), { ssr: false });
 export default function VideoCall({
   roomId,
   isHost,
+  aiTrainingAutoStart,
   defaultDisplayName,
   onLeave,
 }: {
   roomId: string;
   isHost: boolean;
+  aiTrainingAutoStart?: boolean;
   defaultDisplayName?: string;
   onLeave?: () => void;
 }) {
@@ -29,6 +31,7 @@ export default function VideoCall({
       <LiveKitVideoCall
         roomId={roomId}
         isHost={isHost}
+        aiTrainingAutoStart={aiTrainingAutoStart}
         defaultDisplayName={defaultDisplayName}
         onLeave={onLeave}
       />
@@ -40,11 +43,13 @@ export default function VideoCall({
 function LiveKitVideoCall({
   roomId,
   isHost,
+  aiTrainingAutoStart,
   defaultDisplayName,
   onLeave,
 }: {
   roomId: string;
   isHost: boolean;
+  aiTrainingAutoStart?: boolean;
   defaultDisplayName?: string;
   onLeave?: () => void;
 }) {
@@ -57,6 +62,7 @@ function LiveKitVideoCall({
           roomId={roomId}
           onParticipantCount={setUserCount}
           isHost={isHost}
+          aiTrainingAutoStart={aiTrainingAutoStart}
           defaultDisplayName={defaultDisplayName}
           onLeave={onLeave}
         />

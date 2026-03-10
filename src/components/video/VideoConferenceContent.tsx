@@ -40,6 +40,7 @@ type VideoConferenceCopy = {
   guestNameLabel: string;
   guestNamePlaceholder: string;
   guestNameVisibleHint: string;
+  directExerciseLoading: string;
 };
 
 const VIDEO_COPY: Record<UiLocale, VideoConferenceCopy> = {
@@ -67,6 +68,7 @@ const VIDEO_COPY: Record<UiLocale, VideoConferenceCopy> = {
     guestNameLabel: "Nom invité",
     guestNamePlaceholder: "Ex: Marie",
     guestNameVisibleHint: "Visible pour les participants.",
+    directExerciseLoading: "Ouverture de l'exercice IA en cours...",
   },
   en: {
     guestDefaultName: "BFZoom Guest",
@@ -92,6 +94,7 @@ const VIDEO_COPY: Record<UiLocale, VideoConferenceCopy> = {
     guestNameLabel: "Guest name",
     guestNamePlaceholder: "Ex: Maria",
     guestNameVisibleHint: "Visible to participants.",
+    directExerciseLoading: "Opening AI exercise...",
   },
 };
 
@@ -112,9 +115,10 @@ export default function VideoConferenceContent() {
 
   const searchParams = useSearchParams();
   const router = useRouter();
-  const wantsHost = searchParams.get("host") === "1";
+  const wantsAiExercise = searchParams.get("exercise") === "1";
+  const wantsHost = searchParams.get("host") === "1" || wantsAiExercise;
   const isHost = wantsHost && allowlistStatus === "allowed";
-  const wantsCreate = searchParams.get("create") === "1";
+  const wantsCreate = searchParams.get("create") === "1" || wantsAiExercise;
   const roomFromQuery = searchParams.get("room")?.trim() || "";
   const canJoinAsGuestByLink = Boolean(roomFromQuery) && !wantsHost;
   const guestNameFromQuery =
@@ -221,7 +225,11 @@ export default function VideoConferenceContent() {
     setCreateError("");
     if (!authReady) return;
     if (!userEmail) {
-      router.push("/login?next=/videoconference?create=1");
+      router.push(
+        `/login?next=${encodeURIComponent(
+          wantsAiExercise ? "/videoconference?exercise=1" : "/videoconference?create=1"
+        )}`
+      );
       return;
     }
     if (allowlistStatus === "loading" || allowlistStatus === "idle") return;
@@ -232,7 +240,10 @@ export default function VideoConferenceContent() {
       return;
     }
     const id = generateRoomId();
-    router.replace(`/videoconference?room=${id}&host=1`);
+    const target = wantsAiExercise
+      ? `/videoconference?room=${id}&host=1&exercise=1`
+      : `/videoconference?room=${id}&host=1`;
+    router.replace(target);
     setRoomId(id);
   }, [
     roomId,
@@ -241,6 +252,7 @@ export default function VideoConferenceContent() {
     allowlistStatus,
     router,
     authReady,
+    wantsAiExercise,
     t.unauthorizedCreate,
   ]);
 
@@ -311,6 +323,16 @@ export default function VideoConferenceContent() {
      🧱 LOBBY (avant création de salle)
   ======================================================= */
   if (!roomId) {
+    if (wantsAiExercise) {
+      return (
+        <div className="min-h-dvh flex flex-col items-center justify-center bg-gradient-to-b from-gray-50 to-gray-100 text-gray-800 px-4">
+          <div className="w-full max-w-md rounded-2xl border border-gray-200 bg-white p-6 text-center shadow-xl">
+            <div className="mx-auto mb-3 h-6 w-6 animate-spin rounded-full border-2 border-sky-500 border-t-transparent" />
+            <p className="text-sm font-semibold text-slate-700">{t.directExerciseLoading}</p>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="min-h-dvh flex flex-col items-center justify-center bg-gradient-to-b from-gray-50 to-gray-100 text-gray-800 px-4">
         <div className="w-full max-w-md bg-white rounded-2xl shadow-xl border border-gray-200 p-6 text-center">
@@ -417,6 +439,7 @@ export default function VideoConferenceContent() {
           <VideoCall
             roomId={roomId}
             isHost={isHost}
+            aiTrainingAutoStart={wantsAiExercise}
             defaultDisplayName={guestDisplayName}
             onLeave={handleLeaveRoom}
           />
