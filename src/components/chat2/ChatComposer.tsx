@@ -167,6 +167,8 @@ function ChatComposerInner(
   const videoStartRef = useRef<number>(0);
   const pointerIdRef = useRef<number | null>(null);
   const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const dictationBaseMessageRef = useRef("");
+  const dictationFinalTranscriptRef = useRef("");
 
   const cleanupStream = () => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -296,18 +298,33 @@ function ChatComposerInner(
       return;
     }
     setDictationError(null);
+    dictationBaseMessageRef.current = message.trim();
+    dictationFinalTranscriptRef.current = "";
     const recognition = new Ctor();
     recognition.lang = "fr-FR";
     recognition.continuous = false;
     recognition.interimResults = true;
     recognition.onresult = (event) => {
-      let transcript = "";
+      let interimTranscript = "";
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
-        transcript += event.results[i]?.[0]?.transcript || "";
+        const piece = (event.results[i]?.[0]?.transcript || "").trim();
+        if (!piece) continue;
+        if (event.results[i]?.isFinal) {
+          dictationFinalTranscriptRef.current = `${dictationFinalTranscriptRef.current} ${piece}`.trim();
+        } else {
+          interimTranscript = `${interimTranscript} ${piece}`.trim();
+        }
       }
-      const clean = transcript.trim();
-      if (!clean) return;
-      setMessage((prev) => (prev ? `${prev} ${clean}`.trim() : clean));
+      const merged = [
+        dictationBaseMessageRef.current,
+        dictationFinalTranscriptRef.current,
+        interimTranscript,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .trim();
+      if (!merged) return;
+      setMessage(merged);
     };
     recognition.onerror = (event) => {
       const reason = (event.error || "").trim();
@@ -317,6 +334,8 @@ function ChatComposerInner(
     recognition.onend = () => {
       setIsDictating(false);
       speechRecognitionRef.current = null;
+      dictationFinalTranscriptRef.current = "";
+      dictationBaseMessageRef.current = "";
     };
     speechRecognitionRef.current = recognition;
     recognition.start();
