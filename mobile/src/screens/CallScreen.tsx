@@ -286,6 +286,7 @@ type CoachReplySuggestion = {
   id: string;
   targetText: string;
   sourceText: string;
+  phoneticText: string;
 };
 
 type StoredCallPrefs = {
@@ -3026,11 +3027,26 @@ function RoomView({
 
             const translatedSuggestions = await Promise.all(
               suggestionTargets.map(async (entry, index) => {
+                const phonetic = await phoneticText({
+                  apiBaseUrl: publicApiBase,
+                  bearerToken: session.bearerToken,
+                  guestTtsToken: session.guestTtsToken,
+                  text: entry,
+                  languageName: getPromptLanguageName(targetLanguage),
+                }).catch(() => "");
+                const normalizedSuggestion = entry.replace(/\s+/g, " ").trim().toLowerCase();
+                const normalizedPhonetic = phonetic.replace(/\s+/g, " ").trim().toLowerCase();
+                const finalPhonetic =
+                  normalizedPhonetic && normalizedPhonetic !== normalizedSuggestion
+                    ? phonetic.trim()
+                    : "";
+
                 if (userLang === targetLanguage) {
                   return {
                     id: `${requestId}-${index}`,
                     targetText: entry,
                     sourceText: entry,
+                    phoneticText: finalPhonetic,
                   };
                 }
                 const translated = await translateText({
@@ -3045,6 +3061,7 @@ function RoomView({
                   id: `${requestId}-${index}`,
                   targetText: entry,
                   sourceText: translated.trim() || entry,
+                  phoneticText: finalPhonetic,
                 };
               })
             );
@@ -4925,6 +4942,16 @@ function RoomView({
                               >
                                 {entry.sourceText}
                               </Text>
+                            ) : null}
+                            {entry.phoneticText.trim() ? (
+                              <View style={styles.coachPartnerTranslationBox}>
+                                <Text style={styles.coachPartnerTranslationLabel}>
+                                  Phonetique ({targetLanguageLabel})
+                                </Text>
+                                <Text style={styles.coachPartnerTranslationText}>
+                                  {entry.phoneticText}
+                                </Text>
+                              </View>
                             ) : null}
                             <View style={styles.row}>
                               <Pressable
