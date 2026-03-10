@@ -1322,6 +1322,65 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
     }
   };
 
+  const handleSendTranslatedVoice = async (
+    text: string,
+    targetLanguage: ChatLanguageCode
+  ) => {
+    if (!selectedChatId) return;
+    const clean = text.trim();
+    if (!clean) return;
+    try {
+      const estimatedSeconds = estimateTranslationSeconds(clean);
+      await consumeTranslationSeconds(estimatedSeconds, selectedChatId);
+      const translated = await translateDraftForChat(clean, targetLanguage);
+      const current = auth.currentUser;
+      if (!current) {
+        throw new Error("Session expirée");
+      }
+      const token = await getIdToken(current, true);
+      const ttsResponse = await fetch("/api/tts", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          text: translated.translatedText,
+          voice: "alloy",
+        }),
+      });
+      if (!ttsResponse.ok) {
+        throw new Error("Synthese vocale indisponible pour le moment.");
+      }
+      const arrayBuffer = await ttsResponse.arrayBuffer();
+      const blob = new Blob([arrayBuffer], { type: "audio/mpeg" });
+      const approxDuration = Math.max(1, Math.min(30, Math.ceil(clean.length / 18)));
+      await sendVoiceMessage({
+        chatId: selectedChatId,
+        blob,
+        duration: approxDuration,
+        senderId: currentUser.id,
+        senderName: currentUser.name,
+      });
+      await markChatRead({ chatId: selectedChatId, userId: currentUser.id });
+      void triggerChatPushFanout({
+        chatId: selectedChatId,
+        messageType: "voice",
+        previewText: "Voix traduite",
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Impossible d'envoyer la voix traduite.";
+      setErrorBanner(message);
+      if (message.toLowerCase().includes("credits") || message.toLowerCase().includes("tokens")) {
+        setShowUpgradeModal(true);
+      }
+      throw error;
+    }
+  };
+
   const handleCreateGroup = async (title: string, memberIds: string[]) => {
     const groupId = await createGroupChat({
       title,
@@ -1772,6 +1831,7 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
           <ChatComposer
             ref={composerRef}
             onSend={handleSend}
+            onSendTranslatedVoice={handleSendTranslatedVoice}
             onSendAttachment={handleSendAttachment}
             onSendVoiceNote={handleSendVoiceNote}
             onImprove={handleImprove}

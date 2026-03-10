@@ -9,7 +9,32 @@ import {
   useRef,
   useState,
 } from "react";
-import { Send } from "lucide-react";
+import { Mic, Send } from "lucide-react";
+
+type SpeechRecognitionAlternativeLike = { transcript?: string };
+type SpeechRecognitionResultLike = {
+  isFinal?: boolean;
+  length: number;
+  [index: number]: SpeechRecognitionAlternativeLike;
+};
+type SpeechRecognitionEventLike = {
+  resultIndex: number;
+  results: {
+    length: number;
+    [index: number]: SpeechRecognitionResultLike;
+  };
+};
+type SpeechRecognitionLike = {
+  lang: string;
+  interimResults: boolean;
+  continuous: boolean;
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((event: { error?: string }) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+};
+type SpeechRecognitionCtor = new () => SpeechRecognitionLike;
 
 const VIDEO_MIME_CANDIDATES = [
   "video/mp4;codecs=avc1.42E01E",
@@ -34,6 +59,10 @@ const getSupportedVideoMimeType = () => {
 
 type ChatComposerProps = {
   onSend: (text: string, targetLanguage: ChatLanguageCode) => Promise<void>;
+  onSendTranslatedVoice?: (
+    text: string,
+    targetLanguage: ChatLanguageCode
+  ) => Promise<void>;
   onSendAttachment?: (file: File) => Promise<void>;
   onImprove?: (
     text: string,
@@ -85,6 +114,7 @@ export type ChatComposerHandle = {
 function ChatComposerInner(
   {
     onSend,
+    onSendTranslatedVoice,
     onSendAttachment,
     onImprove,
     onSendVoiceNote,
@@ -109,6 +139,9 @@ function ChatComposerInner(
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [recordingError, setRecordingError] = useState<string | null>(null);
   const [voiceSending, setVoiceSending] = useState(false);
+  const [translatedVoiceSending, setTranslatedVoiceSending] = useState(false);
+  const [isDictating, setIsDictating] = useState(false);
+  const [dictationError, setDictationError] = useState<string | null>(null);
   const [menuRecording, setMenuRecording] = useState(false);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
@@ -133,6 +166,7 @@ function ChatComposerInner(
   const shouldSendVideoRef = useRef(true);
   const videoStartRef = useRef<number>(0);
   const pointerIdRef = useRef<number | null>(null);
+  const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
 
   const cleanupStream = () => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -234,8 +268,65 @@ function ChatComposerInner(
       cleanupCameraStream();
       stopVideoTimer();
       videoRecorderRef.current?.stop();
+      speechRecognitionRef.current?.stop();
     };
   }, []);
+
+  const resolveSpeechRecognitionCtor = (): SpeechRecognitionCtor | null => {
+    if (typeof window === "undefined") return null;
+    const candidate = (
+      window as Window & {
+        SpeechRecognition?: SpeechRecognitionCtor;
+        webkitSpeechRecognition?: SpeechRecognitionCtor;
+      }
+    ).SpeechRecognition ||
+      (
+        window as Window & {
+          SpeechRecognition?: SpeechRecognitionCtor;
+          webkitSpeechRecognition?: SpeechRecognitionCtor;
+        }
+      ).webkitSpeechRecognition;
+    return candidate || null;
+  };
+
+  const startDictation = () => {
+    const Ctor = resolveSpeechRecognitionCtor();
+    if (!Ctor) {
+      setDictationError("Dictée vocale non supportée sur ce navigateur.");
+      return;
+    }
+    setDictationError(null);
+    const recognition = new Ctor();
+    recognition.lang = "fr-FR";
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.onresult = (event) => {
+      let transcript = "";
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        transcript += event.results[i]?.[0]?.transcript || "";
+      }
+      const clean = transcript.trim();
+      if (!clean) return;
+      setMessage((prev) => (prev ? `${prev} ${clean}`.trim() : clean));
+    };
+    recognition.onerror = (event) => {
+      const reason = (event.error || "").trim();
+      setDictationError(reason ? `Dictée indisponible: ${reason}` : "Erreur de dictée vocale.");
+      setIsDictating(false);
+    };
+    recognition.onend = () => {
+      setIsDictating(false);
+      speechRecognitionRef.current = null;
+    };
+    speechRecognitionRef.current = recognition;
+    recognition.start();
+    setIsDictating(true);
+  };
+
+  const stopDictation = () => {
+    speechRecognitionRef.current?.stop();
+    setIsDictating(false);
+  };
 
   useEffect(() => {
     if (!isRecording) {
@@ -544,6 +635,26 @@ function ChatComposerInner(
     }
   };
 
+  const handleSendTranslatedVoice = async () => {
+    const text = message.trim();
+    if (!text || !onSendTranslatedVoice || disabled || translatedVoiceSending) return;
+    setTranslatedVoiceSending(true);
+    setSendError(null);
+    try {
+      await onSendTranslatedVoice(text, targetLanguage);
+      setMessage("");
+      setSuggestion(null);
+    } catch (error) {
+      const msg =
+        error instanceof Error
+          ? error.message
+          : "Impossible d'envoyer la voix traduite pour le moment.";
+      setSendError(msg);
+    } finally {
+      setTranslatedVoiceSending(false);
+    }
+  };
+
   const targetLanguageLabel = CHAT_LANGUAGE_LABELS[targetLanguage] || targetLanguage;
   const messagePlaceholder = `Écris ton message... (traduction vers ${targetLanguageLabel})`;
   const sendButtonLabel = sending ? "Envoi..." : `Envoyer (${targetLanguage.toUpperCase()})`;
@@ -777,6 +888,19 @@ function ChatComposerInner(
           </button>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={isDictating ? stopDictation : startDictation}
+            disabled={disabled || translatedVoiceSending || sending}
+            className={`inline-flex items-center gap-1 rounded-2xl border px-3 py-2 text-xs font-semibold text-white transition disabled:opacity-60 ${
+              isDictating
+                ? "border-rose-400/50 bg-rose-500/20 hover:bg-rose-500/30"
+                : "border-white/10 bg-white/10 hover:bg-white/20"
+            }`}
+          >
+            <Mic className="h-3.5 w-3.5" />
+            {isDictating ? "Stop dictée" : "Dicter"}
+          </button>
           <select
             value={targetLanguage}
             onChange={(event) =>
@@ -798,10 +922,18 @@ function ChatComposerInner(
           >
             {improveLoading ? "Analyse..." : "Améliorer + Traduire"}
           </button>
+          <button
+            onClick={handleSendTranslatedVoice}
+            disabled={disabled || !message.trim() || translatedVoiceSending || !onSendTranslatedVoice}
+            className="rounded-2xl border border-sky-400/40 bg-sky-500/20 px-3 py-2 text-xs font-semibold text-white hover:bg-sky-500/30 disabled:opacity-60"
+          >
+            {translatedVoiceSending ? "Voix..." : "Envoyer voix traduite"}
+          </button>
           <span className="text-[11px] text-gray-300">
             Traduction active vers <span className="font-semibold text-amber-200">{targetLanguageLabel}</span>
           </span>
         </div>
+        {dictationError && <div className="text-xs text-rose-200">{dictationError}</div>}
         {recordingError && (
           <div className="text-xs text-rose-200">{recordingError}</div>
         )}
