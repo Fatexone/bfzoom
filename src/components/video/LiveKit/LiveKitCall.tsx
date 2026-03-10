@@ -5160,12 +5160,13 @@ function LiveKitConference({
     [actionControlsState.lastAction, roomId, sendAction]
   );
   useEffect(() => {
+    if (aiTrainingAutoStart) return;
     if (!isHost || !roomId || typeof window === "undefined") return;
     const key = `bfzoom:invite-opened:${roomId}`;
     if (sessionStorage.getItem(key)) return;
     sessionStorage.setItem(key, "1");
     setInviteOpen(true);
-  }, [isHost, roomId]);
+  }, [aiTrainingAutoStart, isHost, roomId]);
   const [isFlippingCamera, setIsFlippingCamera] = useState(false);
   const [isTogglingCamera, setIsTogglingCamera] = useState(false);
   const remoteParticipants = useRemoteParticipants();
@@ -5407,7 +5408,7 @@ function LiveKitConference({
   const translationUnavailableMessage =
     effectiveTranslationLockMessage || TRANSLATION_UNLOCK_HINT;
   const aiPartnerAvailable =
-    AI_PARTNER_TRAINING_ENABLED && isHost && remoteParticipants.length === 0;
+    AI_PARTNER_TRAINING_ENABLED && isHost && (aiTrainingAutoStart || remoteParticipants.length === 0);
   const [aiPartnerEnabled, setAiPartnerEnabled] = useState(false);
   const [aiPartnerBusy, setAiPartnerBusy] = useState(false);
   const [aiPartnerLastReply, setAiPartnerLastReply] = useState("");
@@ -8123,7 +8124,7 @@ function LiveKitConference({
           >
             <div className="lk-control-bar flex items-center justify-between gap-2 !border-0 !bg-transparent !p-2 sm:!p-3">
               <div className="flex items-center gap-2">
-                {isHost && (
+                {isHost && !aiTrainingAutoStart && (
                   <button
                     onClick={() => setInviteOpen(true)}
                     className="lk-button"
@@ -8133,7 +8134,7 @@ function LiveKitConference({
                     <span className="hidden sm:inline">Partager</span>
                   </button>
                 )}
-                {isHost && inviteCopied && (
+                {isHost && !aiTrainingAutoStart && inviteCopied && (
                   <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-100">
                     {getInviteCopiedLabel(inviteCopied)}
                   </span>
@@ -8674,14 +8675,16 @@ function LiveKitConference({
             onSendToChat={roomChat.sendMessage}
           />
         )}
-        <InviteDrawer
-          isOpen={inviteOpen}
-          onClose={() => setInviteOpen(false)}
-          inviteLinks={inviteLinks}
-          onShare={shareInvite}
-          onCopy={copyInvite}
-          copied={inviteCopied}
-        />
+        {!aiTrainingAutoStart && (
+          <InviteDrawer
+            isOpen={inviteOpen}
+            onClose={() => setInviteOpen(false)}
+            inviteLinks={inviteLinks}
+            onShare={shareInvite}
+            onCopy={copyInvite}
+            copied={inviteCopied}
+          />
+        )}
       </LayoutContextProvider>
       <ConnectionStateToast />
     </div>
@@ -9663,12 +9666,13 @@ function LiveKitConferenceMobile({
   }, []);
 
   useEffect(() => {
+    if (aiTrainingAutoStart) return;
     if (!isHost || !roomId || typeof window === "undefined") return;
     const key = `bfzoom:invite-opened:${roomId}:mobile`;
     if (sessionStorage.getItem(key)) return;
     sessionStorage.setItem(key, "1");
     setInviteOpen(true);
-  }, [isHost, roomId]);
+  }, [aiTrainingAutoStart, isHost, roomId]);
   useEffect(() => {
     if (!isVerySmallViewport) {
       setMoreActionsOpen(false);
@@ -9875,7 +9879,7 @@ function LiveKitConferenceMobile({
   const translationUnavailableMessage =
     effectiveTranslationLockMessage || TRANSLATION_UNLOCK_HINT;
   const aiPartnerAvailable =
-    AI_PARTNER_TRAINING_ENABLED && isHost && remoteParticipants.length === 0;
+    AI_PARTNER_TRAINING_ENABLED && isHost && (aiTrainingAutoStart || remoteParticipants.length === 0);
   const [aiPartnerEnabled, setAiPartnerEnabled] = useState(false);
   const [aiPartnerBusy, setAiPartnerBusy] = useState(false);
   const [aiPartnerLastReply, setAiPartnerLastReply] = useState("");
@@ -11881,7 +11885,7 @@ function LiveKitConferenceMobile({
             <div className="bf-mobile-controls flex !border-0 !bg-transparent !p-0 flex-col gap-2">
               <div className="flex w-full items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
-                  {isHost && !isVerySmallViewport && (
+                  {isHost && !isVerySmallViewport && !aiTrainingAutoStart && (
                     <button
                       onClick={() => setInviteOpen(true)}
                       className="lk-button"
@@ -11891,12 +11895,12 @@ function LiveKitConferenceMobile({
                       <span className="hidden sm:inline">Partager</span>
                     </button>
                   )}
-                  {isHost && !isVerySmallViewport && inviteCopied && (
+                  {isHost && !isVerySmallViewport && !aiTrainingAutoStart && inviteCopied && (
                     <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-100">
                       {getInviteCopiedLabel(inviteCopied)}
                     </span>
                   )}
-                  {isHost && isVerySmallViewport && inviteCopied && (
+                  {isHost && isVerySmallViewport && !aiTrainingAutoStart && inviteCopied && (
                     <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-100">
                       Copie
                     </span>
@@ -11998,7 +12002,7 @@ function LiveKitConferenceMobile({
               </div>
               {isVerySmallViewport && moreActionsOpen && (
                 <div className="flex w-full flex-wrap items-center justify-center gap-2 rounded-lg border border-slate-700/70 bg-slate-900/70 p-2">
-                  {isHost && (
+                  {isHost && !aiTrainingAutoStart && (
                     <button
                       type="button"
                       onClick={() => {
@@ -12481,14 +12485,16 @@ function LiveKitConferenceMobile({
         onConsumeTranslationSeconds={onConsumeTranslationSeconds}
         onUnreadChange={(count) => roomChat.setUnreadCount(count)}
       />
-      <InviteDrawer
-        isOpen={inviteOpen}
-        onClose={() => setInviteOpen(false)}
-        inviteLinks={inviteLinks}
-        onShare={shareInvite}
-        onCopy={copyInvite}
-        copied={inviteCopied}
-      />
+      {!aiTrainingAutoStart && (
+        <InviteDrawer
+          isOpen={inviteOpen}
+          onClose={() => setInviteOpen(false)}
+          inviteLinks={inviteLinks}
+          onShare={shareInvite}
+          onCopy={copyInvite}
+          copied={inviteCopied}
+        />
+      )}
       <ConnectionStateToast />
     </div>
   );
