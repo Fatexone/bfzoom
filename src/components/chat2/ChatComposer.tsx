@@ -105,6 +105,26 @@ const CHAT_LANGUAGE_LABELS = Object.fromEntries(
   CHAT_LANGUAGE_OPTIONS.map((entry) => [entry.code, entry.label])
 ) as Record<ChatLanguageCode, string>;
 
+const DICTATION_LOCALE_BY_LANGUAGE: Partial<Record<ChatLanguageCode, string>> = {
+  fr: "fr-FR",
+  en: "en-US",
+  ar: "ar-SA",
+  zh: "zh-CN",
+  pt: "pt-PT",
+  "pt-br": "pt-BR",
+  hi: "hi-IN",
+  ko: "ko-KR",
+  tr: "tr-TR",
+  th: "th-TH",
+  es: "es-ES",
+  de: "de-DE",
+  he: "he-IL",
+  it: "it-IT",
+  ja: "ja-JP",
+  ru: "ru-RU",
+  fa: "fa-IR",
+};
+
 export type ChatComposerHandle = {
   startVoiceNote: () => void;
   openCamera: (mode: "photo" | "video") => void;
@@ -301,7 +321,7 @@ function ChatComposerInner(
     dictationBaseMessageRef.current = message.trim();
     dictationFinalTranscriptRef.current = "";
     const recognition = new Ctor();
-    recognition.lang = "fr-FR";
+    recognition.lang = DICTATION_LOCALE_BY_LANGUAGE[targetLanguage] || "fr-FR";
     recognition.continuous = false;
     recognition.interimResults = true;
     recognition.onresult = (event) => {

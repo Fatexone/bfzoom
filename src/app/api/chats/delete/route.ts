@@ -1,6 +1,24 @@
 import { NextResponse } from "next/server";
 import { getAdminDb, getAdminAuth } from "@/lib/firebaseAdmin";
 
+const BATCH_DELETE_SIZE = 400;
+
+const deleteCollectionInBatches = async (collectionPath: string) => {
+  const db = getAdminDb();
+  while (true) {
+    const snapshot = await db.collection(collectionPath).limit(BATCH_DELETE_SIZE).get();
+    if (snapshot.empty) break;
+
+    const batch = db.batch();
+    snapshot.docs.forEach((docSnap) => {
+      batch.delete(docSnap.ref);
+    });
+    await batch.commit();
+
+    if (snapshot.size < BATCH_DELETE_SIZE) break;
+  }
+};
+
 export async function POST(req: Request) {
   try {
     const authHeader = req.headers.get("authorization") || "";
@@ -23,7 +41,13 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Chat not found" }, { status: 404 });
     }
 
-    const participants = chatDoc.data()?.participants ?? [];
+    const chatData = (chatDoc.data() ?? {}) as {
+      participants?: unknown;
+      createdBy?: unknown;
+      type?: unknown;
+      admins?: unknown;
+    };
+    const participants = Array.isArray(chatData.participants) ? chatData.participants : [];
     if (!Array.isArray(participants) || !participants.includes(uid)) {
       return NextResponse.json(
         { error: "Insufficient permissions" },
@@ -31,17 +55,28 @@ export async function POST(req: Request) {
       );
     }
 
+    const createdBy =
+      typeof chatData.createdBy === "string" ? chatData.createdBy.trim() : "";
+    const admins = Array.isArray(chatData.admins)
+      ? chatData.admins.filter((entry): entry is string => typeof entry === "string")
+      : [];
+    const isOwner = createdBy === uid;
+    const isGroupAdmin = chatData.type === "group" && admins.includes(uid);
+    if (!isOwner && !isGroupAdmin) {
+      return NextResponse.json(
+        { error: "Only the owner or a group admin can delete this chat" },
+        { status: 403 }
+      );
+    }
+
+    await deleteCollectionInBatches(`chats/${chatId}/messages`);
+    await deleteCollectionInBatches(`chats/${chatId}/reads`);
+
     const batch = getAdminDb().batch();
+    batch.delete(getAdminDb().collection("calls").doc(chatId));
     batch.delete(chatDoc.ref);
-
-    const messages =
-      await getAdminDb().collection(`chats/${chatId}/messages`).get();
-    messages.docs.forEach((doc) => batch.delete(doc.ref));
-
-    const reads = await getAdminDb().collection(`chats/${chatId}/reads`).get();
-    reads.docs.forEach((doc) => batch.delete(doc.ref));
-
     await batch.commit();
+
     return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json(

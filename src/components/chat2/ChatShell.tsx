@@ -1243,9 +1243,9 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
 
     // 2. en arrière-plan, tenter de traduire et mettre à jour
     if (messageId) {
-      consumeTranslationSeconds(estimateTranslationSeconds(cleanText), chatId)
-        .then(async () => {
-          const translated = await translateDraftForChat(cleanText, targetLanguage);
+      translateDraftForChat(cleanText, targetLanguage)
+        .then(async (translated) => {
+          await consumeTranslationSeconds(estimateTranslationSeconds(cleanText), chatId);
           try {
             const msgRef = doc(db, `chats/${chatId}/messages/${messageId}`);
             await updateDoc(msgRef, {
@@ -1330,8 +1330,6 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
     const clean = text.trim();
     if (!clean) return;
     try {
-      const estimatedSeconds = estimateTranslationSeconds(clean);
-      await consumeTranslationSeconds(estimatedSeconds, selectedChatId);
       const translated = await translateDraftForChat(clean, targetLanguage);
       const current = auth.currentUser;
       if (!current) {
@@ -1354,6 +1352,8 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
       }
       const arrayBuffer = await ttsResponse.arrayBuffer();
       const blob = new Blob([arrayBuffer], { type: "audio/mpeg" });
+      const estimatedSeconds = estimateTranslationSeconds(clean);
+      await consumeTranslationSeconds(estimatedSeconds, selectedChatId);
       const approxDuration = Math.max(1, Math.min(30, Math.ceil(clean.length / 18)));
       await sendVoiceMessage({
         chatId: selectedChatId,
