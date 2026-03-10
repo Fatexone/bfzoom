@@ -17,12 +17,16 @@ export default function VideoCall({
   roomId,
   isHost,
   aiTrainingAutoStart,
+  audioOnly,
+  skipPreJoin,
   defaultDisplayName,
   onLeave,
 }: {
   roomId: string;
   isHost: boolean;
   aiTrainingAutoStart?: boolean;
+  audioOnly?: boolean;
+  skipPreJoin?: boolean;
   defaultDisplayName?: string;
   onLeave?: () => void;
 }) {
@@ -32,6 +36,8 @@ export default function VideoCall({
         roomId={roomId}
         isHost={isHost}
         aiTrainingAutoStart={aiTrainingAutoStart}
+        audioOnly={audioOnly}
+        skipPreJoin={skipPreJoin}
         defaultDisplayName={defaultDisplayName}
         onLeave={onLeave}
       />
@@ -44,12 +50,16 @@ function LiveKitVideoCall({
   roomId,
   isHost,
   aiTrainingAutoStart,
+  audioOnly,
+  skipPreJoin,
   defaultDisplayName,
   onLeave,
 }: {
   roomId: string;
   isHost: boolean;
   aiTrainingAutoStart?: boolean;
+  audioOnly?: boolean;
+  skipPreJoin?: boolean;
   defaultDisplayName?: string;
   onLeave?: () => void;
 }) {
@@ -63,6 +73,8 @@ function LiveKitVideoCall({
           onParticipantCount={setUserCount}
           isHost={isHost}
           aiTrainingAutoStart={aiTrainingAutoStart}
+          audioOnly={audioOnly}
+          skipPreJoin={skipPreJoin}
           defaultDisplayName={defaultDisplayName}
           onLeave={onLeave}
         />
