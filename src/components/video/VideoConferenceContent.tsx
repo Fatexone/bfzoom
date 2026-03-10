@@ -433,7 +433,7 @@ export default function VideoConferenceContent() {
             onClick={() => router.push("/dashboard")}
             className="pointer-events-auto inline-flex items-center rounded-full border border-white/20 bg-black/70 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-black/85"
           >
-            Retour dashboard
+            Retour au dashboard
           </button>
         </div>
       )}
