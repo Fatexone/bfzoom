@@ -117,7 +117,7 @@ export default function VideoConferenceContent() {
   const router = useRouter();
   const wantsAiExercise = searchParams.get("exercise") === "1";
   const wantsHost = searchParams.get("host") === "1" || wantsAiExercise;
-  const isHost = wantsHost && allowlistStatus === "allowed";
+  const isHost = wantsAiExercise ? true : wantsHost && allowlistStatus === "allowed";
   const wantsCreate = searchParams.get("create") === "1" || wantsAiExercise;
   const roomFromQuery = searchParams.get("room")?.trim() || "";
   const canJoinAsGuestByLink = Boolean(roomFromQuery) && !wantsHost;
@@ -231,6 +231,12 @@ export default function VideoConferenceContent() {
           wantsAiExercise ? "/videoconference?exercise=1" : "/videoconference?create=1"
         )}`
       );
+      return;
+    }
+    if (wantsAiExercise) {
+      const id = generateRoomId();
+      router.replace(`/videoconference?room=${id}&host=1&exercise=1`);
+      setRoomId(id);
       return;
     }
     if (allowlistStatus === "loading" || allowlistStatus === "idle") return;
