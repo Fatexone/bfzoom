@@ -2,10 +2,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { User } from "@/types/User";
-import type { Chat } from "@/types/Chat";
+import type { Chat, ChatMessage } from "@/types/Chat";
+import type { Contact } from "@/types/Contact";
 import ChatSidebar from "./ChatSidebar";
 import ChatThread from "./ChatThread";
-import ChatComposer, { type ChatComposerHandle } from "./ChatComposer";
+import ChatComposer, {
+  CHAT_LANGUAGE_OPTIONS,
+  type ChatComposerHandle,
+  type ChatLanguageCode,
+} from "./ChatComposer";
 import {
   createGroupChat,
   addGroupMembers,
@@ -27,9 +32,16 @@ import ChatGroupModal from "./ChatGroupModal";
 import ChatGroupManageModal from "./ChatGroupManageModal";
 import { auth, db } from "@/lib/firebaseConfig";
 import { acceptCall, endCall, startCall, useCallState } from "@/lib/calls";
+import {
+  appendCallHistory,
+  markMissedCallsAsRead,
+  subscribeMissedCalls,
+  subscribeUnreadMissedCallsCount,
+  type MissedCallEntry,
+} from "@/lib/callHistory";
 import LiveKitCall from "@/components/video/LiveKit/LiveKitCall";
 import { getIdToken } from "firebase/auth";
-import { deleteDoc, doc, onSnapshot } from "firebase/firestore";
+import { collection, deleteDoc, doc, getDocs, onSnapshot, updateDoc } from "firebase/firestore";
 import { useRouter } from "next/navigation";
 import { canUseCredit, incrementCredit } from "./credits";
 import UpgradeModal from "./UpgradeModal";
@@ -39,6 +51,41 @@ import { ADMIN_EMAIL } from "@/config/constants";
 const TOKEN_COSTS: Record<"improve" | "summary", number> = {
   improve: 1,
   summary: 2,
+};
+
+const CHAT_LANGUAGE_LABELS = Object.fromEntries(
+  CHAT_LANGUAGE_OPTIONS.map((entry) => [entry.code, entry.label])
+) as Record<ChatLanguageCode, string>;
+
+const sanitizeLanguageCode = (value?: string) => {
+  if (!value) return "";
+  return value.trim().toLowerCase().slice(0, 8);
+};
+
+const parseJsonPayload = (raw: string) => {
+  try {
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+};
+
+const getAiMessageContent = (payload: unknown) => {
+  if (!payload || typeof payload !== "object") return "";
+  const choices = (payload as { choices?: Array<{ message?: { content?: unknown } }> })
+    .choices;
+  if (!Array.isArray(choices) || choices.length === 0) return "";
+  const content = choices[0]?.message?.content;
+  return typeof content === "string" ? content : "";
+};
+
+const extractTimestampMs = (
+  value?: { toMillis?: () => number; toDate?: () => Date } | null
+) => {
+  if (!value) return 0;
+  if (typeof value.toMillis === "function") return value.toMillis();
+  if (typeof value.toDate === "function") return value.toDate().getTime();
+  return 0;
 };
 
 export default function ChatShell({ currentUser }: { currentUser: User }) {
@@ -95,14 +142,107 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
       setErrorBanner((current) => (current === message ? null : current));
     }, 6000);
   };
+  const notifyBrowser = useCallback(
+    async ({
+      title,
+      body,
+      chatId,
+    }: {
+      title: string;
+      body: string;
+      chatId?: string;
+    }) => {
+      if (typeof window === "undefined" || typeof Notification === "undefined") return;
+      try {
+        if (Notification.permission !== "granted") return;
+        const notification = new Notification(title, {
+          body,
+          tag: chatId ? `bfzoom-chat-${chatId}` : "bfzoom-chat",
+        });
+        notification.onclick = () => {
+          window.focus();
+          if (chatId) {
+            setSelectedChatId(chatId);
+          }
+        };
+      } catch {
+        // Browser notification can fail because of user policy; ignore.
+      }
+    },
+    []
+  );
+  const triggerChatPushFanout = useCallback(
+    async ({
+      chatId,
+      messageType,
+      previewText,
+    }: {
+      chatId: string;
+      messageType: "text" | "image" | "file" | "voice";
+      previewText?: string;
+    }) => {
+      const firebaseUser = auth.currentUser;
+      if (!firebaseUser) return;
+      const token = await getIdToken(firebaseUser, true).catch(() => "");
+      if (!token) return;
+
+      const response = await fetch("/api/chats/push", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          chatId,
+          senderName: currentUser.name,
+          messageType,
+          previewText: previewText?.trim() || "",
+        }),
+      });
+
+      if (response.ok) return;
+      const raw = await response.text().catch(() => "");
+      console.warn("chat push failed", response.status, raw);
+    },
+    [currentUser.name]
+  );
   const [callLoading, setCallLoading] = useState(false);
   const [callError, setCallError] = useState<string | null>(null);
-  const callState = useCallState(selectedChatId);
+  const [activeCallChatId, setActiveCallChatId] = useState<string | null>(null);
+  const [missedCalls, setMissedCalls] = useState<MissedCallEntry[]>([]);
+  const [unreadMissedCount, setUnreadMissedCount] = useState(0);
+  const callState = useCallState(activeCallChatId ?? selectedChatId);
   const composerRef = useRef<ChatComposerHandle | null>(null);
+  const [chatLanguage, setChatLanguage] = useState<ChatLanguageCode>("fr");
+  const [pendingMessagesByChat, setPendingMessagesByChat] = useState<
+    Record<string, ChatMessage[]>
+  >({});
+  const addPendingMessage = useCallback((chatId: string, message: ChatMessage) => {
+    setPendingMessagesByChat((current) => {
+      const existing = current[chatId] || [];
+      const next = [...existing.filter((entry) => entry.id !== message.id), message];
+      return { ...current, [chatId]: next };
+    });
+  }, []);
   const [callMode, setCallMode] = useState<"audio" | "video">("video");
+  const callSnapshotByChatRef = useRef<
+    Record<
+      string,
+      {
+        status: string;
+        from: string;
+        acceptedAtMs: number;
+        roomId: string;
+        callMode: "audio" | "video";
+      }
+    >
+  >({});
+  const callEventLoggedRef = useRef<Record<string, true>>({});
+  const lastMessageKeyByChatRef = useRef<Record<string, string>>({});
+  const chatListHydratedRef = useRef(false);
+  const lastIncomingCallNotificationRef = useRef("");
   const audioContextRef = useRef<AudioContext | null>(null);
-  const oscillatorRef = useRef<OscillatorNode | null>(null);
-  const gainRef = useRef<GainNode | null>(null);
+  const ringPulseTimerRef = useRef<number | null>(null);
   const isCallerInCall = callState?.from === currentUser.id;
   const isCallActive = callState?.status === "in_call";
   const isCallRinging = callState?.status === "ringing";
@@ -111,26 +251,57 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
     const context = audioContextRef.current ?? new AudioContext();
     audioContextRef.current = context;
     void context.resume().then(() => {
-      if (oscillatorRef.current) return;
-      const oscillator = context.createOscillator();
-      const gain = context.createGain();
-      oscillator.frequency.value = 440;
-      gain.gain.value = 0.25;
-      oscillator.connect(gain);
-      gain.connect(context.destination);
-      oscillator.type = "sine";
-      oscillator.start();
-      oscillatorRef.current = oscillator;
-      gainRef.current = gain;
+      if (ringPulseTimerRef.current) return;
+      const playTone = ({
+        frequency,
+        offset,
+        duration,
+        volume,
+      }: {
+        frequency: number;
+        offset: number;
+        duration: number;
+        volume: number;
+      }) => {
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        const startAt = context.currentTime + offset;
+        const attack = Math.min(0.02, duration * 0.35);
+        const releaseStart = startAt + Math.max(0.01, duration - 0.08);
+
+        oscillator.type = "sine";
+        oscillator.frequency.value = frequency;
+        gain.gain.setValueAtTime(0.0001, startAt);
+        gain.gain.exponentialRampToValueAtTime(volume, startAt + attack);
+        gain.gain.exponentialRampToValueAtTime(0.0001, releaseStart);
+
+        oscillator.connect(gain);
+        gain.connect(context.destination);
+        oscillator.start(startAt);
+        oscillator.stop(startAt + duration + 0.04);
+        oscillator.onended = () => {
+          oscillator.disconnect();
+          gain.disconnect();
+        };
+      };
+
+      const playSoftChimePattern = () => {
+        playTone({ frequency: 659.25, offset: 0.0, duration: 0.2, volume: 0.09 });
+        playTone({ frequency: 783.99, offset: 0.23, duration: 0.24, volume: 0.11 });
+        playTone({ frequency: 987.77, offset: 0.54, duration: 0.26, volume: 0.1 });
+      };
+
+      playSoftChimePattern();
+      ringPulseTimerRef.current = window.setInterval(playSoftChimePattern, 1900);
     });
   }, []);
 
   const stopRingtone = useCallback(() => {
-    oscillatorRef.current?.stop();
-    oscillatorRef.current?.disconnect();
-    gainRef.current?.disconnect();
-    oscillatorRef.current = null;
-    gainRef.current = null;
+    if (ringPulseTimerRef.current) {
+      window.clearInterval(ringPulseTimerRef.current);
+      ringPulseTimerRef.current = null;
+    }
+    void audioContextRef.current?.suspend().catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -155,6 +326,136 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
       setIsSidebarOpen(true);
     }
   }, [callState]);
+  useEffect(() => {
+    if (chats.length === 0) {
+      setActiveCallChatId(null);
+      callSnapshotByChatRef.current = {};
+      return;
+    }
+
+    const unsubscribers = chats.map((chat) =>
+      onSnapshot(
+        doc(db, "calls", chat.id),
+        (snapshot) => {
+          if (!snapshot.exists()) {
+            delete callSnapshotByChatRef.current[chat.id];
+            setActiveCallChatId((current) => (current === chat.id ? null : current));
+            return;
+          }
+          const data = snapshot.data() as {
+            status?: string;
+            from?: string;
+            callMode?: "audio" | "video";
+            roomId?: string;
+            acceptedAt?: { toMillis?: () => number; toDate?: () => Date };
+            ringExpiresAt?: { toMillis?: () => number; toDate?: () => Date };
+          };
+          const previous = callSnapshotByChatRef.current[chat.id];
+          const status = data.status || "";
+          const from = data.from || "";
+          const nextCallMode = data.callMode === "audio" ? "audio" : "video";
+          const roomId = (data.roomId || "").trim();
+          const acceptedAtMs =
+            typeof data.acceptedAt?.toMillis === "function"
+              ? data.acceptedAt.toMillis()
+              : typeof data.acceptedAt?.toDate === "function"
+              ? data.acceptedAt.toDate().getTime()
+              : 0;
+          const ringExpiresAtMs =
+            typeof data.ringExpiresAt?.toMillis === "function"
+              ? data.ringExpiresAt.toMillis()
+              : typeof data.ringExpiresAt?.toDate === "function"
+              ? data.ringExpiresAt.toDate().getTime()
+              : 0;
+
+          if (status === "ringing" && ringExpiresAtMs > 0 && ringExpiresAtMs <= Date.now()) {
+            void endCall(chat.id, currentUser.id, {
+              reason: "no_answer",
+              endedBy: "system",
+            }).catch(() => {});
+            return;
+          }
+
+          callSnapshotByChatRef.current[chat.id] = {
+            status,
+            from,
+            acceptedAtMs,
+            roomId,
+            callMode: nextCallMode,
+          };
+
+          if (
+            status === "in_call" &&
+            previous?.status === "ringing" &&
+            previous.from === currentUser.id
+          ) {
+            const eventKey = `answered:${chat.id}:${roomId}:${currentUser.id}`;
+            if (!callEventLoggedRef.current[eventKey]) {
+              callEventLoggedRef.current[eventKey] = true;
+              const otherId = chat.participants.find((id) => id !== currentUser.id) || "";
+              const otherUser = otherId ? userMap[otherId] : null;
+              void appendCallHistory({
+                ownerUid: currentUser.id,
+                peerUserId: otherId,
+                peerLabel: otherUser?.name || otherUser?.email || "Contact",
+                direction: "outgoing",
+                status: "answered",
+                mode: nextCallMode,
+                chatId: chat.id,
+                roomId,
+              }).catch(() => {});
+            }
+          }
+
+          if (
+            status === "ended" &&
+            previous?.status === "ringing" &&
+            previous.from &&
+            previous.from !== currentUser.id &&
+            previous.acceptedAtMs <= 0
+          ) {
+            const eventKey = `missed:${chat.id}:${previous.roomId}:${previous.from}`;
+            if (!callEventLoggedRef.current[eventKey]) {
+              callEventLoggedRef.current[eventKey] = true;
+              const otherId = chat.participants.find((id) => id !== currentUser.id) || "";
+              const otherUser = otherId ? userMap[otherId] : null;
+              void appendCallHistory({
+                ownerUid: currentUser.id,
+                peerUserId: otherId,
+                peerLabel:
+                  chat.type === "group"
+                    ? chat.title?.trim() || "Groupe"
+                    : otherUser?.name || otherUser?.email || "Contact",
+                direction: "incoming",
+                status: "missed",
+                mode: previous.callMode,
+                chatId: chat.id,
+                roomId: previous.roomId,
+              }).catch(() => {});
+            }
+          }
+
+          if ((status === "ringing" || status === "in_call") && from && from !== currentUser.id) {
+            setCallMode(nextCallMode);
+            setActiveCallChatId(chat.id);
+            setSelectedChatId((current) => (current === chat.id ? current : chat.id));
+            return;
+          }
+
+          if (status === "ended") {
+            setActiveCallChatId((current) => (current === chat.id ? null : current));
+          }
+        },
+        (error) => {
+          console.warn("call watcher error", chat.id, error);
+        }
+      )
+    );
+
+    return () => {
+      unsubscribers.forEach((unsubscribe) => unsubscribe());
+    };
+  }, [chats, currentUser.id, userMap]);
   const runCallAction = async (action: () => Promise<void>) => {
     setCallError(null);
     setCallLoading(true);
@@ -168,17 +469,157 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
       setCallLoading(false);
     }
   };
-  const startLiveCall = (chatId: string, type: "audio" | "video") => {
-    setCallMode(type);
-    const roomId = `call-${chatId}-${Date.now()}`;
-    void runCallAction(() =>
-      startCall({
-        chatId,
-        roomId,
-        from: currentUser.id,
-      })
-    );
-  };
+
+  const resolvePeerMetaForChat = useCallback(
+    (chatId: string) => {
+      const chat = chats.find((entry) => entry.id === chatId);
+      if (!chat) {
+        return {
+          peerUserId: "",
+          peerLabel: "Contact",
+        };
+      }
+      if (chat.type === "group") {
+        return {
+          peerUserId: "",
+          peerLabel: chat.title?.trim() || "Groupe",
+        };
+      }
+      const otherId = chat.participants.find((id) => id !== currentUser.id) || "";
+      const otherUser = otherId ? userMap[otherId] : null;
+      return {
+        peerUserId: otherId,
+        peerLabel: otherUser?.name || otherUser?.email || "Contact",
+      };
+    },
+    [chats, currentUser.id, userMap]
+  );
+  const triggerVoipForDirectChat = useCallback(
+    async ({
+      chatId,
+      roomId,
+      callMode,
+    }: {
+      chatId: string;
+      roomId: string;
+      callMode: "audio" | "video";
+    }): Promise<{
+      callUUID?: string;
+      degraded?: boolean;
+      warning?: string;
+    }> => {
+      const chat = chats.find((item) => item.id === chatId);
+      if (!chat || chat.type !== "direct") return {};
+      const targetUid = chat.participants.find((id) => id !== currentUser.id);
+      if (!targetUid) return {};
+
+      const firebaseUser = auth.currentUser;
+      if (!firebaseUser) return {};
+      const bearerToken = await getIdToken(firebaseUser, true).catch(() => "");
+      if (!bearerToken) return {};
+
+      const callerName =
+        currentUser.name?.trim() || currentUser.email?.trim() || "BFZoom";
+      const apiBaseUrl =
+        typeof window !== "undefined" ? window.location.origin : "";
+      const livekitUrl = (process.env.NEXT_PUBLIC_LIVEKIT_URL || "").trim();
+
+      const response = await fetch("/api/voip/call", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${bearerToken}`,
+        },
+        body: JSON.stringify({
+          chatId,
+          targetUid,
+          roomId,
+          callerName,
+          role: "guest",
+          callMode,
+          apiBaseUrl,
+          livekitUrl,
+          identity: `${currentUser.id}-caller`,
+          displayName: callerName,
+        }),
+      });
+
+      const payload = (await response.json().catch(() => ({}))) as {
+        ok?: boolean;
+        callUUID?: string;
+        reason?: string;
+        message?: string;
+        sent?: number;
+        fallback?: string;
+        error?: string;
+        detail?: string;
+      };
+      if (!response.ok) {
+        const reason = payload.detail || payload.error || `HTTP ${response.status}`;
+        throw new Error(reason);
+      }
+
+      const degradedNoVoipToken = payload.reason === "target_has_no_voip_token";
+      const degradedFirestoreFallback = payload.fallback === "firestore_online";
+
+      if (degradedNoVoipToken || degradedFirestoreFallback) {
+        return {
+          callUUID: (payload.callUUID || "").trim() || undefined,
+          degraded: true,
+          warning: "Contact indisponible en notification push pour le moment. L'appel continue normalement dans BFZoom.",
+        };
+      }
+
+      const hardFailure =
+        payload.ok === false &&
+        typeof payload.sent === "number" &&
+        payload.sent <= 0 &&
+        payload.fallback !== "firestore_online";
+      if (hardFailure) {
+        throw new Error(payload.message?.trim() || "Impossible de lancer l'appel.");
+      }
+
+      return {
+        callUUID: (payload.callUUID || "").trim() || undefined,
+      };
+    },
+    [chats, currentUser.email, currentUser.id, currentUser.name]
+  );
+  const startLiveCall = useCallback(
+    (chatId: string, type: "audio" | "video") => {
+      setCallMode(type);
+      const roomId = `chat-${chatId}-${Date.now()}`;
+      void runCallAction(async () => {
+        const voipResult = await triggerVoipForDirectChat({
+          chatId,
+          roomId,
+          callMode: type,
+        });
+        await startCall({
+          chatId,
+          roomId,
+          from: currentUser.id,
+          callMode: type,
+          callUUID: voipResult.callUUID,
+        });
+        if (voipResult.degraded && voipResult.warning) {
+          setCallError(voipResult.warning);
+        }
+        const peer = resolvePeerMetaForChat(chatId);
+        void appendCallHistory({
+          ownerUid: currentUser.id,
+          peerUserId: peer.peerUserId,
+          peerLabel: peer.peerLabel,
+          direction: "outgoing",
+          status: "started",
+          mode: type,
+          chatId,
+          roomId,
+        }).catch(() => {});
+      });
+    },
+    [currentUser.id, resolvePeerMetaForChat, triggerVoipForDirectChat]
+  );
 
   const handleStartCall = (type: "audio" | "video" = "video") => {
     if (!selectedChatId) {
@@ -220,17 +661,31 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
         break;
     }
   };
+  const currentCallChatId = activeCallChatId ?? selectedChatId;
   const handleAcceptCall = () => {
-    if (!selectedChatId) return;
-    void runCallAction(() => acceptCall(selectedChatId, currentUser.id));
+    if (!currentCallChatId) return;
+    void runCallAction(async () => {
+      await acceptCall(currentCallChatId, currentUser.id);
+      const peer = resolvePeerMetaForChat(currentCallChatId);
+      void appendCallHistory({
+        ownerUid: currentUser.id,
+        peerUserId: peer.peerUserId,
+        peerLabel: peer.peerLabel,
+        direction: "incoming",
+        status: "answered",
+        mode: callState?.callMode === "audio" ? "audio" : "video",
+        chatId: currentCallChatId,
+        roomId: callState?.roomId || "",
+      }).catch(() => {});
+    });
   };
   const handleEndCall = () => {
-    if (!selectedChatId) return;
-    void runCallAction(() => endCall(selectedChatId, currentUser.id));
+    if (!currentCallChatId) return;
+    void runCallAction(() => endCall(currentCallChatId, currentUser.id));
   };
   const handleCancelCall = () => {
-    if (!selectedChatId) return;
-    void runCallAction(() => endCall(selectedChatId, currentUser.id));
+    if (!currentCallChatId) return;
+    void runCallAction(() => endCall(currentCallChatId, currentUser.id));
   };
 
   const ensureAiAccess = useCallback(
@@ -269,6 +724,27 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
     return () => unsubscribe();
   }, [currentUser.id]);
 
+  useEffect(() => {
+    callSnapshotByChatRef.current = {};
+    callEventLoggedRef.current = {};
+  }, [currentUser.id]);
+
+  useEffect(() => {
+    const unsubscribe = subscribeMissedCalls({
+      ownerUid: currentUser.id,
+      onUpdate: setMissedCalls,
+    });
+    return () => unsubscribe();
+  }, [currentUser.id]);
+
+  useEffect(() => {
+    const unsubscribe = subscribeUnreadMissedCallsCount({
+      ownerUid: currentUser.id,
+      onUpdate: setUnreadMissedCount,
+    });
+    return () => unsubscribe();
+  }, [currentUser.id]);
+
   const selectedChat = useMemo<Chat | null>(() => {
     if (!selectedChatId) return null;
     return chats.find((chat) => chat.id === selectedChatId) || null;
@@ -281,12 +757,13 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
       .filter(Boolean);
   }, [selectedChat, userMap]);
 
-  const contactAliasMap = useMemo(() => {
-    const map: Record<string, string> = {};
+  const contactInfoMap = useMemo(() => {
+    const map: Record<string, { alias: string; email: string }> = {};
     contacts.forEach((contact) => {
-      if (contact.alias?.trim()) {
-        map[contact.id] = contact.alias.trim();
-      }
+      map[contact.id] = {
+        alias: (contact.alias || "").trim(),
+        email: (contact.email || "").trim(),
+      };
     });
     return map;
   }, [contacts]);
@@ -295,10 +772,28 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
     if (!selectedChat) return "Discussion";
     if (selectedChat.type === "group") return selectedChat.title || "Groupe";
     const otherId = selectedChat.participants.find((id) => id !== currentUser.id);
-    const alias = otherId ? contactAliasMap[otherId] : undefined;
+    const alias = otherId ? contactInfoMap[otherId]?.alias : "";
     const otherUser = otherId ? userMap[otherId] : null;
     return alias || otherUser?.name || otherUser?.email || "Discussion";
-  }, [currentUser.id, selectedChat, userMap, contactAliasMap]);
+  }, [currentUser.id, selectedChat, userMap, contactInfoMap]);
+  const selectedDirectEmail = useMemo(() => {
+    if (!selectedChat || selectedChat.type !== "direct") return "";
+    const otherId = selectedChat.participants.find((id) => id !== currentUser.id);
+    if (!otherId) return "";
+    const userEmail = (userMap[otherId]?.email || "").trim();
+    if (userEmail) return userEmail;
+    return (contactInfoMap[otherId]?.email || "").trim();
+  }, [currentUser.id, selectedChat, userMap, contactInfoMap]);
+  const getChatLabel = useCallback(
+    (chat: Chat) => {
+      if (chat.type === "group") return chat.title?.trim() || "Groupe";
+      const otherId = chat.participants.find((id) => id !== currentUser.id);
+      const alias = otherId ? contactInfoMap[otherId]?.alias : "";
+      const otherUser = otherId ? userMap[otherId] : null;
+      return alias || otherUser?.name || otherUser?.email || "Discussion";
+    },
+    [contactInfoMap, currentUser.id, userMap]
+  );
 
   const canManageGroup = Boolean(
     selectedChat &&
@@ -317,6 +812,131 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
     });
     return map;
   }, [chats, readMap]);
+  useEffect(() => {
+    const nextMap: Record<string, string> = {};
+    chats.forEach((chat) => {
+      const lastMessage = chat.lastMessage;
+      const key = [
+        lastMessage?.senderId || "",
+        extractTimestampMs(lastMessage?.createdAt || null),
+        lastMessage?.type || "",
+        lastMessage?.text || "",
+      ].join("|");
+      nextMap[chat.id] = key;
+    });
+
+    if (!chatListHydratedRef.current) {
+      chatListHydratedRef.current = true;
+      lastMessageKeyByChatRef.current = nextMap;
+      return;
+    }
+
+    chats.forEach((chat) => {
+      const previousKey = lastMessageKeyByChatRef.current[chat.id];
+      const nextKey = nextMap[chat.id];
+      if (!previousKey || previousKey === nextKey) return;
+      const lastMessage = chat.lastMessage;
+      if (!lastMessage || lastMessage.senderId === currentUser.id) return;
+
+      const isTabVisible =
+        typeof document !== "undefined" ? document.visibilityState === "visible" : true;
+      const isCurrentChatVisible = isTabVisible && selectedChatId === chat.id;
+      if (isCurrentChatVisible) return;
+
+      const preview = (() => {
+        if (lastMessage.type === "voice") return "Note vocale";
+        if (lastMessage.type === "image") return "Image";
+        if (lastMessage.type === "file") return "Fichier";
+        const raw = (lastMessage.text || "").trim();
+        return raw || "Nouveau message";
+      })();
+
+      void notifyBrowser({
+        title: getChatLabel(chat),
+        body: preview,
+        chatId: chat.id,
+      });
+    });
+
+    lastMessageKeyByChatRef.current = nextMap;
+  }, [chats, currentUser.id, getChatLabel, notifyBrowser, selectedChatId]);
+  useEffect(() => {
+    if (!hasIncomingCall || !callState?.roomId) return;
+    const notificationKey = `${currentCallChatId || ""}:${callState.roomId}`;
+    if (lastIncomingCallNotificationRef.current === notificationKey) return;
+    lastIncomingCallNotificationRef.current = notificationKey;
+    void notifyBrowser({
+      title: "Appel entrant BFZoom",
+      body: `${selectedTitle} t'appelle`,
+      chatId: currentCallChatId || undefined,
+    });
+  }, [callState?.roomId, currentCallChatId, hasIncomingCall, notifyBrowser, selectedTitle]);
+  useEffect(() => {
+    if (callState?.status === "ended") {
+      lastIncomingCallNotificationRef.current = "";
+    }
+  }, [callState?.status]);
+  const handleMarkMissedRead = useCallback(
+    async (callIds: string[]) => {
+      try {
+        await markMissedCallsAsRead({
+          ownerUid: currentUser.id,
+          callIds,
+        });
+      } catch (error) {
+        pushError(
+          error instanceof Error
+            ? error.message
+            : "Impossible de marquer les appels manqués comme lus."
+        );
+      }
+    },
+    [currentUser.id]
+  );
+  const handleRecallMissedAudio = useCallback(
+    (entry: MissedCallEntry) => {
+      const chatId = entry.chatId.trim();
+      if (!chatId) {
+        setCallError("Rappel impossible: discussion introuvable.");
+        return;
+      }
+      setSelectedChatId(chatId);
+      startLiveCall(chatId, "audio");
+    },
+    [startLiveCall]
+  );
+  const pendingMessagesForSelectedChat = useMemo(() => {
+    if (!selectedChatId) return [];
+    return pendingMessagesByChat[selectedChatId] || [];
+  }, [pendingMessagesByChat, selectedChatId]);
+  const messagesForThread = useMemo(() => {
+    if (pendingMessagesForSelectedChat.length === 0) return messages;
+    const knownIds = new Set(messages.map((message) => message.id));
+    const pendingOnly = pendingMessagesForSelectedChat.filter(
+      (message) => !knownIds.has(message.id)
+    );
+    if (pendingOnly.length === 0) return messages;
+    return [...messages, ...pendingOnly];
+  }, [messages, pendingMessagesForSelectedChat]);
+
+  useEffect(() => {
+    if (!selectedChatId) return;
+    if (messages.length === 0) return;
+    const knownIds = new Set(messages.map((message) => message.id));
+    setPendingMessagesByChat((current) => {
+      const existing = current[selectedChatId];
+      if (!existing || existing.length === 0) return current;
+      const next = existing.filter((message) => !knownIds.has(message.id));
+      if (next.length === existing.length) return current;
+      const updated = { ...current };
+      if (next.length > 0) {
+        updated[selectedChatId] = next;
+      } else {
+        delete updated[selectedChatId];
+      }
+      return updated;
+    });
+  }, [messages, selectedChatId]);
 
   const showCallOverlay =
     Boolean(callState && callState.status !== "ended" && callState.roomId);
@@ -354,24 +974,140 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
     }
   };
 
-  const handleSend = async (text: string) => {
-    if (!selectedChatId) return;
+  const translateDraftForChat = useCallback(
+    async (
+      text: string,
+      targetLanguage: ChatLanguageCode,
+      options: { stream?: boolean } = {}
+    ) => {
+      const current = auth.currentUser;
+      if (!current) {
+        throw new Error("Connexion requise pour traduire avant envoi.");
+      }
+      const token = await getIdToken(current, true);
+      const targetLabel =
+        CHAT_LANGUAGE_LABELS[targetLanguage] || targetLanguage.toUpperCase();
+      const body: Record<string, unknown> = {
+        intent: "translation", // signal au serveur de raccourcir timeout/tokens
+        jsonMode: true,
+        messages: [
+          {
+            role: "system",
+            content:
+              "Tu es un traducteur multilingue pour chat en temps réel. " +
+              `Détecte la langue source et traduis vers ${targetLabel} (code ${targetLanguage}). ` +
+              'Réponds strictement en JSON: {"translatedText":"...","sourceLanguage":"fr"}. ' +
+              "Aucun markdown, aucun texte hors JSON.",
+          },
+          {
+            role: "user",
+            content: text,
+          },
+        ],
+      };
+      if (options.stream) {
+        body.stream = true;
+      }
+      const res = await fetch("/api/openai", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(body),
+      });
+      const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!res.ok) {
+        const errorMessage =
+          typeof data.error === "string" ? data.error : "Erreur IA de traduction.";
+        throw new Error(errorMessage);
+      }
+
+      const raw = getAiMessageContent(data);
+      const fallbackText = raw.trim();
+      const parsed = parseJsonPayload(raw);
+      const translatedCandidate =
+        (typeof parsed?.translatedText === "string"
+          ? parsed.translatedText
+          : fallbackText
+        ).trim();
+      if (!translatedCandidate) {
+        throw new Error("Traduction vide, impossible d'envoyer le message.");
+      }
+      const sourceLanguage =
+        sanitizeLanguageCode(
+          typeof parsed?.sourceLanguage === "string"
+            ? parsed.sourceLanguage
+            : undefined
+        ) || "auto";
+
+      return {
+        translatedText: translatedCandidate,
+        sourceLanguage,
+        targetLanguage,
+      };
+    },
+    []
+  );
+
+  const handleSend = async (text: string, targetLanguage: ChatLanguageCode) => {
+    const chatId = selectedChatId;
+    if (!chatId) return;
+    const cleanText = text.trim();
+    if (!cleanText) return;
+
+    // 1. envoyer immédiatement le message original
+    let messageId: string | null = null;
     try {
-      await sendTextMessage({
-        chatId: selectedChatId,
-        text,
+      messageId = await sendTextMessage({
+        chatId,
+        text: cleanText, // on conserve l'original en premier lieu
         senderId: currentUser.id,
         senderName: currentUser.name,
       });
-      await markChatRead({ chatId: selectedChatId, userId: currentUser.id });
-    } catch (error) {
+      addPendingMessage(chatId, {
+        id: messageId,
+        type: "text",
+        text: cleanText,
+        senderId: currentUser.id,
+        senderName: currentUser.name,
+        createdAt: null,
+      });
+      await markChatRead({ chatId, userId: currentUser.id });
+      void triggerChatPushFanout({
+        chatId,
+        messageType: "text",
+        previewText: cleanText,
+      });
+    } catch (err) {
       const message =
-        error instanceof Error
-          ? error.message
+        err instanceof Error
+          ? err.message
           : "Impossible d’envoyer le message, vérifie ta connexion.";
       setErrorBanner(message);
-      console.error("sendTextMessage error", error);
-      throw error;
+      console.error("sendTextMessage error", err);
+      throw err;
+    }
+
+    // 2. en arrière-plan, tenter de traduire et mettre à jour
+    if (messageId) {
+      translateDraftForChat(cleanText, targetLanguage)
+        .then(async (translated) => {
+          try {
+            const msgRef = doc(db, `chats/${chatId}/messages/${messageId}`);
+            await updateDoc(msgRef, {
+              text: translated.translatedText,
+              originalText: cleanText,
+              sourceLanguage: translated.sourceLanguage,
+              targetLanguage: translated.targetLanguage,
+            });
+          } catch (err) {
+            console.warn("background translation update failed", err);
+          }
+        })
+        .catch((translationError) => {
+          console.warn("background translation failed", translationError);
+        });
     }
   };
 
@@ -385,6 +1121,11 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
         senderName: currentUser.name,
       });
       await markChatRead({ chatId: selectedChatId, userId: currentUser.id });
+      void triggerChatPushFanout({
+        chatId: selectedChatId,
+        messageType: file.type.startsWith("image/") ? "image" : "file",
+        previewText: file.name,
+      });
     } catch (error) {
       const message =
         error instanceof Error
@@ -407,6 +1148,11 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
         senderName: currentUser.name,
       });
       await markChatRead({ chatId: selectedChatId, userId: currentUser.id });
+      void triggerChatPushFanout({
+        chatId: selectedChatId,
+        messageType: "voice",
+        previewText: "Note vocale",
+      });
     } catch (error) {
       const message =
         error instanceof Error
@@ -428,13 +1174,15 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
     setMode("chats");
   };
 
-  const handleImprove = async (text: string, targetLang: string) => {
+  const handleImprove = async (text: string, targetLanguage: ChatLanguageCode) => {
     try {
       const current = auth.currentUser;
       if (!current) throw new Error("Utilisateur non connecté");
+      const targetLabel =
+        CHAT_LANGUAGE_LABELS[targetLanguage] || targetLanguage.toUpperCase();
       const access = await ensureAiAccess(
         "improve",
-        `chat:${selectedChatId ?? "unknown"};lang:${targetLang}`
+        `chat:${selectedChatId ?? "unknown"};lang:${targetLanguage}`
       );
       const token = await getIdToken(current, true);
 
@@ -442,7 +1190,7 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
         "Tu es un coach linguistique.",
         "Détecte la langue source automatiquement.",
         "Corrige la grammaire et le style sans changer le sens.",
-        `Traduis vers la langue cible: ${targetLang}.`,
+        `Traduis vers la langue cible: ${targetLabel} (code ${targetLanguage}).`,
         "Retourne un JSON strict avec les clés corrected, translation, note.",
         "note = une explication très courte (1 phrase) ou une chaîne vide.",
         `Texte: ${text}`,
@@ -455,6 +1203,7 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
+          jsonMode: true,
           messages: [
             { role: "system", content: prompt },
             { role: "user", content: text },
@@ -672,15 +1421,43 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
     await deleteDoc(messageRef);
   };
 
+  const handleDeleteContact = useCallback(
+    async (contact: Contact) => {
+      const contactsRef = collection(db, `contacts/${currentUser.id}/list`);
+      const snapshot = await getDocs(contactsRef);
+      const normalizedEmail = (contact.email || "").trim().toLowerCase();
+
+      const docsToDelete = snapshot.docs.filter((docSnap) => {
+        const data = docSnap.data() as {
+          uid?: string;
+          email?: string;
+          emailLower?: string;
+        };
+        const email = (data.emailLower || data.email || "").trim().toLowerCase();
+        return (
+          docSnap.id === contact.contactDocId ||
+          (Boolean(data.uid) && data.uid === contact.id) ||
+          (Boolean(normalizedEmail) && email === normalizedEmail)
+        );
+      });
+
+      if (docsToDelete.length === 0) return;
+      await Promise.all(docsToDelete.map((docSnap) => deleteDoc(docSnap.ref)));
+      const label = contact.alias?.trim() || contact.name || contact.email || "Contact";
+      setErrorBanner(`Contact supprimé: ${label}`);
+    },
+    [currentUser.id]
+  );
+
   useEffect(() => {
     if (!selectedChatId) return;
     void markChatRead({ chatId: selectedChatId, userId: currentUser.id });
   }, [currentUser.id, selectedChatId]);
 
   return (
-    <div className="relative flex h-full w-full overflow-hidden border border-white/10 bg-white/5 shadow-2xl md:h-[calc(100vh-2rem)] md:max-h-[900px] md:rounded-3xl">
+    <div className="relative flex h-full min-h-0 w-full overflow-hidden border border-white/10 bg-white/5 shadow-2xl md:h-[calc(100vh-2rem)] md:max-h-225 md:rounded-3xl">
       <div
-        className={`fixed inset-y-0 left-0 z-30 w-[88%] max-w-xs transform border-r border-white/10 bg-gray-950/95 transition-transform duration-300 md:static md:z-auto md:w-80 md:bg-white/5 ${
+        className={`fixed inset-y-0 left-0 z-30 w-[88%] max-w-xs transform border-r border-white/10 bg-gray-950/95 transition-transform duration-300 md:static md:z-auto md:w-80 md:min-h-0 md:bg-white/5 ${
           isSidebarOpen
             ? "translate-x-0 md:block"
             : "-translate-x-full md:hidden"
@@ -706,11 +1483,19 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
           isPremium={isPremium}
           roleLabel={roleLabel}
           onCreateContact={() => router.push("/add-user")}
+          onDeleteContact={handleDeleteContact}
           onQuickCall={handleQuickCall}
           onQuickAction={handleQuickAction}
           onSummarizeChat={handleRequestSummarizeChat}
           onRequestDeleteChat={handleRequestDeleteChat}
           summaryLoading={summaryLoading}
+          hasMoreChats={hasMoreChats}
+          onLoadMoreChats={loadMoreChats}
+          missedCalls={missedCalls}
+          unreadMissedCount={unreadMissedCount}
+          onRecallMissedAudio={handleRecallMissedAudio}
+          onMarkMissedRead={handleMarkMissedRead}
+          onBackToMenu={() => router.push("/dashboard")}
         />
       </div>
       {isSidebarOpen && (
@@ -721,7 +1506,23 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
         />
       )}
 
-      <div className="relative flex flex-1 min-h-0 flex-col bg-gradient-to-br from-gray-950 via-gray-900 to-black">
+      <div className="relative flex flex-1 min-h-0 flex-col bg-linear-to-br from-gray-950 via-gray-900 to-black">
+        <div className="flex items-center justify-between border-b border-white/10 bg-white/5 px-4 py-3">
+          <p className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-gray-300">
+            Chat
+            {unreadMissedCount > 0 ? (
+              <span className="inline-flex min-w-4.5 items-center justify-center rounded-full bg-red-600 px-1.5 py-0.5 text-[10px] font-extrabold text-white">
+                {unreadMissedCount > 99 ? "99+" : unreadMissedCount}
+              </span>
+            ) : null}
+          </p>
+          <button
+            onClick={() => router.push("/dashboard")}
+            className="rounded-xl border border-white/20 bg-white/10 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-white/20"
+          >
+            ← Menu modules
+          </button>
+        </div>
         {errorBanner && (
           <div className="m-4 rounded-2xl border border-red-400/40 bg-red-500/10 px-4 py-3 text-sm text-red-100 shadow-lg">
             <div className="flex items-center justify-between gap-2">
@@ -748,33 +1549,36 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
             </div>
           </div>
         )}
-        <ChatThread
-          chat={selectedChat}
-          messages={messages}
-          currentUserId={currentUser.id}
-          title={selectedTitle}
-          canManage={canManageGroup}
-          onManage={() => setShowManageModal(true)}
-          onSummarize={handleSummarize}
-          summary={selectedChatId ? summaryByChat[selectedChatId]?.summary ?? "" : ""}
-          actions={selectedChatId ? summaryByChat[selectedChatId]?.actions ?? [] : []}
-          summaryLoading={summaryLoading}
-          summaryError={summaryError}
-          onClearSummary={handleClearSummary}
-          isPremium={isPremium}
-          onDelete={() => setShowDeleteConfirm(true)}
-          canDelete={selectedChat?.createdBy === currentUser.id}
-          onDeleteMessage={handleDeleteMessage}
-          onRequestContactList={() => {
-            setMode("contacts");
-            setIsSidebarOpen(true);
-          }}
-          hideHeader
-          loading={loading}
-          hasMore={hasMore}
-          loadingMore={loadingMore}
-          onLoadMore={loadMore}
-        />
+        <div className="min-h-0 flex-1 overflow-hidden">
+          <ChatThread
+            chat={selectedChat}
+            messages={messagesForThread}
+            currentUserId={currentUser.id}
+            title={selectedTitle}
+            directEmail={selectedDirectEmail}
+            canManage={canManageGroup}
+            onManage={() => setShowManageModal(true)}
+            onSummarize={handleSummarize}
+            summary={selectedChatId ? summaryByChat[selectedChatId]?.summary ?? "" : ""}
+            actions={selectedChatId ? summaryByChat[selectedChatId]?.actions ?? [] : []}
+            summaryLoading={summaryLoading}
+            summaryError={summaryError}
+            onClearSummary={handleClearSummary}
+            isPremium={isPremium}
+            onDelete={() => setShowDeleteConfirm(true)}
+            canDelete={selectedChat?.createdBy === currentUser.id}
+            onDeleteMessage={handleDeleteMessage}
+            onRequestContactList={() => {
+              setMode("contacts");
+              setIsSidebarOpen(true);
+            }}
+            hideHeader
+            loading={loading}
+            hasMore={hasMore}
+            loadingMore={loadingMore}
+            onLoadMore={loadMore}
+          />
+        </div>
         <div className="md:hidden">
           <div className="flex justify-center px-4 py-2">
             <button
@@ -792,6 +1596,8 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
             onSendAttachment={handleSendAttachment}
             onSendVoiceNote={handleSendVoiceNote}
             onImprove={handleImprove}
+            targetLanguage={chatLanguage}
+            onTargetLanguageChange={setChatLanguage}
             disabled={!selectedChatId}
           />
         ) : (
@@ -813,6 +1619,12 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
                     ? "Invitation envoyée"
                     : "En attente de réponse..."}
                 </p>
+                {isCallActive && (
+                  <span className="mt-2 inline-flex items-center gap-1 rounded-full border border-amber-300/60 bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-widest text-amber-100">
+                    <span className="h-1.5 w-1.5 rounded-full bg-amber-300 animate-pulse" />
+                    Traduction active (credits)
+                  </span>
+                )}
               </div>
               <div className="flex flex-wrap gap-2">
                 {hasIncomingCall && (
@@ -857,9 +1669,12 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
               {isCallActive ? (
                 <LiveKitCall
                   roomId={callState.roomId ?? ""}
-                  isHost={isCallerInCall}
+                  isHost={false}
                   onLeave={handleEndCall}
                   audioOnly={callMode === "audio"}
+                  defaultDisplayName={currentUser.name}
+                  skipPreJoin
+                  sessionMode="chat"
                 />
               ) : (
                 <div className="flex h-full items-center justify-center text-sm text-white/70">

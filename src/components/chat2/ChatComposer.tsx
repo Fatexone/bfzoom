@@ -33,19 +33,48 @@ const getSupportedVideoMimeType = () => {
 };
 
 type ChatComposerProps = {
-  onSend: (text: string) => Promise<void>;
+  onSend: (text: string, targetLanguage: ChatLanguageCode) => Promise<void>;
   onSendAttachment?: (file: File) => Promise<void>;
   onImprove?: (
     text: string,
-    targetLang: string
+    targetLanguage: ChatLanguageCode
   ) => Promise<{
     corrected: string;
     translation: string;
     note?: string;
   }>;
   onSendVoiceNote?: (blob: Blob, duration: number) => Promise<void>;
+  targetLanguage: ChatLanguageCode;
+  onTargetLanguageChange: (language: ChatLanguageCode) => void;
   disabled?: boolean;
 };
+
+export const CHAT_LANGUAGE_OPTIONS = [
+  { code: "fr", label: "Français" },
+  { code: "en", label: "English" },
+  { code: "ar", label: "العربية" },
+  { code: "zh", label: "中文" },
+  { code: "pt", label: "Português" },
+  { code: "pt-br", label: "Português (Brasil)" },
+  { code: "hi", label: "हिन्दी" },
+  { code: "ko", label: "한국어" },
+  { code: "tr", label: "Türkçe" },
+  { code: "th", label: "ไทย" },
+  { code: "es", label: "Español" },
+  { code: "de", label: "Deutsch" },
+  { code: "he", label: "עברית" },
+  { code: "it", label: "Italiano" },
+  { code: "ja", label: "日本語" },
+  { code: "ru", label: "Русский" },
+  { code: "la", label: "Latin" },
+  { code: "fa", label: "فارسی" },
+] as const;
+
+export type ChatLanguageCode = (typeof CHAT_LANGUAGE_OPTIONS)[number]["code"];
+
+const CHAT_LANGUAGE_LABELS = Object.fromEntries(
+  CHAT_LANGUAGE_OPTIONS.map((entry) => [entry.code, entry.label])
+) as Record<ChatLanguageCode, string>;
 
 export type ChatComposerHandle = {
   startVoiceNote: () => void;
@@ -59,6 +88,8 @@ function ChatComposerInner(
     onSendAttachment,
     onImprove,
     onSendVoiceNote,
+    targetLanguage,
+    onTargetLanguageChange,
     disabled,
   }: ChatComposerProps,
   ref: ForwardedRef<ChatComposerHandle>
@@ -73,7 +104,6 @@ function ChatComposerInner(
     translation: string;
     note?: string;
   } | null>(null);
-  const [targetLang, setTargetLang] = useState("Anglais");
   const [sendError, setSendError] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
@@ -365,7 +395,7 @@ function ChatComposerInner(
           videoChunksRef.current.push(event.data);
         }
       };
-    recorder.onstop = () => finalizeVideoRecording(shouldSendVideoRef.current);
+      recorder.onstop = () => finalizeVideoRecording(shouldSendVideoRef.current);
       recorder.start();
       videoStartRef.current = Date.now();
       setVideoDuration(0);
@@ -433,7 +463,7 @@ function ChatComposerInner(
     setSending(true);
     setSendError(null);
     try {
-      await onSend(text);
+      await onSend(text, targetLanguage);
       setMessage("");
       setSuggestion(null);
     } catch (error) {
@@ -485,7 +515,7 @@ function ChatComposerInner(
     setImproveLoading(true);
     setImproveError(null);
     try {
-      const result = await onImprove(text, targetLang);
+      const result = await onImprove(text, targetLanguage);
       setSuggestion(result);
     } catch (error) {
       const msg = error instanceof Error ? error.message : "Erreur IA";
@@ -500,7 +530,7 @@ function ChatComposerInner(
     setSending(true);
     setSendError(null);
     try {
-      await onSend(text.trim());
+      await onSend(text.trim(), targetLanguage);
       setMessage("");
       setSuggestion(null);
     } catch (error) {
@@ -513,6 +543,10 @@ function ChatComposerInner(
       setSending(false);
     }
   };
+
+  const targetLanguageLabel = CHAT_LANGUAGE_LABELS[targetLanguage] || targetLanguage;
+  const messagePlaceholder = `Écris ton message... (traduction vers ${targetLanguageLabel})`;
+  const sendButtonLabel = sending ? "Envoi..." : `Envoyer (${targetLanguage.toUpperCase()})`;
 
   return (
     <div className="border-t border-white/10 bg-white/5 p-4">
@@ -532,7 +566,7 @@ function ChatComposerInner(
               </div>
               <div>
                 <p className="text-[11px] uppercase tracking-wide text-emerald-200">
-                  Traduction ({targetLang})
+                  Traduction ({CHAT_LANGUAGE_LABELS[targetLanguage] || targetLanguage})
                 </p>
                 <p className="text-sm text-emerald-50">{suggestion.translation}</p>
               </div>
@@ -727,7 +761,7 @@ function ChatComposerInner(
                   handleSend();
                 }
               }}
-              placeholder="Écris un message..."
+              placeholder={messagePlaceholder}
               disabled={disabled || isRecording}
               rows={1}
               className="flex-1 min-w-0 rounded-2xl border border-transparent bg-white/5 px-2 py-2 text-sm text-white placeholder:text-gray-400 focus:border-amber-400/60 focus:outline-none focus:ring-2 focus:ring-amber-400/60"
@@ -739,29 +773,21 @@ function ChatComposerInner(
             className="flex h-11 items-center justify-center rounded-2xl bg-amber-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-amber-700 disabled:opacity-60"
           >
             <Send className="h-4 w-4" />
-            {sending ? "..." : "Envoyer"}
+            {sendButtonLabel}
           </button>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <select
-            value={targetLang}
-            onChange={(event) => setTargetLang(event.target.value)}
+            value={targetLanguage}
+            onChange={(event) =>
+              onTargetLanguageChange(event.target.value as ChatLanguageCode)
+            }
             className="rounded-2xl border border-white/10 bg-white/10 px-3 py-2 text-xs text-white"
             disabled={disabled}
           >
-            {[
-              "Anglais",
-              "Espagnol",
-              "Arabe",
-              "Italien",
-              "Allemand",
-              "Portugais",
-              "Chinois",
-              "Russe",
-              "Français",
-            ].map((lang) => (
-              <option key={lang} value={lang} className="text-black">
-                {lang}
+            {CHAT_LANGUAGE_OPTIONS.map((lang) => (
+              <option key={lang.code} value={lang.code} className="text-black">
+                {lang.label}
               </option>
             ))}
           </select>
@@ -772,6 +798,9 @@ function ChatComposerInner(
           >
             {improveLoading ? "Analyse..." : "Améliorer + Traduire"}
           </button>
+          <span className="text-[11px] text-gray-300">
+            Traduction active vers <span className="font-semibold text-amber-200">{targetLanguageLabel}</span>
+          </span>
         </div>
         {recordingError && (
           <div className="text-xs text-rose-200">{recordingError}</div>
