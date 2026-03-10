@@ -64,10 +64,17 @@ function LiveKitVideoCall({
   onLeave?: () => void;
 }) {
   const [userCount, setUserCount] = useState(1);
+  const focusedExerciseMode = Boolean(aiTrainingAutoStart);
 
   return (
-    <div className="flex min-h-dvh bg-gradient-to-b from-sky-50 via-blue-50 to-sky-100 text-slate-800 safe-bottom safe-x">
-      <div className="w-full max-w-6xl mx-auto p-4 sm:p-6">
+    <div
+      className={`flex min-h-dvh safe-bottom safe-x ${
+        focusedExerciseMode
+          ? "bg-black text-white"
+          : "bg-gradient-to-b from-sky-50 via-blue-50 to-sky-100 text-slate-800"
+      }`}
+    >
+      <div className={focusedExerciseMode ? "w-full" : "w-full max-w-6xl mx-auto p-4 sm:p-6"}>
         <LiveKitCall
           roomId={roomId}
           onParticipantCount={setUserCount}

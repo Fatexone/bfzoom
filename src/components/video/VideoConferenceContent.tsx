@@ -121,6 +121,7 @@ export default function VideoConferenceContent() {
   const wantsCreate = searchParams.get("create") === "1" || wantsAiExercise;
   const roomFromQuery = searchParams.get("room")?.trim() || "";
   const canJoinAsGuestByLink = Boolean(roomFromQuery) && !wantsHost;
+  const focusedExerciseMode = wantsAiExercise && isHost;
   const guestNameFromQuery =
     searchParams.get("name")?.trim() || searchParams.get("guest")?.trim() || "";
 
@@ -414,7 +415,11 @@ export default function VideoConferenceContent() {
      🧭 SALLE ACTIVE
   ======================================================= */
   return (
-    <div className="flex h-[100dvh] min-h-[100dvh] flex-col overflow-x-hidden bg-gray-900 text-white">
+    <div
+      className={`flex h-[100dvh] min-h-[100dvh] flex-col overflow-x-hidden text-white ${
+        focusedExerciseMode ? "bg-black" : "bg-gray-900"
+      }`}
+    >
       {canJoinAsGuestByLink && (
         <div className="shrink-0 px-3 pt-3 sm:px-6">
           <div className="mx-auto w-full max-w-7xl rounded-xl border border-white/15 bg-black/25 p-3">
@@ -434,8 +439,18 @@ export default function VideoConferenceContent() {
         </div>
       )}
       {/* 🎦 Zone vidéo responsive */}
-      <div className="flex min-h-0 flex-1 items-center justify-center p-1.5 sm:p-3 md:p-5">
-        <div className="mx-auto h-full min-h-0 w-full max-w-7xl overflow-hidden rounded-xl border border-gray-800 bg-gray-950 shadow-2xl">
+      <div
+        className={`flex min-h-0 flex-1 items-center justify-center ${
+          focusedExerciseMode ? "p-0" : "p-1.5 sm:p-3 md:p-5"
+        }`}
+      >
+        <div
+          className={`h-full min-h-0 w-full overflow-hidden ${
+            focusedExerciseMode
+              ? "mx-0 max-w-none rounded-none border-0 bg-black shadow-none"
+              : "mx-auto max-w-7xl rounded-xl border border-gray-800 bg-gray-950 shadow-2xl"
+          }`}
+        >
           <VideoCall
             roomId={roomId}
             isHost={isHost}
