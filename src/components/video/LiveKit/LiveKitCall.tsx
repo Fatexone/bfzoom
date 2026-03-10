@@ -4697,6 +4697,12 @@ function LiveKitVideo({
         onClose={closeNotebookOverlay}
         embedSrc={notebookEmbedSrc}
         pageHref={notebookHref}
+        title={aiTrainingAutoStart ? "Bloc-notes Exercice IA" : "Bloc-notes traduction"}
+        subtitle={
+          aiTrainingAutoStart
+            ? "Retrouve tes échanges coach, traductions et reformulations utiles."
+            : "Exercice langue: dernières traductions mémorisées"
+        }
       />
     </>
   );
@@ -7999,6 +8005,7 @@ function LiveKitConference({
               onSetCoachHelpView={setAiPartnerFeedbackView}
               onEnsureCoachHelpFrench={ensureAiPartnerFeedbackFrench}
               onSaveCoachToNotebook={saveAiPartnerCoachToNotebook}
+              onOpenNotebook={onOpenNotebook}
               onToggleView={setAiPartnerView}
             />
           ) : isIPhone ? (
@@ -8729,6 +8736,7 @@ function AiPartnerAvatarStage({
   onSetCoachHelpView,
   onEnsureCoachHelpFrench,
   onSaveCoachToNotebook,
+  onOpenNotebook,
   onToggleView,
 }: {
   sourceLanguageCode: SourceLanguageOption["code"];
@@ -8766,6 +8774,7 @@ function AiPartnerAvatarStage({
   onSetCoachHelpView: (next: AiPartnerFeedbackView) => void;
   onEnsureCoachHelpFrench: () => void;
   onSaveCoachToNotebook: () => void;
+  onOpenNotebook: () => void;
   onToggleView: (next: "translation" | "source") => void;
 }) {
   const hasSource = sourceText.trim().length > 0;
@@ -9534,6 +9543,18 @@ function AiPartnerAvatarStage({
                   >
                     <BookOpen className="h-3.5 w-3.5" />
                     {coachSavedToNotebook ? "Envoye ✓" : "Bloc-notes"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onOpenNotebook}
+                    className="inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-semibold text-slate-100"
+                    style={{
+                      borderColor: "rgba(148, 163, 184, 0.85)",
+                      backgroundColor: "rgba(30, 41, 59, 0.45)",
+                    }}
+                  >
+                    <BookOpen className="h-3.5 w-3.5" />
+                    Voir notes
                   </button>
                 </div>
                 {(coachPhoneticBusy || coachPhoneticText.trim().length > 0) && (
@@ -11819,6 +11840,7 @@ function LiveKitConferenceMobile({
             onSetCoachHelpView={setAiPartnerFeedbackView}
             onEnsureCoachHelpFrench={ensureAiPartnerFeedbackFrench}
             onSaveCoachToNotebook={saveAiPartnerCoachToNotebook}
+            onOpenNotebook={onOpenNotebook}
             onToggleView={setAiPartnerView}
           />
         ) : (
@@ -13180,11 +13202,15 @@ function TranslationNotebookOverlay({
   onClose,
   embedSrc,
   pageHref,
+  title,
+  subtitle,
 }: {
   isOpen: boolean;
   onClose: () => void;
   embedSrc: string;
   pageHref: string;
+  title: string;
+  subtitle: string;
 }) {
   useEffect(() => {
     if (!isOpen || typeof window === "undefined") return;
@@ -13214,10 +13240,8 @@ function TranslationNotebookOverlay({
         >
           <div className="flex items-center justify-between border-b border-slate-800 px-3 py-2 sm:px-4">
             <div>
-              <p className="text-sm font-semibold text-slate-100">Bloc-notes traduction</p>
-              <p className="text-[11px] text-slate-400">
-                Exercice langue: dernières traductions mémorisées
-              </p>
+              <p className="text-sm font-semibold text-slate-100">{title}</p>
+              <p className="text-[11px] text-slate-400">{subtitle}</p>
             </div>
             <div className="flex items-center gap-2">
               <a
@@ -13239,7 +13263,7 @@ function TranslationNotebookOverlay({
           </div>
           <div className="min-h-0 flex-1 bg-slate-950">
             <iframe
-              title="Bloc-notes traduction"
+              title={title}
               src={embedSrc}
               className="h-full w-full border-0 bg-slate-950"
             />
