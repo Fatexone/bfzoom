@@ -426,6 +426,17 @@ export default function VideoConferenceContent() {
         focusedExerciseMode ? "bg-black" : "bg-gray-900"
       }`}
     >
+      {focusedExerciseMode && (
+        <div className="pointer-events-none absolute left-3 top-3 z-40 sm:left-4 sm:top-4">
+          <button
+            type="button"
+            onClick={() => router.push("/dashboard")}
+            className="pointer-events-auto inline-flex items-center rounded-full border border-white/20 bg-black/70 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-black/85"
+          >
+            Retour dashboard
+          </button>
+        </div>
+      )}
       {canJoinAsGuestByLink && (
         <div className="shrink-0 px-3 pt-3 sm:px-6">
           <div className="mx-auto w-full max-w-7xl rounded-xl border border-white/15 bg-black/25 p-3">
