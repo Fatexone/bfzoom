@@ -8122,6 +8122,7 @@ function LiveKitConference({
             className={controlsHidden ? "hidden" : "relative z-20"}
             onClick={(event) => event.stopPropagation()}
           >
+            {!aiTrainingAutoStart && (
             <div className="lk-control-bar flex items-center justify-between gap-2 !border-0 !bg-transparent !p-2 sm:!p-3">
               <div className="flex items-center gap-2">
                 {isHost && !aiTrainingAutoStart && (
@@ -8225,6 +8226,7 @@ function LiveKitConference({
                 </button>
               </div>
             </div>
+            )}
             {captionsEnabled && (
               <>
               <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -11883,6 +11885,7 @@ function LiveKitConferenceMobile({
         >
           <div className="bf-mobile-controls-shell max-h-[44dvh] overflow-y-auto rounded-xl border border-slate-700/80 bg-slate-950/90 p-2 shadow-xl backdrop-blur">
             <div className="bf-mobile-controls flex !border-0 !bg-transparent !p-0 flex-col gap-2">
+              {!aiTrainingAutoStart && (
               <div className="flex w-full items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   {isHost && !isVerySmallViewport && !aiTrainingAutoStart && (
@@ -11935,7 +11938,9 @@ function LiveKitConferenceMobile({
                   </button>
                 </div>
               </div>
+              )}
 
+              {!aiTrainingAutoStart && (
               <div className="flex w-full flex-wrap items-center justify-center gap-1 sm:gap-2">
                 <TrackToggle
                   source={Track.Source.Microphone}
@@ -12000,7 +12005,8 @@ function LiveKitConferenceMobile({
                   </button>
                 )}
               </div>
-              {isVerySmallViewport && moreActionsOpen && (
+              )}
+              {!aiTrainingAutoStart && isVerySmallViewport && moreActionsOpen && (
                 <div className="flex w-full flex-wrap items-center justify-center gap-2 rounded-lg border border-slate-700/70 bg-slate-900/70 p-2">
                   {isHost && !aiTrainingAutoStart && (
                     <button
