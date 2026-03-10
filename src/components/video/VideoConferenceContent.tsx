@@ -7,6 +7,7 @@ import { auth } from "@/lib/firebaseConfig";
 import VideoCall from "@/components/video/VideoCall";
 import { setAuthGuardCookie } from "@/lib/authGuard";
 import { useUiLocale, type UiLocale } from "@/components/ui/UiLocaleProvider";
+import { useTokenWallet } from "@/hooks/useTokenWallet";
 
 /* =======================================================
    🎥 BFZoom — Version stable & responsive (2025)
@@ -102,6 +103,7 @@ export default function VideoConferenceContent() {
   const { locale } = useUiLocale();
   const t = VIDEO_COPY[locale];
   const [roomId, setRoomId] = useState<string | null>(null);
+  const [userUid, setUserUid] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string>("");
   const [authReady, setAuthReady] = useState(false);
   const [allowlistStatus, setAllowlistStatus] = useState<
@@ -112,6 +114,8 @@ export default function VideoConferenceContent() {
   const [createError, setCreateError] = useState("");
   const [guestDisplayName, setGuestDisplayName] = useState("");
   const [joinRoomInput, setJoinRoomInput] = useState("");
+  const [exerciseStartBalance, setExerciseStartBalance] = useState<number | null>(null);
+  const { balance: tokenBalance, loading: walletLoading } = useTokenWallet(userUid);
 
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -124,11 +128,26 @@ export default function VideoConferenceContent() {
   const focusedExerciseMode = wantsAiExercise && isHost;
   const guestNameFromQuery =
     searchParams.get("name")?.trim() || searchParams.get("guest")?.trim() || "";
+  const exerciseConsumedCredits =
+    typeof exerciseStartBalance === "number" && typeof tokenBalance === "number"
+      ? Math.max(0, exerciseStartBalance - tokenBalance)
+      : 0;
+
+  useEffect(() => {
+    if (!focusedExerciseMode) {
+      setExerciseStartBalance(null);
+      return;
+    }
+    if (exerciseStartBalance !== null) return;
+    if (typeof tokenBalance !== "number") return;
+    setExerciseStartBalance(tokenBalance);
+  }, [exerciseStartBalance, focusedExerciseMode, tokenBalance]);
 
   /* 🔐 Vérifie la connexion Firebase */
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (user) => {
       setAuthGuardCookie(Boolean(user));
+      setUserUid(user?.uid ?? null);
       setUserEmail(user?.email || "");
       setAuthReady(true);
     });
@@ -427,6 +446,7 @@ export default function VideoConferenceContent() {
       }`}
     >
       {focusedExerciseMode && (
+        <>
         <div className="pointer-events-none absolute left-3 top-3 z-40 sm:left-4 sm:top-4">
           <button
             type="button"
@@ -436,6 +456,24 @@ export default function VideoConferenceContent() {
             Retour au dashboard
           </button>
         </div>
+        <div className="pointer-events-none absolute right-3 top-3 z-40 sm:right-4 sm:top-4">
+          <div className="pointer-events-auto rounded-xl border border-white/15 bg-black/70 px-3 py-2 text-right text-[11px] text-white shadow-lg backdrop-blur">
+            <p className="font-semibold">
+              Credits restants: {walletLoading ? "..." : tokenBalance ?? 0}
+            </p>
+            <p className="text-[10px] text-amber-200">
+              Consomme (session): {exerciseConsumedCredits}
+            </p>
+            <button
+              type="button"
+              onClick={() => router.push("/pricing")}
+              className="mt-1 inline-flex items-center rounded-full border border-amber-300/70 bg-amber-500/20 px-2.5 py-1 text-[10px] font-semibold text-amber-100 transition hover:bg-amber-500/30"
+            >
+              Acheter des credits
+            </button>
+          </div>
+        </div>
+        </>
       )}
       {canJoinAsGuestByLink && (
         <div className="shrink-0 px-3 pt-3 sm:px-6">
