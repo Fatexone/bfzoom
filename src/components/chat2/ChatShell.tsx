@@ -64,6 +64,12 @@ type ChatTranslationEntitlementState = {
   paidSecondsRemaining: number;
 };
 
+type UpgradePrompt = {
+  title: string;
+  message: string;
+  ctaLabel: string;
+};
+
 const DEFAULT_CHAT_TRANSLATION_ENTITLEMENT: ChatTranslationEntitlementState = {
   enabled: true,
   lockReason: "",
@@ -72,6 +78,12 @@ const DEFAULT_CHAT_TRANSLATION_ENTITLEMENT: ChatTranslationEntitlementState = {
   totalSecondsRemaining: 180,
   freeSecondsRemaining: 180,
   paidSecondsRemaining: 0,
+};
+
+const DEFAULT_UPGRADE_PROMPT: UpgradePrompt = {
+  title: "Passe en Premium",
+  message: "Débloque les résumés IA et la correction illimitée.",
+  ctaLabel: "Passer Premium",
 };
 
 const formatTranslationRemaining = (remainingSeconds?: number | null) => {
@@ -183,13 +195,27 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
   const [profile, setProfile] = useState<Record<string, unknown> | null>(null);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
+  const [upgradePrompt, setUpgradePrompt] = useState<UpgradePrompt>(
+    DEFAULT_UPGRADE_PROMPT
+  );
   const [chatLimit, setChatLimit] = useState(40);
   const [translationEntitlement, setTranslationEntitlement] = useState<ChatTranslationEntitlementState>(
     DEFAULT_CHAT_TRANSLATION_ENTITLEMENT
   );
   const handleTokenLimit = useCallback((message: string) => {
     setErrorBanner(message);
-    if (message.toLowerCase().includes("tokens insuffisants")) {
+    const normalized = message.toLowerCase();
+    if (
+      normalized.includes("tokens insuffisants") ||
+      normalized.includes("credits") ||
+      normalized.includes("traduction indisponible")
+    ) {
+      setUpgradePrompt({
+        title: "Traduction IA bloquée",
+        message:
+          "Tu as atteint ta limite gratuite pour la traduction. Recharge tes crédits ou passe Premium pour continuer sans interruption.",
+        ctaLabel: "Voir les offres",
+      });
       setShowUpgradeModal(true);
     }
   }, []);
@@ -1093,6 +1119,40 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
   const showCallOverlay =
     Boolean(callState && callState.status !== "ended" && callState.roomId);
   const overlayTitle = callMode === "video" ? "Appel vidéo" : "Appel audio";
+  const translationStatusTone = translationEntitlement.loading
+    ? "neutral"
+    : translationEntitlement.enabled
+    ? translationEntitlement.totalSecondsRemaining <= 45
+      ? "warning"
+      : "ok"
+    : "blocked";
+  const translationStatusClasses =
+    translationStatusTone === "ok"
+      ? "border-emerald-400/30 bg-emerald-500/10 text-emerald-100"
+      : translationStatusTone === "warning"
+      ? "border-amber-300/50 bg-amber-500/15 text-amber-100"
+      : translationStatusTone === "blocked"
+      ? "border-rose-300/50 bg-rose-500/15 text-rose-100"
+      : "border-white/15 bg-white/5 text-gray-100";
+  const translationPrimaryLine = translationEntitlement.loading
+    ? "Synchronisation IA en cours..."
+    : translationEntitlement.enabled
+    ? `Traduction IA active: ${formatTranslationRemaining(
+        translationEntitlement.totalSecondsRemaining
+      )} restantes`
+    : "Traduction IA bloquée";
+  const translationSecondaryLine = translationEntitlement.loading
+    ? "Vérification de ton quota gratuit et de tes crédits."
+    : translationEntitlement.enabled
+    ? translationEntitlement.isPremium
+      ? "Plan Premium: accès illimité aux actions IA dans le chat."
+      : `Essai gratuit: ${formatTranslationRemaining(
+          translationEntitlement.freeSecondsRemaining
+        )} • Crédits payants: ${formatTranslationRemaining(
+          translationEntitlement.paidSecondsRemaining
+        )}`
+    : translationEntitlement.lockReason ||
+      "Recharge tes crédits ou passe Premium pour continuer.";
 
   const handleStartDirectChat = async (userId: string) => {
     setCreatingChatWith(userId);
@@ -1740,24 +1800,26 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
             ← Menu modules
           </button>
         </div>
-        <div className="mx-4 mt-3 rounded-xl border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <span>
-              {translationEntitlement.loading
-                ? "Synchronisation des credits traduction..."
-                : translationEntitlement.enabled
-                ? `Temps traduction restant: ${formatTranslationRemaining(
-                    translationEntitlement.totalSecondsRemaining
-                  )}`
-                : translationEntitlement.lockReason ||
-                  "Credits traduction indisponibles pour le moment."}
-            </span>
+        <div className={`mx-4 mt-3 rounded-xl border px-3 py-2 text-xs ${translationStatusClasses}`}>
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div className="space-y-0.5">
+              <p className="font-semibold">{translationPrimaryLine}</p>
+              <p className="text-[11px] opacity-90">{translationSecondaryLine}</p>
+            </div>
             <button
               type="button"
-              onClick={() => router.push("/pricing")}
-              className="rounded-lg border border-amber-300/40 bg-amber-500/20 px-2.5 py-1 text-[11px] font-semibold text-amber-50 hover:bg-amber-500/30"
+              onClick={() => {
+                setUpgradePrompt({
+                  title: "Booste tes actions IA",
+                  message:
+                    "Recharge des crédits ou passe Premium pour conserver un chat fluide en traduction, correction et résumé.",
+                  ctaLabel: "Comparer les offres",
+                });
+                setShowUpgradeModal(true);
+              }}
+              className="rounded-lg border border-current/30 bg-black/10 px-2.5 py-1 text-[11px] font-semibold hover:bg-black/20"
             >
-              Recharger
+              Recharger / Premium
             </button>
           </div>
         </div>
@@ -2016,7 +2078,12 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
         </div>
       )}
       {showUpgradeModal && (
-        <UpgradeModal onClose={() => setShowUpgradeModal(false)} />
+        <UpgradeModal
+          onClose={() => setShowUpgradeModal(false)}
+          title={upgradePrompt.title}
+          message={upgradePrompt.message}
+          ctaLabel={upgradePrompt.ctaLabel}
+        />
       )}
     </div>
   );

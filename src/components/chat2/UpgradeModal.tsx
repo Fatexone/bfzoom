@@ -2,15 +2,25 @@
 
 import { useRouter } from "next/navigation";
 
-export default function UpgradeModal({ onClose }: { onClose: () => void }) {
+type UpgradeModalProps = {
+  onClose: () => void;
+  title?: string;
+  message?: string;
+  ctaLabel?: string;
+};
+
+export default function UpgradeModal({
+  onClose,
+  title = "Passe en Premium",
+  message = "Débloque les résumés IA et la correction illimitée.",
+  ctaLabel = "Passer Premium",
+}: UpgradeModalProps) {
   const router = useRouter();
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6">
       <div className="w-full max-w-md rounded-2xl border border-white/10 bg-gray-950/95 p-6 text-white shadow-2xl">
-        <h3 className="text-lg font-semibold">Passe en Premium</h3>
-        <p className="mt-2 text-sm text-gray-300">
-          Débloque les résumés IA et la correction illimitée.
-        </p>
+        <h3 className="text-lg font-semibold">{title}</h3>
+        <p className="mt-2 text-sm text-gray-300">{message}</p>
         <ul className="mt-4 space-y-2 text-sm text-gray-200">
           <li>• Traduction illimitée</li>
           <li>• Correction + coaching linguistique</li>
@@ -30,7 +40,7 @@ export default function UpgradeModal({ onClose }: { onClose: () => void }) {
             }}
             className="rounded-xl bg-amber-600 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-700"
           >
-            Passer Premium
+              {ctaLabel}
           </button>
         </div>
       </div>
