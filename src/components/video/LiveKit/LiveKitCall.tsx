@@ -8196,7 +8196,7 @@ function LiveKitConference({
                 </button>
               </div>
               <div className="flex items-center gap-2">
-                {isHost && (
+                {isHost && !aiTrainingAutoStart && (
                   <button
                     type="button"
                     onClick={handleEndRoomForAll}
@@ -8227,7 +8227,7 @@ function LiveKitConference({
             {captionsEnabled && (
               <>
               <div className="mt-2 flex flex-wrap items-center gap-2">
-                {!isChatSession && (
+                {!isChatSession && !aiTrainingAutoStart && (
                   <button
                     type="button"
                     onClick={onToggleGuestTts}
@@ -8255,7 +8255,7 @@ function LiveKitConference({
                     </span>
                   </button>
                 )}
-                {!isChatSession && AI_PARTNER_TRAINING_ENABLED && (
+                {!isChatSession && AI_PARTNER_TRAINING_ENABLED && !aiTrainingAutoStart && (
                   <button
                     type="button"
                     onClick={() => setAiPartnerEnabled((value) => !value)}
@@ -8284,7 +8284,7 @@ function LiveKitConference({
                     <span>{AI_PARTNER_TOGGLE_LABEL}: {aiPartnerActive ? "ON" : "OFF"}</span>
                   </button>
                 )}
-                {!isChatSession && AI_PARTNER_TRAINING_ENABLED && (
+                {!isChatSession && AI_PARTNER_TRAINING_ENABLED && !aiTrainingAutoStart && (
                   <div className="inline-flex items-center">
                     <InfoBubble
                       text={AI_PARTNER_TOGGLE_INFO}
@@ -8358,28 +8358,32 @@ function LiveKitConference({
                     </span>
                   </button>
                 )}
-                <button
-                  type="button"
-                  onClick={onOpenNotebook}
-                  disabled={translationControlsDisabled}
-                  className="inline-flex min-h-10 items-center justify-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold shadow-sm disabled:cursor-not-allowed disabled:opacity-55"
-                  title="Ouvrir les 10 dernieres traductions d'exercice."
-                  style={{
-                    backgroundColor: "rgba(30, 41, 59, 0.95)",
-                    color: "#f8fafc",
-                    borderColor: "rgba(148, 163, 184, 0.85)",
-                  }}
-                >
-                  <BookOpen className="h-4 w-4" />
-                  <span>Bloc-notes</span>
-                </button>
-                <div className="inline-flex items-center">
-                  <InfoBubble
-                    text='Talkie traduction: maintiens "Maintenir pour parler", puis relache.'
-                    label="Info talkie traduction"
-                    align="left"
-                  />
-                </div>
+                {!aiTrainingAutoStart && (
+                  <button
+                    type="button"
+                    onClick={onOpenNotebook}
+                    disabled={translationControlsDisabled}
+                    className="inline-flex min-h-10 items-center justify-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold shadow-sm disabled:cursor-not-allowed disabled:opacity-55"
+                    title="Ouvrir les 10 dernieres traductions d'exercice."
+                    style={{
+                      backgroundColor: "rgba(30, 41, 59, 0.95)",
+                      color: "#f8fafc",
+                      borderColor: "rgba(148, 163, 184, 0.85)",
+                    }}
+                  >
+                    <BookOpen className="h-4 w-4" />
+                    <span>Bloc-notes</span>
+                  </button>
+                )}
+                {!aiTrainingAutoStart && (
+                  <div className="inline-flex items-center">
+                    <InfoBubble
+                      text='Talkie traduction: maintiens "Maintenir pour parler", puis relache.'
+                      label="Info talkie traduction"
+                      align="left"
+                    />
+                  </div>
+                )}
               </div>
               {pushToTalkInterruptHint && captionsEnabled && (
                 <div
@@ -8461,19 +8465,21 @@ function LiveKitConference({
                   </div>
                 </div>
               )}
-              <div
-                className="mt-2 rounded-lg border px-3 py-2 text-[11px] font-semibold shadow-sm"
-                style={{
-                  backgroundColor: "rgba(15, 23, 42, 0.96)",
-                  color: "#f8fafc",
-                  borderColor: "rgba(56, 189, 248, 0.85)",
-                }}
-              >
-                {isChatSession
-                  ? "Temps traduction restant: "
-                  : "Temps traduction restant (hote): "}
-                {translationRemainingLabel}
-              </div>
+              {!aiTrainingAutoStart && (
+                <div
+                  className="mt-2 rounded-lg border px-3 py-2 text-[11px] font-semibold shadow-sm"
+                  style={{
+                    backgroundColor: "rgba(15, 23, 42, 0.96)",
+                    color: "#f8fafc",
+                    borderColor: "rgba(56, 189, 248, 0.85)",
+                  }}
+                >
+                  {isChatSession
+                    ? "Temps traduction restant: "
+                    : "Temps traduction restant (hote): "}
+                  {translationRemainingLabel}
+                </div>
+              )}
               {AI_PARTNER_TRAINING_ENABLED && !isChatSession && !aiPartnerAvailable && (
                 <div
                   className="mt-2 rounded-lg border px-3 py-2 text-[11px] font-semibold shadow-sm"
@@ -11897,7 +11903,7 @@ function LiveKitConferenceMobile({
                   )}
                 </div>
                 <div className="flex items-center gap-2">
-                  {isHost && (
+                  {isHost && !aiTrainingAutoStart && (
                     <button
                       type="button"
                       onClick={handleEndRoomForAll}
@@ -12029,7 +12035,7 @@ function LiveKitConferenceMobile({
 
               {captionsEnabled && (
                 <>
-                  {!isChatSession && (
+                  {!isChatSession && !aiTrainingAutoStart && (
                     <button
                       type="button"
                       onClick={onToggleGuestTts}
@@ -12057,7 +12063,7 @@ function LiveKitConferenceMobile({
                       </span>
                     </button>
                   )}
-                  {!isChatSession && AI_PARTNER_TRAINING_ENABLED && (
+                  {!isChatSession && AI_PARTNER_TRAINING_ENABLED && !aiTrainingAutoStart && (
                     <button
                       type="button"
                       onClick={() => setAiPartnerEnabled((value) => !value)}
@@ -12086,7 +12092,7 @@ function LiveKitConferenceMobile({
                       <span>{AI_PARTNER_TOGGLE_LABEL}: {aiPartnerActive ? "ON" : "OFF"}</span>
                     </button>
                   )}
-                  {!isChatSession && AI_PARTNER_TRAINING_ENABLED && (
+                  {!isChatSession && AI_PARTNER_TRAINING_ENABLED && !aiTrainingAutoStart && (
                     <div className="inline-flex items-center">
                       <InfoBubble
                         text={AI_PARTNER_TOGGLE_INFO}
@@ -12257,41 +12263,47 @@ function LiveKitConferenceMobile({
                       <p className="mt-1 line-clamp-2 text-[11px] text-slate-300">{sourceText}</p>
                     </div>
                   )}
-                  <button
-                    type="button"
-                    onClick={onOpenNotebook}
-                    disabled={translationControlsDisabled}
-                    className="inline-flex w-full min-h-10 items-center justify-center gap-2 rounded-full border px-3 py-2 text-[12px] font-semibold shadow-sm disabled:cursor-not-allowed disabled:opacity-55"
-                    title="Ouvrir les 10 dernieres traductions d'exercice."
-                    style={{
-                      backgroundColor: "rgba(30, 41, 59, 0.95)",
-                      color: "#f8fafc",
-                      borderColor: "rgba(148, 163, 184, 0.85)",
-                    }}
-                  >
-                    <BookOpen className="h-4 w-4" />
-                    <span>Bloc-notes traduction</span>
-                  </button>
-                  <div className="mt-2 inline-flex items-center">
-                    <InfoBubble
-                      text='Maintiens le bouton "Maintenir pour parler", parle, puis relache.'
-                      label="Info talkie mobile"
-                      align="left"
-                    />
-                  </div>
-                  <div
-                    className="w-full rounded-lg border px-3 py-2 text-[11px] font-semibold shadow-sm"
-                    style={{
-                      backgroundColor: "rgba(15, 23, 42, 0.96)",
-                      color: "#f8fafc",
-                      borderColor: "rgba(56, 189, 248, 0.85)",
-                    }}
-                  >
-                    {isChatSession
-                      ? "Temps traduction restant: "
-                      : "Temps traduction restant (hote): "}
-                    {translationRemainingLabel}
-                  </div>
+                  {!aiTrainingAutoStart && (
+                    <button
+                      type="button"
+                      onClick={onOpenNotebook}
+                      disabled={translationControlsDisabled}
+                      className="inline-flex w-full min-h-10 items-center justify-center gap-2 rounded-full border px-3 py-2 text-[12px] font-semibold shadow-sm disabled:cursor-not-allowed disabled:opacity-55"
+                      title="Ouvrir les 10 dernieres traductions d'exercice."
+                      style={{
+                        backgroundColor: "rgba(30, 41, 59, 0.95)",
+                        color: "#f8fafc",
+                        borderColor: "rgba(148, 163, 184, 0.85)",
+                      }}
+                    >
+                      <BookOpen className="h-4 w-4" />
+                      <span>Bloc-notes traduction</span>
+                    </button>
+                  )}
+                  {!aiTrainingAutoStart && (
+                    <div className="mt-2 inline-flex items-center">
+                      <InfoBubble
+                        text='Maintiens le bouton "Maintenir pour parler", parle, puis relache.'
+                        label="Info talkie mobile"
+                        align="left"
+                      />
+                    </div>
+                  )}
+                  {!aiTrainingAutoStart && (
+                    <div
+                      className="w-full rounded-lg border px-3 py-2 text-[11px] font-semibold shadow-sm"
+                      style={{
+                        backgroundColor: "rgba(15, 23, 42, 0.96)",
+                        color: "#f8fafc",
+                        borderColor: "rgba(56, 189, 248, 0.85)",
+                      }}
+                    >
+                      {isChatSession
+                        ? "Temps traduction restant: "
+                        : "Temps traduction restant (hote): "}
+                      {translationRemainingLabel}
+                    </div>
+                  )}
                   {AI_PARTNER_TRAINING_ENABLED && !isChatSession && !aiPartnerAvailable && (
                     <div
                       className="w-full rounded-lg border px-3 py-2 text-[11px] font-semibold shadow-sm"
