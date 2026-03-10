@@ -461,7 +461,6 @@ export default function VideoConferenceContent() {
             roomId={roomId}
             isHost={isHost}
             aiTrainingAutoStart={wantsAiExercise}
-            audioOnly={wantsAiExercise}
             skipPreJoin={wantsAiExercise}
             defaultDisplayName={guestDisplayName}
             onLeave={handleLeaveRoom}
