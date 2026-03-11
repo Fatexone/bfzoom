@@ -92,6 +92,13 @@ export async function POST(req: Request) {
     trimBounded(senderData.name, 80) ||
     trimBounded(senderData.email, 80) ||
     "BFZoom";
+  const senderTokens = Array.isArray(senderData.mobilePushTokens)
+    ? senderData.mobilePushTokens
+        .filter((entry): entry is string => typeof entry === "string")
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+    : [];
+  const senderTokenSet = new Set(senderTokens);
   const notificationBody = getBodyPreview({ messageType, previewText });
 
   const chatRef = db.collection("chats").doc(chatId);
@@ -137,6 +144,7 @@ export async function POST(req: Request) {
     for (const entry of rawTokens) {
       const token = typeof entry === "string" ? entry.trim() : "";
       if (!token || !EXPO_TOKEN_REGEX.test(token)) continue;
+      if (senderTokenSet.has(token)) continue;
 
       let owners = tokenOwners.get(token);
       if (!owners) {

@@ -1,8 +1,10 @@
 import Constants from "expo-constants";
 import * as Device from "expo-device";
 import * as Notifications from "expo-notifications";
-import { arrayRemove, arrayUnion, doc, serverTimestamp, setDoc } from "firebase/firestore";
+import { arrayRemove, doc, serverTimestamp, setDoc } from "firebase/firestore";
 import { db } from "./firebase";
+import { auth } from "./firebase";
+import { env } from "../config/env";
 
 let notificationsConfigured = false;
 export const MISSED_CALL_NOTIFICATION_TYPE = "missed_call";
@@ -60,10 +62,32 @@ export const registerPushTokenForUser = async (userId: string) => {
   const token = tokenResponse.data?.trim() || "";
   if (!token) return "";
 
+  const currentUser = auth?.currentUser;
+  const bearerToken = currentUser ? await currentUser.getIdToken().catch(() => "") : "";
+  const apiBaseUrl = env.apiBaseUrl.trim().replace(/\/+$/, "");
+
+  if (apiBaseUrl && bearerToken) {
+    const response = await fetch(`${apiBaseUrl}/api/notifications/register`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${bearerToken}`,
+      },
+      body: JSON.stringify({ token }),
+    });
+
+    if (!response.ok) {
+      const raw = await response.text().catch(() => "");
+      throw new Error(raw || `Push token registration failed (${response.status}).`);
+    }
+
+    return token;
+  }
+
   await setDoc(
     doc(db, "users", userId),
     {
-      mobilePushTokens: arrayUnion(token),
+      mobilePushTokens: [token],
       lastPushTokenAt: serverTimestamp(),
     },
     { merge: true }
