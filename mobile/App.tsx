@@ -1,5 +1,6 @@
 import { StatusBar } from "expo-status-bar";
 import { Linking, Pressable, StyleSheet, Text, View } from "react-native";
+import * as Notifications from "expo-notifications";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { onAuthStateChanged, signOut, type User } from "firebase/auth";
@@ -13,7 +14,11 @@ import { LandingScreen } from "./src/screens/LandingScreen";
 import { LoginOtpScreen } from "./src/screens/LoginOtpScreen";
 import { env } from "./src/config/env";
 import { fetchLiveKitToken } from "./src/services/livekit";
-import { initializeNotifications, registerPushTokenForUser } from "./src/services/notifications";
+import {
+  initializeNotifications,
+  registerPushTokenForUser,
+  unregisterPushTokenForUser,
+} from "./src/services/notifications";
 import {
   createVoipCallBridge,
   isVoipCallNativeAvailable,
@@ -88,12 +93,16 @@ export default function App() {
     "checking" | "active" | "inactive" | "error" | "unsupported"
   >("checking");
   const [voipMessage, setVoipMessage] = useState("");
+  const [pendingChatIdFromNotification, setPendingChatIdFromNotification] = useState("");
 
   const currentUserRef = useRef<User | null>(null);
   const sessionRef = useRef<MobileCallSession | null>(null);
   const activeVoipCallUUIDRef = useRef("");
   const voipBridgeRef = useRef<VoipCallBridge | null>(null);
   const lastHandledDeepLinkRef = useRef("");
+  const lastAuthUidRef = useRef("");
+  const activePushTokenRef = useRef("");
+  const pushTokenOwnerUidRef = useRef("");
 
   useEffect(() => {
     currentUserRef.current = currentUser;
@@ -329,9 +338,64 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!currentUser) return;
-    void registerPushTokenForUser(currentUser.uid).catch(() => {});
+    const nextUid = currentUser?.uid || "";
+    const prevUid = lastAuthUidRef.current;
+    const currentToken = activePushTokenRef.current;
+
+    if (prevUid && prevUid !== nextUid && currentToken) {
+      void unregisterPushTokenForUser(prevUid, currentToken).catch(() => {});
+      activePushTokenRef.current = "";
+      pushTokenOwnerUidRef.current = "";
+    }
+
+    lastAuthUidRef.current = nextUid;
+
+    if (!nextUid) return;
+
+    void registerPushTokenForUser(nextUid)
+      .then((token) => {
+        const cleanToken = token.trim();
+        if (!cleanToken) return;
+        activePushTokenRef.current = cleanToken;
+        pushTokenOwnerUidRef.current = nextUid;
+      })
+      .catch(() => {});
   }, [currentUser]);
+
+  useEffect(() => {
+    const openChatFromNotificationData = (data: unknown) => {
+      if (!data || typeof data !== "object") return;
+      const payload = data as Record<string, unknown>;
+      const type = typeof payload.type === "string" ? payload.type.trim() : "";
+      if (type !== "chat_message") return;
+      const chatId = typeof payload.chatId === "string" ? payload.chatId.trim() : "";
+      if (!chatId) return;
+
+      setPendingChatIdFromNotification(chatId);
+      if (currentUserRef.current) {
+        setActiveModule("chat");
+        return;
+      }
+      setLoginTargetModule("chat");
+      setActiveModule("login");
+    };
+
+    void Notifications.getLastNotificationResponseAsync()
+      .then((response) => {
+        const data = response?.notification?.request?.content?.data;
+        openChatFromNotificationData(data);
+      })
+      .catch(() => {});
+
+    const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
+      const data = response.notification.request.content.data;
+      openChatFromNotificationData(data);
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, []);
 
   useEffect(() => {
     const handleDeepLink = (url: string) => {
@@ -578,7 +642,13 @@ export default function App() {
             />
           );
         }
-        return <ChatScreen onStartCall={startChatCall} />;
+        return (
+          <ChatScreen
+            onStartCall={startChatCall}
+            initialSelectedChatId={pendingChatIdFromNotification || undefined}
+            onInitialSelectedChatIdHandled={() => setPendingChatIdFromNotification("")}
+          />
+        );
       default:
         return (
           <LandingScreen
