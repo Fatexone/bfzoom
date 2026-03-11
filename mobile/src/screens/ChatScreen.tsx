@@ -57,6 +57,12 @@ import {
 import { askOpenAi } from "../services/openai";
 import { notifyLocalMessage } from "../services/notifications";
 import { subscribePresenceMap, type PresenceEntry } from "../services/presence";
+import {
+  acceptSignalCall,
+  endSignalCall,
+  subscribeSignalCall,
+  type SignalCallState,
+} from "../services/callSignal";
 import type { ChatDoc, ChatMessageDoc } from "../types/chat";
 
 const timestampToLabel = (value?: { toDate?: () => Date } | null) => {
@@ -145,6 +151,10 @@ type StartCallPayload = {
   userId: string;
   label?: string;
   mode: ChatCallMode;
+  chatId?: string;
+  roomId?: string;
+  callUUID?: string;
+  skipRemoteNotify?: boolean;
 };
 
 type ChatScreenProps = {
@@ -524,6 +534,8 @@ export function ChatScreen({
   const [missedCalls, setMissedCalls] = useState<MissedCallEntry[]>([]);
   const [presenceByUserId, setPresenceByUserId] = useState<Record<string, PresenceEntry>>({});
   const [callHistoryError, setCallHistoryError] = useState("");
+  const [signalCallState, setSignalCallState] = useState<SignalCallState | null>(null);
+  const [signalCallBusy, setSignalCallBusy] = useState(false);
   const unreadMissedMarkingRef = useRef<Record<string, true>>({});
 
   const messageListRef = useRef<FlatList<ChatMessageDoc> | null>(null);
@@ -722,6 +734,20 @@ export function ChatScreen({
   }, [selectedChatId]);
 
   useEffect(() => {
+    if (!selectedChatId) {
+      setSignalCallState(null);
+      return;
+    }
+
+    const unsubscribe = subscribeSignalCall({
+      chatId: selectedChatId,
+      onUpdate: setSignalCallState,
+    });
+
+    return () => unsubscribe();
+  }, [selectedChatId]);
+
+  useEffect(() => {
     const targetChatId = (initialSelectedChatId || "").trim();
     if (!targetChatId || !currentUser) return;
     if (!chats.some((entry) => entry.id === targetChatId)) return;
@@ -733,6 +759,17 @@ export function ChatScreen({
     () => chats.find((entry) => entry.id === selectedChatId) || null,
     [chats, selectedChatId]
   );
+
+  const incomingSignalCall = useMemo(() => {
+    if (!currentUser || !selectedChatId || !signalCallState) return null;
+    if (signalCallState.chatId !== selectedChatId) return null;
+    if (signalCallState.status !== "ringing") return null;
+    if (signalCallState.fromUserId === currentUser.uid) return null;
+    if (signalCallState.ringExpiresAtMs > 0 && signalCallState.ringExpiresAtMs <= Date.now()) {
+      return null;
+    }
+    return signalCallState;
+  }, [currentUser, selectedChatId, signalCallState]);
 
   const selectedDirectPeer = useMemo(() => {
     if (!selectedChat || !currentUser || selectedChat.type !== "direct") return null;
@@ -1297,11 +1334,13 @@ export function ChatScreen({
       userId,
       label,
       mode,
+      chatId,
       setError,
     }: {
       userId: string;
       label?: string;
       mode: ChatCallMode;
+      chatId?: string;
       setError: (value: string) => void;
     }) => {
       setError("");
@@ -1310,15 +1349,22 @@ export function ChatScreen({
         if (!targetUserId) {
           throw new Error("Contact introuvable.");
         }
+        const actor = currentUser;
+        if (!actor) {
+          throw new Error("Utilisateur non connecté.");
+        }
         if (!onStartCall) {
           throw new Error("Appel BFZoom indisponible sur cet écran.");
         }
+        const resolvedChatId =
+          (chatId || "").trim() || getDirectChatId(actor.uid, targetUserId);
         setStartingVoiceCallUserId(targetUserId);
         setStartingCallMode(mode);
         await onStartCall({
           userId: targetUserId,
           label: label?.trim() || undefined,
           mode,
+          chatId: resolvedChatId,
         });
       } catch (error) {
         setError(
@@ -1329,19 +1375,24 @@ export function ChatScreen({
         setStartingCallMode((current) => (current === mode ? "" : current));
       }
     },
-    [onStartCall]
+    [currentUser, onStartCall]
   );
 
   const callContactInApp = useCallback(
     (entry: PhoneContactMatch, mode: ChatCallMode) => {
+      if (!currentUser) {
+        setContactsError("Utilisateur non connecté.");
+        return;
+      }
       void startInAppCall({
         userId: entry.user.id,
         label: entry.contactLabel || entry.user.name || entry.user.email,
         mode,
+        chatId: getDirectChatId(currentUser.uid, entry.user.id),
         setError: setContactsError,
       });
     },
-    [startInAppCall]
+    [currentUser, startInAppCall]
   );
 
   const callSelectedDirectPeer = useCallback((mode: ChatCallMode) => {
@@ -1350,9 +1401,52 @@ export function ChatScreen({
       userId: selectedDirectPeer.userId,
       label: selectedDirectPeer.label,
       mode,
+      chatId: selectedChatId || undefined,
       setError: setMessageError,
     });
-  }, [selectedDirectPeer, startInAppCall]);
+  }, [selectedChatId, selectedDirectPeer, startInAppCall]);
+
+  const acceptIncomingCall = useCallback(async () => {
+    if (!incomingSignalCall || !currentUser || !selectedChatId) return;
+    setSignalCallBusy(true);
+    setMessageError("");
+    try {
+      await acceptSignalCall(selectedChatId, currentUser.uid);
+      if (!onStartCall) {
+        throw new Error("Appel BFZoom indisponible sur cet écran.");
+      }
+      await onStartCall({
+        userId: incomingSignalCall.fromUserId,
+        label: resolveUserLabel(incomingSignalCall.fromUserId),
+        mode: incomingSignalCall.callMode,
+        chatId: selectedChatId,
+        roomId: incomingSignalCall.roomId,
+        callUUID: incomingSignalCall.callUUID,
+        skipRemoteNotify: true,
+      });
+    } catch (error) {
+      setMessageError(error instanceof Error ? error.message : "Impossible d'accepter l'appel.");
+    } finally {
+      setSignalCallBusy(false);
+    }
+  }, [currentUser, incomingSignalCall, onStartCall, resolveUserLabel, selectedChatId]);
+
+  const declineIncomingCall = useCallback(async () => {
+    if (!incomingSignalCall || !currentUser || !selectedChatId) return;
+    setSignalCallBusy(true);
+    setMessageError("");
+    try {
+      await endSignalCall({
+        chatId: selectedChatId,
+        endedBy: currentUser.uid,
+        reason: "declined",
+      });
+    } catch (error) {
+      setMessageError(error instanceof Error ? error.message : "Impossible de refuser l'appel.");
+    } finally {
+      setSignalCallBusy(false);
+    }
+  }, [currentUser, incomingSignalCall, selectedChatId]);
 
   const deletePhoneContact = useCallback(
     (entry: PhoneContactMatch) => {
@@ -2045,6 +2139,37 @@ export function ChatScreen({
               </View>
             ) : null}
           </View>
+
+          {incomingSignalCall ? (
+            <View style={styles.incomingCallBanner}>
+              <Text style={styles.incomingCallTitle}>
+                Appel entrant ({incomingSignalCall.callMode === "video" ? "visio" : "audio"})
+              </Text>
+              <Text style={styles.incomingCallSubtitle}>
+                {resolveUserLabel(incomingSignalCall.fromUserId)} t'appelle.
+              </Text>
+              <View style={styles.incomingCallActions}>
+                <Pressable
+                  style={[styles.incomingDeclineButton, signalCallBusy && styles.buttonDisabled]}
+                  onPress={() => {
+                    void declineIncomingCall();
+                  }}
+                  disabled={signalCallBusy}
+                >
+                  <Text style={styles.incomingDeclineText}>Refuser</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.incomingAcceptButton, signalCallBusy && styles.buttonDisabled]}
+                  onPress={() => {
+                    void acceptIncomingCall();
+                  }}
+                  disabled={signalCallBusy}
+                >
+                  <Text style={styles.incomingAcceptText}>Accepter</Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
 
           {selectedChat.type === "group" ? (
             <View style={styles.groupPanel}>
@@ -2744,6 +2869,59 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
+  },
+  incomingCallBanner: {
+    marginHorizontal: 12,
+    marginBottom: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#fbbf24",
+    backgroundColor: "#fffbeb",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 6,
+  },
+  incomingCallTitle: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: "#92400e",
+  },
+  incomingCallSubtitle: {
+    fontSize: 12,
+    color: "#78350f",
+  },
+  incomingCallActions: {
+    flexDirection: "row",
+    gap: 8,
+    marginTop: 2,
+  },
+  incomingDeclineButton: {
+    flex: 1,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#fca5a5",
+    backgroundColor: "#fee2e2",
+    paddingVertical: 8,
+    alignItems: "center",
+  },
+  incomingDeclineText: {
+    color: "#991b1b",
+    fontWeight: "700",
+    fontSize: 12,
+  },
+  incomingAcceptButton: {
+    flex: 1,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#86efac",
+    backgroundColor: "#dcfce7",
+    paddingVertical: 8,
+    alignItems: "center",
+  },
+  incomingAcceptText: {
+    color: "#166534",
+    fontWeight: "700",
+    fontSize: 12,
   },
   threadTitle: {
     color: "#e2e8f0",

@@ -302,6 +302,7 @@ export const sendTextMessage = async ({
     doc(firestore, "chats", chatId),
     {
       updatedAt: serverTimestamp(),
+      hiddenBy: deleteField(),
       lastMessage: {
         type: "text",
         text: cleanText,
@@ -407,6 +408,7 @@ export const sendAttachmentMessage = async ({
     doc(firestore, "chats", chatId),
     {
       updatedAt: serverTimestamp(),
+      hiddenBy: deleteField(),
       lastMessage: {
         type,
         text: previewLabel,
@@ -474,6 +476,7 @@ export const sendVoiceNoteMessage = async ({
     doc(firestore, "chats", chatId),
     {
       updatedAt: serverTimestamp(),
+      hiddenBy: deleteField(),
       lastMessage: {
         type: "voice",
         text: "Note vocale",

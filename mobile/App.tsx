@@ -25,6 +25,11 @@ import {
   type VoipCallBridge,
   type VoipCallIncomingPayload,
 } from "./src/services/voipCall";
+import {
+  endSignalCall,
+  startSignalCall,
+  subscribeIncomingSignalCalls,
+} from "./src/services/callSignal";
 import type { LiveKitRole } from "./src/types/livekit";
 import type { MobileCallSession } from "./src/types/session";
 
@@ -223,12 +228,21 @@ export default function App() {
       userId,
       label,
       mode,
+      chatId,
+      roomId,
+      callUUID,
+      skipRemoteNotify,
     }: {
       userId: string;
       label?: string;
       mode: "audio" | "video";
+      chatId?: string;
+      roomId?: string;
+      callUUID?: string;
+      skipRemoteNotify?: boolean;
     }) => {
       const targetUid = userId.trim();
+      const normalizedChatId = (chatId || "").trim();
       if (!targetUid) {
         throw new Error("Contact introuvable.");
       }
@@ -254,13 +268,13 @@ export default function App() {
         throw new Error("Session expirée. Reconnecte-toi.");
       }
 
-      const roomId = randomRoomId("chat");
+      const normalizedRoomId = (roomId || "").trim() || randomRoomId("chat");
       const identity = user.uid ? `${user.uid}-caller` : randomIdentity("caller");
       const displayName = user.email || "BFZoom caller";
       const livekitAuth = await fetchLiveKitToken({
         apiBaseUrl,
         payload: {
-          room: roomId,
+          room: normalizedRoomId,
           identity,
           name: displayName,
           role: "guest",
@@ -271,7 +285,8 @@ export default function App() {
       const nextSession: MobileCallSession = {
         apiBaseUrl,
         livekitUrl,
-        roomId,
+        roomId: normalizedRoomId,
+        chatId: normalizedChatId || undefined,
         role: "guest",
         identity,
         displayName,
@@ -281,39 +296,53 @@ export default function App() {
         originModule: "chat",
       };
 
-      const callUUID = randomIdentity("call");
-      const pushResponse = await fetch(`${apiBaseUrl}/api/voip/call`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${bearerToken}`,
-        },
-        body: JSON.stringify({
-          targetUid,
-          roomId,
-          callerName: displayName,
-          role: "guest",
-          callMode: mode,
-          callUUID,
-          apiBaseUrl,
-          livekitUrl,
-        }),
-      });
+      const normalizedCallUUID = (callUUID || "").trim() || randomIdentity("call");
 
-      if (!pushResponse.ok) {
-        const raw = await pushResponse.text().catch(() => "");
-        let detail = raw.trim();
-        if (detail.startsWith("{")) {
-          try {
-            const parsed = JSON.parse(detail) as { error?: string; detail?: string };
-            detail = (parsed.detail || parsed.error || "").trim() || detail;
-          } catch {}
+      if (!skipRemoteNotify && normalizedChatId) {
+        await startSignalCall({
+          chatId: normalizedChatId,
+          roomId: normalizedRoomId,
+          fromUserId: user.uid,
+          targetUserId: targetUid,
+          callMode: mode,
+          callUUID: normalizedCallUUID,
+        });
+      }
+
+      if (!skipRemoteNotify) {
+        const pushResponse = await fetch(`${apiBaseUrl}/api/voip/call`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${bearerToken}`,
+          },
+          body: JSON.stringify({
+            targetUid,
+            roomId: normalizedRoomId,
+            callerName: displayName,
+            role: "guest",
+            callMode: mode,
+            callUUID: normalizedCallUUID,
+            apiBaseUrl,
+            livekitUrl,
+          }),
+        });
+
+        if (!pushResponse.ok) {
+          const raw = await pushResponse.text().catch(() => "");
+          let detail = raw.trim();
+          if (detail.startsWith("{")) {
+            try {
+              const parsed = JSON.parse(detail) as { error?: string; detail?: string };
+              detail = (parsed.detail || parsed.error || "").trim() || detail;
+            } catch {}
+          }
+          setVoipMessage(
+            `Le destinataire n'a pas pu etre notifie (${pushResponse.status}). ${
+              detail || `target=${label || targetUid}`
+            }`
+          );
         }
-        throw new Error(
-          `Notification d'appel impossible (${pushResponse.status}). ${
-            detail || `target=${label || targetUid}`
-          }`
-        );
       }
 
       setConferenceCreateIntent(false);
@@ -445,6 +474,23 @@ export default function App() {
       setConferenceCreateIntent(false);
     }
   }, [conferenceCreateIntent, currentUser]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+
+    const unsubscribe = subscribeIncomingSignalCalls({
+      userId: currentUser.uid,
+      onIncoming: (incoming) => {
+        if (!incoming) return;
+        if (sessionRef.current) return;
+
+        setPendingChatIdFromNotification(incoming.chatId);
+        setActiveModule("chat");
+      },
+    });
+
+    return () => unsubscribe();
+  }, [currentUser]);
 
   useEffect(() => {
     if (!isVoipCallNativeAvailable()) {
@@ -679,6 +725,13 @@ export default function App() {
               session={session}
               onLeave={() => {
                 endActiveVoipCall("ended");
+                if (session.originModule === "chat" && session.chatId && currentUserRef.current?.uid) {
+                  void endSignalCall({
+                    chatId: session.chatId,
+                    endedBy: currentUserRef.current.uid,
+                    reason: "ended",
+                  });
+                }
                 setSession(null);
                 setActiveModule(session.originModule || "conference");
               }}

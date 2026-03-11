@@ -6,6 +6,7 @@ import {
   arrayRemove,
   arrayUnion,
   collection,
+  deleteField,
   doc,
   getDoc,
   serverTimestamp,
@@ -86,6 +87,7 @@ export const updateChatLastMessage = async ({
   const chatRef = doc(db, "chats", chatId);
   await updateDoc(chatRef, {
     updatedAt: serverTimestamp(),
+    hiddenBy: deleteField(),
     lastMessage: {
       type,
       text: text ?? "",
