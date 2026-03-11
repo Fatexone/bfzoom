@@ -42,6 +42,10 @@ type VideoConferenceCopy = {
   guestNamePlaceholder: string;
   guestNameVisibleHint: string;
   directExerciseLoading: string;
+  backToDashboard: string;
+  creditsRemaining: string;
+  consumedThisSession: string;
+  buyCredits: string;
 };
 
 const VIDEO_COPY: Record<UiLocale, VideoConferenceCopy> = {
@@ -70,6 +74,10 @@ const VIDEO_COPY: Record<UiLocale, VideoConferenceCopy> = {
     guestNamePlaceholder: "Ex: Marie",
     guestNameVisibleHint: "Visible pour les participants.",
     directExerciseLoading: "Ouverture de l'exercice IA en cours...",
+    backToDashboard: "Retour au dashboard",
+    creditsRemaining: "Credits restants",
+    consumedThisSession: "Consomme (session)",
+    buyCredits: "Acheter des credits",
   },
   en: {
     guestDefaultName: "BFZoom Guest",
@@ -96,6 +104,10 @@ const VIDEO_COPY: Record<UiLocale, VideoConferenceCopy> = {
     guestNamePlaceholder: "Ex: Maria",
     guestNameVisibleHint: "Visible to participants.",
     directExerciseLoading: "Opening AI exercise...",
+    backToDashboard: "Back to dashboard",
+    creditsRemaining: "Credits remaining",
+    consumedThisSession: "Consumed (session)",
+    buyCredits: "Buy credits",
   },
 };
 
@@ -351,7 +363,7 @@ export default function VideoConferenceContent() {
   if (!roomId) {
     if (wantsAiExercise) {
       return (
-        <div className="min-h-dvh flex flex-col items-center justify-center bg-gradient-to-b from-gray-50 to-gray-100 text-gray-800 px-4">
+        <div className="min-h-dvh flex flex-col items-center justify-center bg-linear-to-b from-gray-50 to-gray-100 text-gray-800 px-4">
           <div className="w-full max-w-md rounded-2xl border border-gray-200 bg-white p-6 text-center shadow-xl">
             <div className="mx-auto mb-3 h-6 w-6 animate-spin rounded-full border-2 border-sky-500 border-t-transparent" />
             <p className="text-sm font-semibold text-slate-700">{t.directExerciseLoading}</p>
@@ -360,7 +372,7 @@ export default function VideoConferenceContent() {
       );
     }
     return (
-      <div className="min-h-dvh flex flex-col items-center justify-center bg-gradient-to-b from-gray-50 to-gray-100 text-gray-800 px-4">
+      <div className="min-h-dvh flex flex-col items-center justify-center bg-linear-to-b from-gray-50 to-gray-100 text-gray-800 px-4">
         <div className="w-full max-w-md bg-white rounded-2xl shadow-xl border border-gray-200 p-6 text-center">
           <h1 className="text-3xl font-bold text-center mb-2 text-gray-800">
             🎥 BFZoom
@@ -441,7 +453,7 @@ export default function VideoConferenceContent() {
   ======================================================= */
   return (
     <div
-      className={`flex h-[100dvh] min-h-[100dvh] flex-col overflow-x-hidden text-white ${
+      className={`flex h-dvh min-h-dvh flex-col overflow-x-hidden text-white ${
         focusedExerciseMode ? "bg-black" : "bg-gray-900"
       }`}
     >
@@ -453,23 +465,23 @@ export default function VideoConferenceContent() {
             onClick={() => router.push("/dashboard")}
             className="pointer-events-auto inline-flex items-center rounded-full border border-white/20 bg-black/70 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-black/85"
           >
-            Retour au dashboard
+            {t.backToDashboard}
           </button>
         </div>
         <div className="pointer-events-none absolute right-3 top-3 z-40 sm:right-4 sm:top-4">
           <div className="pointer-events-auto rounded-xl border border-white/15 bg-black/70 px-3 py-2 text-right text-[11px] text-white shadow-lg backdrop-blur">
             <p className="font-semibold">
-              Credits restants: {walletLoading ? "..." : tokenBalance ?? 0}
+              {t.creditsRemaining}: {walletLoading ? "..." : tokenBalance ?? 0}
             </p>
             <p className="text-[10px] text-amber-200">
-              Consomme (session): {exerciseConsumedCredits}
+              {t.consumedThisSession}: {exerciseConsumedCredits}
             </p>
             <button
               type="button"
               onClick={() => router.push("/pricing")}
               className="mt-1 inline-flex items-center rounded-full border border-amber-300/70 bg-amber-500/20 px-2.5 py-1 text-[10px] font-semibold text-amber-100 transition hover:bg-amber-500/30"
             >
-              Acheter des credits
+              {t.buyCredits}
             </button>
           </div>
         </div>
