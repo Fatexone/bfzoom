@@ -1,6 +1,7 @@
 // app/layout.tsx
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import AuthSessionBridge from "@/components/auth/AuthSessionBridge";
 
 export const metadata: Metadata = {
   title: "BFZoom",
@@ -32,6 +33,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body
         className="antialiased bg-neutral-950 text-white"
       >
+        <AuthSessionBridge />
         {/* ✅ Wrapper plein écran avec scroll vertical autorisé */}
         <div className="min-h-dvh w-full overflow-x-hidden">
           {children}

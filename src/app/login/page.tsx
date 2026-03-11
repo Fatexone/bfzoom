@@ -6,6 +6,8 @@ import { auth } from "@/lib/firebaseConfig";
 import { signInWithCustomToken } from "firebase/auth";
 import { getFirestore, doc, getDoc, setDoc } from "firebase/firestore";
 
+const ACTIVE_SESSION_STORAGE_KEY = "bfzoom.activeSessionId";
+
 export default function LoginPage() {
   return (
     <Suspense fallback={<LoginFallback />}>
@@ -93,11 +95,23 @@ function LoginForm() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, code }),
       });
-      const data = (await response.json()) as { token?: string; error?: string };
+      const data = (await response.json()) as {
+        token?: string;
+        sessionId?: string;
+        error?: string;
+      };
       if (!response.ok || !data.token) {
         throw new Error(data.error ?? "Code invalide ou expiré.");
       }
       const result = await signInWithCustomToken(auth, data.token);
+      const cleanSessionId = (data.sessionId || "").trim();
+      if (typeof window !== "undefined") {
+        if (cleanSessionId) {
+          window.localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, cleanSessionId);
+        } else {
+          window.localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
+        }
+      }
       await upsertUser(result.user.uid, result.user.email);
       setMessage("✅ Identité vérifiée. Connexion réussie !");
       router.push("/dashboard");

@@ -6,6 +6,9 @@ export interface CallRecord {
   chatId: string;
   roomId: string;
   from: string;
+  to?: string;
+  callMode?: "audio" | "video";
+  callUUID?: string;
   status: CallStatus;
   createdAt?: Timestamp;
   acceptedAt?: Timestamp;

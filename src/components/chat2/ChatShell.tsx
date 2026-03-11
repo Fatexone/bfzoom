@@ -145,6 +145,12 @@ const sanitizeLanguageCode = (value?: string) => {
   return value.trim().toLowerCase().slice(0, 8);
 };
 
+const toBaseLanguageCode = (value?: string) => {
+  const normalized = sanitizeLanguageCode(value);
+  if (!normalized) return "";
+  return normalized.split("-")[0] || normalized;
+};
+
 const parseJsonPayload = (raw: string) => {
   try {
     return JSON.parse(raw) as Record<string, unknown>;
@@ -690,6 +696,7 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
       setCallMode(type);
       const roomId = `chat-${chatId}-${Date.now()}`;
       void runCallAction(async () => {
+        const peer = resolvePeerMetaForChat(chatId);
         const voipResult = await triggerVoipForDirectChat({
           chatId,
           roomId,
@@ -699,13 +706,13 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
           chatId,
           roomId,
           from: currentUser.id,
+          to: peer.peerUserId || undefined,
           callMode: type,
           callUUID: voipResult.callUUID,
         });
         if (voipResult.degraded && voipResult.warning) {
           setCallError(voipResult.warning);
         }
-        const peer = resolvePeerMetaForChat(chatId);
         void appendCallHistory({
           ownerUid: currentUser.id,
           peerUserId: peer.peerUserId,
@@ -1252,6 +1259,29 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
             ? parsed.sourceLanguage
             : undefined
         ) || "auto";
+
+      const normalizedTarget = sanitizeLanguageCode(targetLanguage);
+      const sourceBase = toBaseLanguageCode(sourceLanguage);
+      const targetBase = toBaseLanguageCode(normalizedTarget);
+
+      // Guardrail: never rewrite when source and target are effectively the same language.
+      if (sourceBase && targetBase && sourceBase === targetBase) {
+        return {
+          translatedText: text.trim(),
+          sourceLanguage,
+          targetLanguage,
+        };
+      }
+
+      // Guardrail: avoid conversational assistant-like replies replacing user text.
+      const aiReplyPattern = /^(oui|yes|je\s+suis\s+la|i\s*'?m\s+here|bien\s+sur|of\s+course|d'accord|ok)[\s!,.?]*$/i;
+      if (aiReplyPattern.test(translatedCandidate) && translatedCandidate.length < Math.max(24, text.trim().length * 0.5)) {
+        return {
+          translatedText: text.trim(),
+          sourceLanguage,
+          targetLanguage,
+        };
+      }
 
       return {
         translatedText: translatedCandidate,

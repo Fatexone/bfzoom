@@ -28,8 +28,6 @@ import * as ImagePicker from "expo-image-picker";
 import { onAuthStateChanged, type User } from "firebase/auth";
 import { env } from "../config/env";
 import { auth, db, firebaseConfigured } from "../services/firebase";
-import { doc, updateDoc } from "firebase/firestore";
-import { requireDb } from "../services/chat";
 import {
   addGroupMembers,
   createGroupChat,
@@ -54,7 +52,6 @@ import {
   subscribeMissedCalls,
   type MissedCallEntry,
 } from "../services/callHistory";
-import { askOpenAi } from "../services/openai";
 import { notifyLocalMessage } from "../services/notifications";
 import { subscribePresenceMap, type PresenceEntry } from "../services/presence";
 import {
@@ -125,14 +122,6 @@ const sanitizeLanguageCode = (value?: string) => {
 const isRtlLanguageCode = (value?: string) => {
   if (!value) return false;
   return RTL_LANGUAGE_CODES.has(value.trim().toLowerCase());
-};
-
-const parseJsonPayload = (raw: string) => {
-  try {
-    return JSON.parse(raw) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
 };
 
 type PhoneContactMatch = {
@@ -1508,54 +1497,6 @@ export function ChatScreen({
     [currentUser]
   );
 
-  const translateDraftForChat = useCallback(
-    async (text: string, targetLanguage: ChatLanguageCode) => {
-      if (!auth?.currentUser) {
-        throw new Error("Connexion requise pour traduire avant envoi.");
-      }
-      const token = await auth.currentUser.getIdToken(true);
-      const targetLabel = CHAT_LANGUAGE_LABELS[targetLanguage] || targetLanguage.toUpperCase();
-      const raw = await askOpenAi({
-        apiBaseUrl: env.apiBaseUrl.trim().replace(/\/+$/, ""),
-        bearerToken: token,
-        jsonMode: true,
-        messages: [
-          {
-            role: "system",
-            content:
-              "Tu es un traducteur multilingue pour chat en temps réel. " +
-              `Détecte la langue source et traduis vers ${targetLabel} (code ${targetLanguage}). ` +
-              'Réponds strictement en JSON: {"translatedText":"...","sourceLanguage":"fr"}. ' +
-              "Aucun markdown, aucun texte hors JSON.",
-          },
-          {
-            role: "user",
-            content: text,
-          },
-        ],
-      });
-
-      const fallbackText = raw.trim();
-      const parsed = parseJsonPayload(raw);
-      const translatedCandidate =
-        (typeof parsed?.translatedText === "string" ? parsed.translatedText : fallbackText).trim();
-      if (!translatedCandidate) {
-        throw new Error("Traduction vide, impossible d'envoyer le message.");
-      }
-      const sourceLanguage =
-        sanitizeLanguageCode(
-          typeof parsed?.sourceLanguage === "string" ? parsed.sourceLanguage : undefined
-        ) || "auto";
-
-      return {
-        translatedText: translatedCandidate,
-        sourceLanguage,
-        targetLanguage,
-      };
-    },
-    []
-  );
-
   const queueChatPushFanout = useCallback(
     async ({
       chatId,
@@ -1613,9 +1554,8 @@ export function ChatScreen({
       // send original immediately
       const senderName =
         currentUser.displayName?.trim() || currentUser.email?.trim() || "Utilisateur";
-      let messageId: string | null = null;
       try {
-        messageId = await sendTextMessage({
+        await sendTextMessage({
           chatId: selectedChatId,
           text: cleanDraft,
           senderId: currentUser.uid,
@@ -1629,32 +1569,7 @@ export function ChatScreen({
         throw err;
       }
 
-      // background translation
-      if (messageId) {
-        translateDraftForChat(cleanDraft, chatLanguage)
-          .then(async (translated) => {
-            try {
-              const firestore = requireDb();
-              const msgRef = doc(firestore, `chats/${selectedChatId}/messages`, messageId!);
-              await updateDoc(msgRef, {
-                text: translated.translatedText,
-                originalText: cleanDraft,
-                sourceLanguage: translated.sourceLanguage,
-                targetLanguage: translated.targetLanguage,
-              });
-            } catch (e) {
-              console.warn("mobile background translation update failed", e);
-            }
-          })
-          .catch((translationError) => {
-            console.warn(
-              translationError instanceof Error
-                ? translationError.message
-                : "translateDraftForChat fallback to original text"
-            );
-          });
-      }
-              void queueChatPushFanout({
+      void queueChatPushFanout({
         chatId: selectedChatId,
         senderName,
         messageType: "text",

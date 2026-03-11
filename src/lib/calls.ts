@@ -18,6 +18,9 @@ type CallPayload = {
   chatId: string;
   roomId: string;
   from: string;
+  to?: string;
+  callMode?: "audio" | "video";
+  callUUID?: string;
 };
 
 const getCallDocRef = (chatId: string) => doc(db, CALL_COLLECTION, chatId);
@@ -43,6 +46,9 @@ export const useCallState = (chatId?: string | null) => {
         chatId,
         roomId: data.roomId,
         from: data.from,
+        to: typeof data.to === "string" ? data.to : undefined,
+        callMode: data.callMode === "video" ? "video" : "audio",
+        callUUID: typeof data.callUUID === "string" ? data.callUUID : undefined,
         status: data.status as CallStatus,
         createdAt: data.createdAt as Timestamp | undefined,
         updatedAt: data.updatedAt as Timestamp | undefined,
@@ -56,7 +62,7 @@ export const useCallState = (chatId?: string | null) => {
   return callState;
 };
 
-export const startCall = async ({ chatId, roomId, from }: CallPayload) => {
+export const startCall = async ({ chatId, roomId, from, to, callMode, callUUID }: CallPayload) => {
   if (!chatId || !roomId || !from) {
     throw new Error("Appel invalide");
   }
@@ -72,7 +78,11 @@ export const startCall = async ({ chatId, roomId, from }: CallPayload) => {
     chatId,
     roomId,
     from,
+    to: to?.trim() || null,
+    callMode: callMode === "video" ? "video" : "audio",
+    callUUID: callUUID?.trim() || null,
     status: "ringing",
+    ringExpiresAt: Timestamp.fromMillis(Date.now() + 35_000),
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });

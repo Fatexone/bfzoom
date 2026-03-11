@@ -1,10 +1,13 @@
 import { StatusBar } from "expo-status-bar";
-import { Linking, Pressable, StyleSheet, Text, View } from "react-native";
+import { Alert, Linking, Pressable, StyleSheet, Text, View } from "react-native";
 import * as Notifications from "expo-notifications";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { onAuthStateChanged, signOut, type User } from "firebase/auth";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { doc, onSnapshot } from "firebase/firestore";
 import { auth } from "./src/services/firebase";
+import { db } from "./src/services/firebase";
 import { CallScreen } from "./src/screens/CallScreen";
 import { ChatScreen } from "./src/screens/ChatScreen";
 import { ConferenceLobbyScreen } from "./src/screens/ConferenceLobbyScreen";
@@ -32,6 +35,10 @@ import {
 } from "./src/services/callSignal";
 import type { LiveKitRole } from "./src/types/livekit";
 import type { MobileCallSession } from "./src/types/session";
+
+const ACTIVE_SESSION_STORAGE_KEY = "bfzoom.activeSessionId";
+const FORCED_LOGOUT_MESSAGE =
+  "Votre compte a ete ouvert sur un autre appareil. Vous avez ete deconnecte de cette session.";
 
 type AppModule = "home" | "login" | "dashboard" | "conference" | "coach" | "chat";
 const PROTECTED_MODULES: AppModule[] = ["dashboard", "conference", "coach", "chat"];
@@ -566,6 +573,46 @@ export default function App() {
       })
       .catch(() => {});
   }, [currentUser, registerVoipToken]);
+
+  useEffect(() => {
+    if (!currentUser || !db || !auth) return;
+
+    let handledMismatch = false;
+    const userRef = doc(db, "users", currentUser.uid);
+    const unsubscribe = onSnapshot(
+      userRef,
+      (snapshot) => {
+        void (async () => {
+          const remoteSessionId =
+            typeof snapshot.data()?.activeSessionId === "string"
+              ? snapshot.data()?.activeSessionId.trim()
+              : "";
+          if (!remoteSessionId) return;
+
+          const localSessionId = (await AsyncStorage.getItem(ACTIVE_SESSION_STORAGE_KEY))?.trim() || "";
+
+          // Backward compatibility for users already connected before the session guard.
+          if (!localSessionId) {
+            await AsyncStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, remoteSessionId);
+            return;
+          }
+
+          if (!handledMismatch && localSessionId !== remoteSessionId) {
+            handledMismatch = true;
+            await AsyncStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY).catch(() => {});
+            Alert.alert("Session fermee", FORCED_LOGOUT_MESSAGE);
+            const authInstance = auth;
+            if (authInstance) {
+              await signOut(authInstance).catch(() => {});
+            }
+          }
+        })();
+      },
+      () => {}
+    );
+
+    return () => unsubscribe();
+  }, [currentUser]);
 
   const tabItems = useMemo(() => {
     if (currentUser) {

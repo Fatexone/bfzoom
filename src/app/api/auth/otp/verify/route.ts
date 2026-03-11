@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getAdminAuth } from "@/lib/firebaseAdmin";
+import { getAdminDb } from "@/lib/firebaseAdmin";
 import { verifyOtp } from "@/lib/otpStore";
 
 export const runtime = "nodejs";
@@ -25,6 +26,7 @@ export async function POST(req: Request) {
 
   try {
     const adminAuth = getAdminAuth();
+    const adminDb = getAdminDb();
     let user;
     try {
       user = await adminAuth.getUserByEmail(email);
@@ -32,8 +34,24 @@ export async function POST(req: Request) {
       user = await adminAuth.createUser({ email });
     }
 
+    const sessionId =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+
+    await adminDb.collection("users").doc(user.uid).set(
+      {
+        id: user.uid,
+        email,
+        emailLower: email,
+        activeSessionId: sessionId,
+        activeSessionUpdatedAt: new Date(),
+      },
+      { merge: true }
+    );
+
     const token = await adminAuth.createCustomToken(user.uid);
-    return NextResponse.json({ token, uid: user.uid, email });
+    return NextResponse.json({ token, uid: user.uid, email, sessionId });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Auth error";
     return NextResponse.json({ error: message }, { status: 500 });
