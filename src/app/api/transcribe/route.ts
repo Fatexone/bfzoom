@@ -28,7 +28,9 @@ export async function POST(req: Request) {
         { status: 429, headers: { "Retry-After": String(rate.retryAfter) } }
       );
     }
-    const formData = await req.formData();
+    const formData = (await req.formData()) as unknown as {
+      get: (name: string) => unknown;
+    };
     const file = formData.get("file");
     if (!(file instanceof File)) {
       return NextResponse.json({ error: "Fichier audio manquant" }, { status: 400 });

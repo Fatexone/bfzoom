@@ -2,6 +2,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import AuthSessionBridge from "@/components/auth/AuthSessionBridge";
+import { UiLocaleProvider } from "@/components/ui/UiLocaleProvider";
 
 export const metadata: Metadata = {
   title: "BFZoom",
@@ -35,9 +36,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       >
         <AuthSessionBridge />
         {/* ✅ Wrapper plein écran avec scroll vertical autorisé */}
-        <div className="min-h-dvh w-full overflow-x-hidden">
-          {children}
-        </div>
+        <UiLocaleProvider>
+          <div className="min-h-dvh w-full overflow-x-hidden">
+            {children}
+          </div>
+        </UiLocaleProvider>
       </body>
     </html>
   );

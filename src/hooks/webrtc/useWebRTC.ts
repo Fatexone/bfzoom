@@ -533,7 +533,17 @@ export function useWebRTC(roomId: string, onClose: () => void) {
       setRemoteStreams({});
       // on ne touche pas localStream ici (c’est global au hook)
     };
-  }, [roomId, log, leaveRoom, isCreator, attachLocalTracksToPc]); // ✅ pas de localStream ici (on passe par localStreamRef)
+  }, [
+    roomId,
+    log,
+    leaveRoom,
+    isCreator,
+    attachLocalTracksToPc,
+    stunUrls,
+    turnUrls,
+    turnUsername,
+    turnCredential,
+  ]); // ✅ pas de localStream ici (on passe par localStreamRef)
 
   /* =======================================================
      🔄 Attache les tracks locales aux PC existantes

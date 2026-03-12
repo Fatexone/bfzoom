@@ -475,10 +475,7 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
               : 0;
 
           if (status === "ringing" && ringExpiresAtMs > 0 && ringExpiresAtMs <= Date.now()) {
-            void endCall(chat.id, currentUser.id, {
-              reason: "no_answer",
-              endedBy: "system",
-            }).catch(() => {});
+            void endCall(chat.id, currentUser.id, "ended").catch(() => {});
             return;
           }
 

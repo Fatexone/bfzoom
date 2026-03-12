@@ -13871,7 +13871,7 @@ function BackgroundSection({
     setAiStatus("pending");
 
     try {
-      const authHeader = await getAuthHeader({ waitMs: 2000 });
+      const authHeader = await getAuthHeader();
       if (!authHeader.Authorization) {
         throw new Error("Session non prete. Reconnecte-toi puis reessaie.");
       }

@@ -43,6 +43,9 @@ export interface ChatMessage {
   id: string;
   type: ChatMessageType;
   text?: string;
+  originalText?: string;
+  sourceLanguage?: string;
+  targetLanguage?: string;
   encrypted?: boolean;
   ciphertext?: string;
   keyId?: string;
