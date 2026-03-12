@@ -27,6 +27,11 @@ type StartVoipCallBody = {
   displayName?: string;
 };
 
+type VoipTokenLookupResult = {
+  docId: string;
+  tokens: string[];
+};
+
 const base64Url = (value: string | Buffer) =>
   Buffer.from(value)
     .toString("base64")
@@ -72,6 +77,51 @@ const parseApnsReason = (raw: string) => {
   } catch {
     return "";
   }
+};
+
+const sanitizeTokenList = (value: unknown) =>
+  Array.isArray(value)
+    ? value
+        .map((item) => (typeof item === "string" ? item.trim().toLowerCase() : ""))
+        .filter(Boolean)
+    : [];
+
+const resolveTargetVoipTokens = async (
+  db: ReturnType<typeof getAdminDb>,
+  targetUid: string
+): Promise<VoipTokenLookupResult | null> => {
+  const directDoc = await db.collection(VOIP_TOKEN_COLLECTION).doc(targetUid).get();
+  const directTokens = sanitizeTokenList(directDoc.data()?.tokens);
+  if (directTokens.length > 0) {
+    return {
+      docId: targetUid,
+      tokens: directTokens,
+    };
+  }
+
+  const targetUserSnap = await db.collection("users").doc(targetUid).get();
+  if (!targetUserSnap.exists) return null;
+  const targetUser = (targetUserSnap.data() ?? {}) as Record<string, unknown>;
+  const targetEmail =
+    (typeof targetUser.emailLower === "string" ? targetUser.emailLower : "") ||
+    (typeof targetUser.email === "string" ? targetUser.email.toLowerCase() : "");
+  const normalizedEmail = targetEmail.trim();
+  if (!normalizedEmail) return null;
+
+  const byEmailSnap = await db
+    .collection(VOIP_TOKEN_COLLECTION)
+    .where("email", "==", normalizedEmail)
+    .limit(1)
+    .get();
+  if (byEmailSnap.empty) return null;
+
+  const tokenDoc = byEmailSnap.docs[0];
+  const tokens = sanitizeTokenList(tokenDoc.data()?.tokens);
+  if (!tokens.length) return null;
+  return {
+    docId: tokenDoc.id,
+    tokens,
+  };
 };
 
 export async function POST(req: Request) {
@@ -134,11 +184,22 @@ export async function POST(req: Request) {
   }
 
   const db = getAdminDb();
-  const targetDoc = await db.collection(VOIP_TOKEN_COLLECTION).doc(targetUid).get();
-  const tokens = ((targetDoc.data()?.tokens as string[] | undefined) || []).filter(Boolean);
-  if (!tokens.length) {
-    return NextResponse.json({ error: "No VoIP token registered for target user." }, { status: 404 });
+  const targetTokenLookup = await resolveTargetVoipTokens(db, targetUid);
+  const tokens = targetTokenLookup?.tokens || [];
+  if (!targetTokenLookup || !tokens.length) {
+    return NextResponse.json(
+      {
+        ok: true,
+        sent: 0,
+        total: 0,
+        reason: "target_has_no_voip_token",
+        message:
+          "No VoIP token registered for target user. Falling back to in-app call state only.",
+      },
+      { status: 200 }
+    );
   }
+  const targetTokenDocId = targetTokenLookup.docId;
 
   const callerName = trimBounded(body.callerName || user.email || "BFZoom", CALLER_NAME_MAX_LEN);
   const callUUID = (body.callUUID || randomUUID()).trim().toLowerCase();
@@ -197,7 +258,7 @@ export async function POST(req: Request) {
 
   if (invalidTokens.length) {
     try {
-      await db.collection(VOIP_TOKEN_COLLECTION).doc(targetUid).set(
+      await db.collection(VOIP_TOKEN_COLLECTION).doc(targetTokenDocId).set(
         {
           updatedAt: FieldValue.serverTimestamp(),
           tokens: FieldValue.arrayRemove(...invalidTokens),
