@@ -4,12 +4,10 @@ import { useEffect, useState } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
 import { auth } from '@/lib/firebaseConfig';
 import { User } from '@/types/User';
-import ChatSidebar from '@/components/chat/ChatSidebar';
-import ChatSystem from '@/components/chat/ChatSystem';
+import ChatShell from '@/components/chat2/ChatShell';
 
 export default function ChatPage() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [selectedUser, setSelectedUser] = useState<User | null>(null);
 
   // 🔐 Listen to Firebase Auth state
   useEffect(() => {
@@ -38,23 +36,5 @@ export default function ChatPage() {
     );
   }
 
-  return (
-    <div className="flex h-screen bg-gray-100">
-      {/* 📋 Liste des contacts et invitations */}
-      <ChatSidebar
-        selectedUser={selectedUser}
-        setSelectedUser={setSelectedUser}
-        currentUser={currentUser}
-      />
-
-      {/* 💬 Fenêtre de chat */}
-      <div className="flex-1 p-4">
-        <ChatSystem
-          selectedUser={selectedUser}
-          setSelectedUser={setSelectedUser}
-          currentUser={currentUser}
-        />
-      </div>
-    </div>
-  );
+  return <ChatShell currentUser={currentUser} />;
 }
