@@ -4477,6 +4477,78 @@ function RoomView({
   const isChatVideoCall = isChatCall && !isChatAudioCall;
   const coachConversationLayoutActive = coachConversationEnabled && !isChatCall;
   const useManualDraftFullscreen = Platform.OS === "ios";
+  const renderManualDraftFullscreenModal = () =>
+    useManualDraftFullscreen ? (
+      <Modal
+        visible={manualDraftVisible}
+        animationType="slide"
+        presentationStyle="fullScreen"
+        onRequestClose={() => {
+          if (manualDraftSending) return;
+          cancelManualDraft();
+        }}
+      >
+        <KeyboardAvoidingView
+          style={styles.manualDraftSheetRoot}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          keyboardVerticalOffset={8}
+        >
+          <View style={styles.manualDraftSheetHeader}>
+            <Text style={styles.manualDraftSheetTitle}>Corriger avant envoi</Text>
+            <View style={styles.manualDraftSheetActions}>
+              {keyboardVisible ? (
+                <Pressable style={styles.manualDraftSheetActionGhost} onPress={dismissKeyboard}>
+                  <Text style={styles.manualDraftSheetActionGhostText}>Clavier</Text>
+                </Pressable>
+              ) : null}
+              <Pressable
+                style={[styles.manualDraftSheetActionGhost, manualDraftSending && styles.controlButtonDisabled]}
+                onPress={cancelManualDraft}
+                disabled={manualDraftSending}
+              >
+                <Text style={styles.manualDraftSheetActionGhostText}>Annuler</Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.manualDraftSheetActionPrimary,
+                  (!manualDraftText.trim() || manualDraftSending) && styles.controlButtonDisabled,
+                ]}
+                onPress={() => {
+                  void confirmManualDraftSend();
+                }}
+                disabled={!manualDraftText.trim() || manualDraftSending}
+              >
+                {manualDraftSending ? (
+                  <ActivityIndicator size="small" color="#ffffff" />
+                ) : (
+                  <Text style={styles.manualDraftSheetActionPrimaryText}>Envoyer</Text>
+                )}
+              </Pressable>
+            </View>
+          </View>
+
+          <View style={styles.manualDraftSheetBody}>
+            <Text style={styles.realtimeStatus}>
+              Verifie ton texte, puis envoie la version corrigee.
+            </Text>
+            <TextInput
+              style={[styles.aiPromptInput, styles.manualDraftSheetInput]}
+              value={manualDraftText}
+              onChangeText={setManualDraftText}
+              editable={!manualDraftSending}
+              multiline
+              textAlignVertical="top"
+              autoFocus
+              placeholder="Corrige ton texte si besoin..."
+              placeholderTextColor="#64748b"
+              returnKeyType="done"
+              blurOnSubmit
+              onSubmitEditing={dismissKeyboard}
+            />
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+    ) : null;
 
   if (isChatAudioCall) {
     return (
@@ -4550,39 +4622,45 @@ function RoomView({
           ) : null}
         </View>
 
-        <View style={styles.chatVideoStatusRow}>
-          <Text style={styles.audioCallSubtitle}>
-            {connected ? "Connecté" : "Connexion..."} · Q:{qualityLabel}
-          </Text>
-          <Text style={styles.audioCallSubtitle}>
-            Interlocuteur{remoteParticipantCount > 1 ? "s" : ""}: {remoteParticipantCount}
-          </Text>
-        </View>
-
-        <View style={styles.audioCallControls}>
-          <Pressable style={styles.controlButton} onPress={toggleMicrophone}>
-            <Text style={styles.controlButtonText}>{isMicrophoneEnabled ? "Mic on" : "Mic off"}</Text>
-          </Pressable>
-          <Pressable style={styles.controlButton} onPress={toggleCamera}>
-            <Text style={styles.controlButtonText}>{isCameraEnabled ? "Cam on" : "Cam off"}</Text>
-          </Pressable>
-          <Pressable style={styles.controlButton} onPress={toggleCameraFacing}>
-            <Text style={styles.controlButtonText}>
-              {cameraFacingMode === "user" ? "Front camera" : "Back camera"}
+        <ScrollView
+          style={styles.chatVideoBottomScroll}
+          contentContainerStyle={styles.chatVideoBottomScrollContent}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator
+        >
+          <View style={styles.chatVideoStatusRow}>
+            <Text style={styles.audioCallSubtitle}>
+              {connected ? "Connecté" : "Connexion..."} · Q:{qualityLabel}
             </Text>
-          </Pressable>
-          <Pressable
-            style={[styles.controlButton, styles.realtimeButton]}
-            onPress={() => setTranslationPanelOpen((current) => !current)}
-          >
-            <Text style={styles.controlButtonText}>
-              {translationPanelOpen ? "Masquer traduction" : "Menu traduction"}
+            <Text style={styles.audioCallSubtitle}>
+              Interlocuteur{remoteParticipantCount > 1 ? "s" : ""}: {remoteParticipantCount}
             </Text>
-          </Pressable>
-        </View>
+          </View>
 
-        {translationPanelOpen ? (
-          <View style={styles.chatVideoTranslationCard}>
+          <View style={[styles.audioCallControls, styles.audioCallControlsWrap]}>
+            <Pressable style={styles.controlButton} onPress={toggleMicrophone}>
+              <Text style={styles.controlButtonText}>{isMicrophoneEnabled ? "Mic on" : "Mic off"}</Text>
+            </Pressable>
+            <Pressable style={styles.controlButton} onPress={toggleCamera}>
+              <Text style={styles.controlButtonText}>{isCameraEnabled ? "Cam on" : "Cam off"}</Text>
+            </Pressable>
+            <Pressable style={styles.controlButton} onPress={toggleCameraFacing}>
+              <Text style={styles.controlButtonText}>
+                {cameraFacingMode === "user" ? "Front camera" : "Back camera"}
+              </Text>
+            </Pressable>
+            <Pressable
+              style={[styles.controlButton, styles.realtimeButton]}
+              onPress={() => setTranslationPanelOpen((current) => !current)}
+            >
+              <Text style={styles.controlButtonText}>
+                {translationPanelOpen ? "Masquer traduction" : "Menu traduction"}
+              </Text>
+            </Pressable>
+          </View>
+
+          {translationPanelOpen ? (
+            <View style={styles.chatVideoTranslationCard}>
             <Text style={styles.panelTitle}>Traduction</Text>
             <Text style={styles.langSelectorLabel}>Langue que tu parles: {sourceLanguageLabel}</Text>
             <ScrollView
@@ -4682,8 +4760,11 @@ function RoomView({
                 Talkie occupe par {talkieLockHolderName || "un interlocuteur"}.
               </Text>
             ) : null}
-          </View>
-        ) : null}
+            </View>
+          ) : null}
+        </ScrollView>
+
+        {renderManualDraftFullscreenModal()}
       </View>
     );
   }
@@ -5540,77 +5621,7 @@ function RoomView({
         ) : null}
       </View>
       ) : null}
-      {useManualDraftFullscreen ? (
-        <Modal
-          visible={manualDraftVisible}
-          animationType="slide"
-          presentationStyle="fullScreen"
-          onRequestClose={() => {
-            if (manualDraftSending) return;
-            cancelManualDraft();
-          }}
-        >
-          <KeyboardAvoidingView
-            style={styles.manualDraftSheetRoot}
-            behavior={Platform.OS === "ios" ? "padding" : undefined}
-            keyboardVerticalOffset={8}
-          >
-            <View style={styles.manualDraftSheetHeader}>
-              <Text style={styles.manualDraftSheetTitle}>Corriger avant envoi</Text>
-              <View style={styles.manualDraftSheetActions}>
-                {keyboardVisible ? (
-                  <Pressable style={styles.manualDraftSheetActionGhost} onPress={dismissKeyboard}>
-                    <Text style={styles.manualDraftSheetActionGhostText}>Clavier</Text>
-                  </Pressable>
-                ) : null}
-                <Pressable
-                  style={[styles.manualDraftSheetActionGhost, manualDraftSending && styles.controlButtonDisabled]}
-                  onPress={cancelManualDraft}
-                  disabled={manualDraftSending}
-                >
-                  <Text style={styles.manualDraftSheetActionGhostText}>Annuler</Text>
-                </Pressable>
-                <Pressable
-                  style={[
-                    styles.manualDraftSheetActionPrimary,
-                    (!manualDraftText.trim() || manualDraftSending) && styles.controlButtonDisabled,
-                  ]}
-                  onPress={() => {
-                    void confirmManualDraftSend();
-                  }}
-                  disabled={!manualDraftText.trim() || manualDraftSending}
-                >
-                  {manualDraftSending ? (
-                    <ActivityIndicator size="small" color="#ffffff" />
-                  ) : (
-                    <Text style={styles.manualDraftSheetActionPrimaryText}>Envoyer</Text>
-                  )}
-                </Pressable>
-              </View>
-            </View>
-
-            <View style={styles.manualDraftSheetBody}>
-              <Text style={styles.realtimeStatus}>
-                Verifie ton texte, puis envoie la version corrigee.
-              </Text>
-              <TextInput
-                style={[styles.aiPromptInput, styles.manualDraftSheetInput]}
-                value={manualDraftText}
-                onChangeText={setManualDraftText}
-                editable={!manualDraftSending}
-                multiline
-                textAlignVertical="top"
-                autoFocus
-                placeholder="Corrige ton texte si besoin..."
-                placeholderTextColor="#64748b"
-                returnKeyType="done"
-                blurOnSubmit
-                onSubmitEditing={dismissKeyboard}
-              />
-            </View>
-          </KeyboardAvoidingView>
-        </Modal>
-      ) : null}
+      {renderManualDraftFullscreenModal()}
     </View>
   );
 }
@@ -5739,6 +5750,10 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
   },
+  audioCallControlsWrap: {
+    flexWrap: "wrap",
+    paddingHorizontal: 10,
+  },
   chatVideoStage: {
     flex: 1,
     paddingHorizontal: 10,
@@ -5781,6 +5796,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingBottom: 6,
     gap: 4,
+  },
+  chatVideoBottomScroll: {
+    maxHeight: "48%",
+  },
+  chatVideoBottomScrollContent: {
+    paddingBottom: 10,
+    gap: 6,
   },
   chatVideoTranslationCard: {
     marginHorizontal: 10,
