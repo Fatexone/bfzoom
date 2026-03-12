@@ -18,6 +18,8 @@ import { LoginOtpScreen } from "./src/screens/LoginOtpScreen";
 import { env } from "./src/config/env";
 import { fetchLiveKitToken } from "./src/services/livekit";
 import {
+  INCOMING_CALL_ACCEPT_ACTION_ID,
+  INCOMING_CALL_DECLINE_ACTION_ID,
   initializeNotifications,
   registerPushTokenForUser,
   unregisterPushTokenForUser,
@@ -410,7 +412,10 @@ export default function App() {
   }, [currentUser]);
 
   useEffect(() => {
-    const openChatFromNotificationData = (data: unknown) => {
+    const openChatFromNotificationData = (
+      data: unknown,
+      actionIdentifier?: string
+    ) => {
       if (!data || typeof data !== "object") return;
       const payload = data as Record<string, unknown>;
       const type = typeof payload.type === "string" ? payload.type.trim() : "";
@@ -429,6 +434,43 @@ export default function App() {
         const modeRaw = typeof payload.mode === "string" ? payload.mode.trim().toLowerCase() : "";
         const mode: "audio" | "video" = modeRaw === "video" ? "video" : "audio";
         const dedupeKey = `${callUUID}:${roomId}:${callerId}`;
+
+        if (
+          actionIdentifier === INCOMING_CALL_DECLINE_ACTION_ID &&
+          chatId &&
+          currentUserRef.current?.uid
+        ) {
+          void endSignalCall({
+            chatId,
+            endedBy: currentUserRef.current.uid,
+            reason: "declined",
+          }).catch(() => {});
+          return;
+        }
+
+        if (
+          actionIdentifier === INCOMING_CALL_ACCEPT_ACTION_ID &&
+          roomId &&
+          callerId
+        ) {
+          void startChatCall({
+            userId: callerId,
+            label: callerName || undefined,
+            mode,
+            chatId,
+            roomId,
+            callUUID,
+            skipRemoteNotify: true,
+          }).catch((error) => {
+            setVoipMessage(
+              error instanceof Error
+                ? error.message
+                : "Impossible de rejoindre l'appel entrant."
+            );
+          });
+          return;
+        }
+
         if (roomId && callerId && dedupeKey && lastHandledIncomingNotificationRef.current !== dedupeKey) {
           lastHandledIncomingNotificationRef.current = dedupeKey;
           setPendingIncomingCallNotification({
@@ -453,13 +495,13 @@ export default function App() {
     void Notifications.getLastNotificationResponseAsync()
       .then((response) => {
         const data = response?.notification?.request?.content?.data;
-        openChatFromNotificationData(data);
+        openChatFromNotificationData(data, response?.actionIdentifier);
       })
       .catch(() => {});
 
     const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
       const data = response.notification.request.content.data;
-      openChatFromNotificationData(data);
+      openChatFromNotificationData(data, response.actionIdentifier);
     });
 
     return () => {

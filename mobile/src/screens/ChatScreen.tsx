@@ -26,6 +26,7 @@ import * as Contacts from "expo-contacts";
 import * as DocumentPicker from "expo-document-picker";
 import * as ImagePicker from "expo-image-picker";
 import { onAuthStateChanged, type User } from "firebase/auth";
+import { Timestamp } from "firebase/firestore";
 import { env } from "../config/env";
 import { auth, db, firebaseConfigured } from "../services/firebase";
 import {
@@ -575,16 +576,24 @@ export function ChatScreen({
     pendingInitialScrollRef.current = Boolean(selectedChatId);
   }, [selectedChatId]);
 
+  const scrollToLatestMessage = useCallback((animated = false) => {
+    messageListRef.current?.scrollToEnd({ animated });
+  }, []);
+
   useEffect(() => {
     if (!selectedChatId) return;
     if (!messages.length) return;
     if (!pendingInitialScrollRef.current) return;
 
-    pendingInitialScrollRef.current = false;
     requestAnimationFrame(() => {
-      messageListRef.current?.scrollToEnd({ animated: false });
+      scrollToLatestMessage(false);
+      // Some devices need a second pass after layout settles.
+      setTimeout(() => {
+        scrollToLatestMessage(false);
+        pendingInitialScrollRef.current = false;
+      }, 180);
     });
-  }, [messages.length, selectedChatId]);
+  }, [messages.length, scrollToLatestMessage, selectedChatId]);
 
   useEffect(() => {
     chatSnapshotReadyRef.current = false;
@@ -1085,6 +1094,18 @@ export function ChatScreen({
       }
       const chatId = await ensureDirectChat(currentUser.uid, target.id);
       setUsersById((current) => ({ ...current, [target.id]: target }));
+      const now = Timestamp.fromMillis(Date.now());
+      setChats((current) => {
+        if (current.some((entry) => entry.id === chatId)) return current;
+        const optimistic: ChatDoc = {
+          id: chatId,
+          type: "direct",
+          participants: [currentUser.uid, target.id],
+          updatedAt: now,
+          lastMessage: null,
+        };
+        return [optimistic, ...current];
+      });
       setSelectedChatId(chatId);
     },
     [currentUser]
@@ -1131,6 +1152,8 @@ export function ChatScreen({
       setCreateFirstName("");
       setCreateLastName("");
       setCreateEmail("");
+      setChatHomeFilter("all");
+      setChatSearch("");
       setOpenHomePanel("chats");
       setNewChatMenuOpen(false);
     } catch (error) {
@@ -2187,6 +2210,10 @@ export function ChatScreen({
             contentContainerStyle={styles.messageList}
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode="on-drag"
+            onLayout={() => {
+              if (!pendingInitialScrollRef.current) return;
+              scrollToLatestMessage(false);
+            }}
             onScrollBeginDrag={Keyboard.dismiss}
             scrollEventThrottle={80}
             onScroll={(event) => {
@@ -2289,8 +2316,12 @@ export function ChatScreen({
             );
             }}
             onContentSizeChange={() => {
+              if (pendingInitialScrollRef.current) {
+                scrollToLatestMessage(false);
+                return;
+              }
               if (!shouldAutoScrollRef.current) return;
-              messageListRef.current?.scrollToEnd({ animated: true });
+              scrollToLatestMessage(true);
             }}
             ListEmptyComponent={
               <View style={styles.emptyState}>

@@ -10,6 +10,10 @@ let notificationsConfigured = false;
 export const MISSED_CALL_NOTIFICATION_TYPE = "missed_call";
 export const MISSED_CALL_CATEGORY_ID = "bfzoom_missed_call";
 export const MISSED_CALL_RECALL_ACTION_ID = "recall_audio";
+export const INCOMING_CALL_NOTIFICATION_TYPE = "incoming_call";
+export const INCOMING_CALL_CATEGORY_ID = "bfzoom_incoming_call";
+export const INCOMING_CALL_ACCEPT_ACTION_ID = "incoming_call_accept";
+export const INCOMING_CALL_DECLINE_ACTION_ID = "incoming_call_decline";
 
 const getProjectId = () => {
   const expoExtra = (Constants.expoConfig?.extra || {}) as {
@@ -37,6 +41,22 @@ export const initializeNotifications = () => {
       buttonTitle: "Rappeler audio",
       options: {
         opensAppToForeground: true,
+      },
+    },
+  ]).catch(() => {});
+  void Notifications.setNotificationCategoryAsync(INCOMING_CALL_CATEGORY_ID, [
+    {
+      identifier: INCOMING_CALL_ACCEPT_ACTION_ID,
+      buttonTitle: "Répondre",
+      options: {
+        opensAppToForeground: true,
+      },
+    },
+    {
+      identifier: INCOMING_CALL_DECLINE_ACTION_ID,
+      buttonTitle: "Refuser",
+      options: {
+        isDestructive: true,
       },
     },
   ]).catch(() => {});
