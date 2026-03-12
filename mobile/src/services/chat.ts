@@ -9,7 +9,6 @@ import {
   getDoc,
   getDocs,
   limit,
-  limitToLast,
   onSnapshot,
   query,
   serverTimestamp,
@@ -206,9 +205,8 @@ export const subscribeMessages = (
   const firestore = requireDb();
   const messageQuery = query(
     collection(firestore, `chats/${chatId}/messages`),
-    // Keep only recent messages while preserving natural chronological order.
-    orderBy("createdAt", "asc"),
-    limitToLast(300)
+    // Firestore RN can hit internal assertion failures with orderBy+limit under local writes.
+    orderBy("createdAt", "asc")
   );
 
   return onSnapshot(
