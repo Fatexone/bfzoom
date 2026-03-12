@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { doc, deleteField, updateDoc } from "firebase/firestore";
 import { db } from "@/lib/firebaseConfig";
 import type { Chat } from "@/types/Chat";
@@ -92,6 +92,17 @@ export default function ChatSidebar({
   const [savingAlias, setSavingAlias] = useState(false);
   const [aliasError, setAliasError] = useState<string | null>(null);
   const [deletingContactId, setDeletingContactId] = useState<string | null>(null);
+
+  const contactInfoByUserId = useMemo(() => {
+    const map: Record<string, { alias: string; email: string }> = {};
+    contacts.forEach((contact) => {
+      map[contact.id] = {
+        alias: (contact.alias || "").trim(),
+        email: (contact.email || "").trim(),
+      };
+    });
+    return map;
+  }, [contacts]);
 
   useEffect(() => {
     if (mode !== "chats" || !showMissedCalls || !onMarkMissedRead) return;
@@ -330,11 +341,12 @@ export default function ChatSidebar({
                   ? chat.participants.find((id) => id !== currentUserId)
                   : null;
               const otherUser = otherId ? userMap[otherId] : null;
+              const contactInfo = otherId ? contactInfoByUserId[otherId] : null;
               const title =
                 chat.type === "group"
                   ? chat.title || "Groupe"
-                  : otherUser?.name || otherUser?.email || "Discussion";
-              const contactEmail = otherUser?.email;
+                  : contactInfo?.alias || otherUser?.name || otherUser?.email || "Discussion";
+              const contactEmail = contactInfo?.email || otherUser?.email;
               const canDeleteChat = chat.createdBy === currentUserId;
               const updatedAtLabel = formatChatUpdatedAt(chat);
               const lastMessagePreview = getLastMessagePreview(chat);
