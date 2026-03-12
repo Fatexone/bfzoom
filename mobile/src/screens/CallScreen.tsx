@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Animated,
   Alert,
+  AppState,
   Image,
   KeyboardAvoidingView,
   Keyboard,
@@ -888,6 +889,8 @@ function RoomView({
   const [coachReplySuggestionsLoading, setCoachReplySuggestionsLoading] = useState(false);
   const [coachSuggestionSpeakingId, setCoachSuggestionSpeakingId] = useState("");
   const [coachPartnerSpeakActive, setCoachPartnerSpeakActive] = useState(false);
+  const appStateRef = useRef(AppState.currentState);
+  const appWasActiveRef = useRef(AppState.currentState === "active");
   const [coachModeId, setCoachModeId] = useState<CoachModeId>(COACH_MODES[0].id);
   const [coachPrompt, setCoachPrompt] = useState("");
   const [coachLocalText, setCoachLocalText] = useState("");
@@ -1784,6 +1787,39 @@ function RoomView({
       }
     };
   }, [setPlaybackAudioMode, stopTtsPlayer]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      const wasActive = appWasActiveRef.current;
+      const isActive = nextState === "active";
+      appStateRef.current = nextState;
+      appWasActiveRef.current = isActive;
+      if (!wasActive || isActive) return;
+
+      // iOS can terminate the app for sustained background CPU usage.
+      manualPushToTalkPressedRef.current = false;
+      manualStartInFlightRef.current = false;
+      pendingStopAfterStartRef.current = false;
+      setTalkieUiState("idle");
+      if (realtimeEnabled) {
+        setRealtimeEnabled(false);
+      }
+      stopTtsPlayer();
+      void recorder.stop().catch(() => {});
+      void setPlaybackAudioMode().catch(() => {});
+      void restoreRoomMicAfterRecorder();
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [
+    realtimeEnabled,
+    recorder,
+    restoreRoomMicAfterRecorder,
+    setPlaybackAudioMode,
+    stopTtsPlayer,
+  ]);
 
   useEffect(() => {
     if (coachConversationEnabled) return;
