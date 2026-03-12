@@ -54,8 +54,8 @@ export default function LandingPage() {
   }
 
   return (
-    <div className={`${bodyFont.className} min-h-screen text-[var(--ink)]`} style={theme}>
-      <div className="relative overflow-hidden bg-[var(--paper)]">
+    <div className={`${bodyFont.className} min-h-screen text-(--ink)`} style={theme}>
+      <div className="relative overflow-hidden bg-(--paper)">
         <div className="absolute inset-0 -z-10 bg-[radial-gradient(40%_40%_at_12%_10%,rgba(14,165,233,0.25),transparent),radial-gradient(45%_35%_at_90%_15%,rgba(245,158,11,0.2),transparent),linear-gradient(180deg,#f8fafc,#eef3f8_40%,#f9fafb)]" />
         <div className="absolute -right-24 top-20 -z-10 h-72 w-72 rounded-full bg-sky-200/60 blur-3xl" />
         <div className="absolute -left-32 bottom-24 -z-10 h-80 w-80 rounded-full bg-amber-200/60 blur-3xl" />

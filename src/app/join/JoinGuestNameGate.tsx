@@ -66,7 +66,7 @@ export default function JoinGuestNameGate({
   };
 
   return (
-    <div className="min-h-dvh bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950 px-4 py-8 text-slate-100">
+    <div className="min-h-dvh bg-linear-to-b from-slate-950 via-slate-900 to-slate-950 px-4 py-8 text-slate-100">
       <div className="mx-auto flex min-h-[70vh] w-full max-w-md items-center justify-center">
         <form
           onSubmit={handleContinue}

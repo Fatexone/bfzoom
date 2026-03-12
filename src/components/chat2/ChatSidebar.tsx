@@ -212,8 +212,8 @@ export default function ChatSidebar({
 
 
   return (
-    <aside className="flex h-full min-h-0 w-full flex-col border-r border-white/10 bg-white/5 backdrop-blur-xl md:w-80">
-      <div className="border-b border-white/10 bg-white/5 p-4">
+    <aside className="flex h-full min-h-0 w-full flex-col border-r border-slate-800 bg-slate-950/95 text-slate-100 backdrop-blur-xl md:w-80">
+      <div className="border-b border-slate-800 bg-slate-900/90 p-4">
         <div className="flex flex-col gap-1">
           <p className="text-lg font-semibold text-white">
             {currentUserName || "Utilisateur"}
@@ -228,7 +228,7 @@ export default function ChatSidebar({
           )}
         </div>
       </div>
-      <div className="p-4 border-b border-white/10">
+      <div className="p-4 border-b border-slate-800">
         <div className="grid grid-cols-2 gap-2">
           <button
             onClick={() => onModeChange("chats")}
@@ -241,7 +241,7 @@ export default function ChatSidebar({
             <span className="inline-flex items-center gap-2">
               Discussions
               {unreadMissedCount > 0 && (
-                <span className="inline-flex min-w-[18px] items-center justify-center rounded-full bg-red-600 px-1.5 py-0.5 text-[10px] font-extrabold text-white">
+                <span className="inline-flex min-w-4.5 items-center justify-center rounded-full bg-red-600 px-1.5 py-0.5 text-[10px] font-extrabold text-white">
                   {unreadMissedCount > 99 ? "99+" : unreadMissedCount}
                 </span>
               )}
@@ -292,7 +292,7 @@ export default function ChatSidebar({
               <p className="text-sm font-semibold text-white">Appels manqués</p>
               <span className="inline-flex items-center gap-2">
                 {unreadMissedCount > 0 ? (
-                  <span className="inline-flex min-w-[18px] items-center justify-center rounded-full bg-red-600 px-1.5 py-0.5 text-[10px] font-extrabold text-white">
+                  <span className="inline-flex min-w-4.5 items-center justify-center rounded-full bg-red-600 px-1.5 py-0.5 text-[10px] font-extrabold text-white">
                     {unreadMissedCount > 99 ? "99+" : unreadMissedCount}
                   </span>
                 ) : null}
@@ -417,7 +417,7 @@ export default function ChatSidebar({
                             {title}
                           </p>
                           {contactEmail && (
-                            <p className="text-[10px] text-gray-400 break-words">
+                            <p className="text-[10px] text-gray-400 wrap-break-word">
                               {maskEmail(contactEmail)}
                             </p>
                           )}

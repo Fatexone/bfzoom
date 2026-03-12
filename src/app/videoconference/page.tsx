@@ -32,8 +32,8 @@ function ResponsiveLayout({ children }: { children: React.ReactNode }) {
     <div
       className={`relative text-slate-900 ${
         isRoomView
-          ? "h-[100dvh] min-h-[100dvh] bg-slate-950"
-          : "min-h-screen bg-gradient-to-b from-blue-50 via-sky-50 to-sky-100"
+          ? "h-dvh min-h-dvh bg-slate-950"
+          : "min-h-screen bg-linear-to-b from-blue-50 via-sky-50 to-sky-100"
       }`}
     >
       <div className="absolute right-4 top-4 z-20">
@@ -68,7 +68,7 @@ function LoadingFallback() {
     locale === "fr" ? "Chargement de la visioconférence…" : "Loading video conference…";
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen bg-gradient-to-b from-blue-50 via-sky-50 to-sky-100 text-slate-700">
+    <div className="flex flex-col items-center justify-center min-h-screen bg-linear-to-b from-blue-50 via-sky-50 to-sky-100 text-slate-700">
       <motion.div
         initial={{ scale: 0.92, opacity: 0 }}
         animate={{ scale: 1, opacity: 1 }}

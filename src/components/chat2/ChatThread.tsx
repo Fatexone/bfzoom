@@ -394,7 +394,7 @@ export default function ChatThread({
                             </div>
                           )}
                           <p
-                            className={`whitespace-pre-wrap break-words leading-relaxed ${
+                            className={`whitespace-pre-wrap wrap-break-word leading-relaxed ${
                               rtlMessage ? "text-right [direction:rtl]" : ""
                             }`}
                           >

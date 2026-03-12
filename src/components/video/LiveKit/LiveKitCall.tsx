@@ -3847,7 +3847,7 @@ export default function LiveKitCall({
     return (
       <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-red-800">
         <p className="font-semibold">Erreur LiveKit</p>
-        <p className="text-sm text-red-800/80 break-words">{error}</p>
+        <p className="text-sm text-red-800/80 wrap-break-word">{error}</p>
         <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-red-800">
           <button
             onClick={handleRetryToken}
@@ -8130,7 +8130,7 @@ function LiveKitConference({
             onClick={(event) => event.stopPropagation()}
           >
             {!aiTrainingAutoStart && (
-            <div className="lk-control-bar flex items-center justify-between gap-2 !border-0 !bg-transparent !p-2 sm:!p-3">
+            <div className="lk-control-bar flex items-center justify-between gap-2 border-0! bg-transparent! p-2! sm:p-3!">
               <div className="flex items-center gap-2">
                 {isHost && !aiTrainingAutoStart && (
                   <button
@@ -8226,7 +8226,7 @@ function LiveKitConference({
                 <button
                   type="button"
                   onClick={handleLeaveRoom}
-                  className="lk-disconnect-button !bg-rose-600/90 !text-white hover:!bg-rose-600"
+                  className="lk-disconnect-button bg-rose-600/90! text-white! hover:bg-rose-600!"
                 >
                   <LogOut className="h-4 w-4" />
                   <span className="hidden sm:inline">Quitter</span>
@@ -8336,10 +8336,10 @@ function LiveKitConference({
                     }
                     className={`inline-flex w-full min-h-10 items-center justify-center gap-2 rounded-full border px-4 py-2 text-[12px] font-semibold shadow-lg ring-1 ring-black/30 transition sm:w-auto ${
                       pushToTalkActive
-                        ? "!border-rose-200 !bg-rose-600 !text-white"
+                        ? "border-rose-200! bg-rose-600! text-white!"
                         : pushToTalkBusy
-                        ? "!border-sky-200 !bg-sky-600 !text-white"
-                        : "!border-emerald-200 !bg-emerald-700 !text-white hover:!bg-emerald-600"
+                        ? "border-sky-200! bg-sky-600! text-white!"
+                        : "border-emerald-200! bg-emerald-700! text-white! hover:bg-emerald-600!"
                     } disabled:cursor-not-allowed disabled:opacity-50`}
                     title={
                       translationControlsDisabled
@@ -9080,7 +9080,7 @@ function AiPartnerAvatarStage({
 
             <div className="grid min-h-0 flex-1 gap-3 md:grid-cols-2">
               <div
-                className="flex min-h-[180px] min-w-0 flex-col rounded-xl border bg-slate-950/55 p-3"
+                className="flex min-h-45 min-w-0 flex-col rounded-xl border bg-slate-950/55 p-3"
                 style={{
                   borderColor: boxingTheme ? "rgba(251, 113, 133, 0.38)" : "rgba(125, 211, 252, 0.35)",
                 }}
@@ -9275,10 +9275,10 @@ function AiPartnerAvatarStage({
                   disabled={pushToTalkDisabled}
                   className={`mt-3 inline-flex w-full min-h-10 items-center justify-center gap-2 rounded-full border px-4 py-2 text-[11px] font-semibold shadow-lg ring-1 ring-black/30 ${
                     pushToTalkActive
-                      ? "!border-rose-200 !bg-rose-600 !text-white"
+                      ? "border-rose-200! bg-rose-600! text-white!"
                       : pushToTalkBusy
-                      ? "!border-sky-200 !bg-sky-600 !text-white"
-                      : "!border-emerald-200 !bg-emerald-700 !text-white hover:!bg-emerald-600"
+                      ? "border-sky-200! bg-sky-600! text-white!"
+                      : "border-emerald-200! bg-emerald-700! text-white! hover:bg-emerald-600!"
                   } disabled:cursor-not-allowed disabled:opacity-50`}
                   title='Maintiens "Maintenir pour parler", puis relache.'
                   aria-label="Maintenir pour parler"
@@ -9388,7 +9388,7 @@ function AiPartnerAvatarStage({
                 )}
               </div>
               <div
-                className="flex min-h-[180px] min-w-0 flex-col rounded-xl border bg-slate-950/55 p-3"
+                className="flex min-h-45 min-w-0 flex-col rounded-xl border bg-slate-950/55 p-3"
                 style={{
                   borderColor: boxingTheme
                     ? "rgba(251, 113, 133, 0.45)"
@@ -11906,7 +11906,7 @@ function LiveKitConferenceMobile({
           onClick={(event) => event.stopPropagation()}
         >
           <div className="bf-mobile-controls-shell max-h-[44dvh] overflow-y-auto rounded-xl border border-slate-700/80 bg-slate-950/90 p-2 shadow-xl backdrop-blur">
-            <div className="bf-mobile-controls flex !border-0 !bg-transparent !p-0 flex-col gap-2">
+            <div className="bf-mobile-controls flex border-0! bg-transparent! p-0! flex-col gap-2">
               {!aiTrainingAutoStart && (
               <div className="flex w-full items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
@@ -11953,7 +11953,7 @@ function LiveKitConferenceMobile({
                   <button
                     type="button"
                     onClick={handleLeaveRoom}
-                    className="lk-disconnect-button !bg-rose-600/90 !text-white hover:!bg-rose-600"
+                    className="lk-disconnect-button bg-rose-600/90! text-white! hover:bg-rose-600!"
                   >
                     <LogOut className="h-4 w-4" />
                     <span className="hidden sm:inline">Quitter</span>
@@ -12161,10 +12161,10 @@ function LiveKitConferenceMobile({
                       disabled={translationControlsDisabled || !pushToTalkSupported || realtimeEnabled}
                       className={`mt-1 inline-flex w-full min-h-11 items-center justify-center gap-2 rounded-full border px-4 py-2 text-[13px] font-semibold shadow-lg ring-1 ring-black/30 ${
                         pushToTalkActive
-                          ? "!border-rose-200 !bg-rose-600 !text-white"
+                          ? "border-rose-200! bg-rose-600! text-white!"
                           : pushToTalkBusy
-                          ? "!border-sky-200 !bg-sky-600 !text-white"
-                          : "!border-emerald-200 !bg-emerald-700 !text-white hover:!bg-emerald-600"
+                          ? "border-sky-200! bg-sky-600! text-white!"
+                          : "border-emerald-200! bg-emerald-700! text-white! hover:bg-emerald-600!"
                       } disabled:cursor-not-allowed disabled:opacity-50`}
                       title={
                         translationControlsDisabled

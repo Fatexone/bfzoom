@@ -4,7 +4,7 @@ import Link from "next/link";
 
 export default function ContactPage() {
   return (
-    <div className="min-h-screen bg-gradient-to-b from-blue-50 via-sky-50 to-sky-100 text-slate-900">
+    <div className="min-h-screen bg-linear-to-b from-blue-50 via-sky-50 to-sky-100 text-slate-900">
       <header className="sticky top-0 z-40 w-full bg-white/90 backdrop-blur border-b border-slate-200">
         <div className="max-w-5xl mx-auto flex items-center justify-between px-4 py-3 sm:px-6 sm:py-4">
           <Link href="/" className="text-lg sm:text-xl font-extrabold tracking-tight">

@@ -729,7 +729,7 @@ function TranslationNotebookPageContent() {
   const entryCountLabel = useMemo(() => `${entries.length}/10`, [entries.length]);
 
   return (
-    <main className="min-h-screen bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950 px-4 py-6 text-slate-100 sm:px-8">
+    <main className="min-h-screen bg-linear-to-b from-slate-950 via-slate-900 to-slate-950 px-4 py-6 text-slate-100 sm:px-8">
       <div className="mx-auto w-full max-w-4xl space-y-4">
         <div className="rounded-2xl border border-slate-700 bg-slate-900/70 p-4 shadow-xl">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -951,7 +951,7 @@ function TranslationNotebookPageContent() {
 
 function TranslationNotebookPageFallback() {
   return (
-    <main className="min-h-screen bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950 px-4 py-6 text-slate-100 sm:px-8">
+    <main className="min-h-screen bg-linear-to-b from-slate-950 via-slate-900 to-slate-950 px-4 py-6 text-slate-100 sm:px-8">
       <div className="mx-auto w-full max-w-4xl">
         <div className="rounded-2xl border border-slate-700 bg-slate-900/70 p-4 shadow-xl">
           <p className="text-sm text-slate-300">Chargement du bloc-notes...</p>

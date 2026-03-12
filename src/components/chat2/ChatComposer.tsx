@@ -824,7 +824,7 @@ function ChatComposerInner(
             )}
           </div>
           <div className="overflow-hidden rounded-xl border border-white/10 bg-black">
-            <div className="relative h-[260px] w-full">
+            <div className="relative h-65 w-full">
               <video
                 ref={photoVideoRef}
                 autoPlay

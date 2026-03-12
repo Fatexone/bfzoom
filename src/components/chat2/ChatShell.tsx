@@ -1770,7 +1770,7 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
   }, [currentUser.id, selectedChatId]);
 
   return (
-    <div className="relative flex h-full min-h-0 w-full overflow-hidden border border-white/10 bg-white/5 shadow-2xl md:h-[calc(100vh-2rem)] md:max-h-225 md:rounded-3xl">
+    <div className="relative flex h-full min-h-0 w-full overflow-hidden border border-slate-800 bg-slate-950 shadow-2xl md:h-[calc(100vh-2rem)] md:max-h-225 md:rounded-3xl">
       <div
         className={`fixed inset-y-0 left-0 z-30 w-[88%] max-w-xs transform border-r border-white/10 bg-gray-950/95 transition-transform duration-300 md:static md:z-auto md:w-80 md:min-h-0 md:bg-white/5 ${
           isSidebarOpen
@@ -1822,7 +1822,7 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
       )}
 
       <div className="relative flex flex-1 min-h-0 flex-col bg-linear-to-br from-gray-950 via-gray-900 to-black">
-        <div className="flex items-center justify-between border-b border-white/10 bg-white/5 px-4 py-3">
+        <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/90 px-4 py-3">
           <p className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-gray-300">
             Chat
             {unreadMissedCount > 0 ? (
@@ -1940,7 +1940,7 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
             disabled={!selectedChatId}
           />
         ) : (
-          <div className="flex items-center justify-center border-t border-white/10 bg-white/5 py-6 text-sm text-gray-300">
+          <div className="flex items-center justify-center border-t border-slate-800 bg-slate-900/80 py-6 text-sm text-gray-300">
             Choisis une discussion pour activer le clavier et les options.
           </div>
         )}

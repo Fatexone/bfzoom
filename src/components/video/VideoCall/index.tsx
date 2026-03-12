@@ -71,7 +71,7 @@ function LiveKitVideoCall({
       className={`flex min-h-dvh safe-bottom safe-x ${
         focusedExerciseMode
           ? "bg-black text-white"
-          : "bg-gradient-to-b from-sky-50 via-blue-50 to-sky-100 text-slate-800"
+          : "bg-linear-to-b from-sky-50 via-blue-50 to-sky-100 text-slate-800"
       }`}
     >
       <div className={focusedExerciseMode ? "w-full" : "w-full max-w-6xl mx-auto p-4 sm:p-6"}>
