@@ -541,7 +541,18 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
             }
           }
 
-          if ((status === "ringing" || status === "in_call") && from && from !== currentUser.id) {
+          const shouldActivateIncomingRinging =
+            status === "ringing" &&
+            from &&
+            from !== currentUser.id &&
+            (!activeCallChatId || activeCallChatId === chat.id);
+          const shouldKeepActiveInCall =
+            status === "in_call" &&
+            from &&
+            from !== currentUser.id &&
+            (activeCallChatId === chat.id || selectedChatId === chat.id || previous?.status === "ringing");
+
+          if (shouldActivateIncomingRinging || shouldKeepActiveInCall) {
             setCallMode(nextCallMode);
             setActiveCallChatId(chat.id);
             setSelectedChatId((current) => (current === chat.id ? current : chat.id));
@@ -561,7 +572,7 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
     return () => {
       unsubscribers.forEach((unsubscribe) => unsubscribe());
     };
-  }, [chats, currentUser.id, userMap]);
+  }, [activeCallChatId, chats, currentUser.id, selectedChatId, userMap]);
   const runCallAction = async (action: () => Promise<void>) => {
     setCallError(null);
     setCallLoading(true);
