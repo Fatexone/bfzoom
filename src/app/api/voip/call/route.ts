@@ -99,6 +99,23 @@ const resolveTargetVoipTokens = async (
     };
   }
 
+  // Backward compatibility: older docs may not use uid as document id.
+  const byUidSnap = await db
+    .collection(VOIP_TOKEN_COLLECTION)
+    .where("uid", "==", targetUid)
+    .limit(1)
+    .get();
+  if (!byUidSnap.empty) {
+    const tokenDoc = byUidSnap.docs[0];
+    const tokens = sanitizeTokenList(tokenDoc.data()?.tokens);
+    if (tokens.length > 0) {
+      return {
+        docId: tokenDoc.id,
+        tokens,
+      };
+    }
+  }
+
   const targetUserSnap = await db.collection("users").doc(targetUid).get();
   if (!targetUserSnap.exists) return null;
   const targetUser = (targetUserSnap.data() ?? {}) as Record<string, unknown>;
@@ -107,6 +124,22 @@ const resolveTargetVoipTokens = async (
     (typeof targetUser.email === "string" ? targetUser.email.toLowerCase() : "");
   const normalizedEmail = targetEmail.trim();
   if (!normalizedEmail) return null;
+
+  const byEmailLowerSnap = await db
+    .collection(VOIP_TOKEN_COLLECTION)
+    .where("emailLower", "==", normalizedEmail)
+    .limit(1)
+    .get();
+  if (!byEmailLowerSnap.empty) {
+    const tokenDoc = byEmailLowerSnap.docs[0];
+    const tokens = sanitizeTokenList(tokenDoc.data()?.tokens);
+    if (tokens.length > 0) {
+      return {
+        docId: tokenDoc.id,
+        tokens,
+      };
+    }
+  }
 
   const byEmailSnap = await db
     .collection(VOIP_TOKEN_COLLECTION)
