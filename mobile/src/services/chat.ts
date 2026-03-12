@@ -178,10 +178,10 @@ export const subscribeChats = (
   onError?: (error: Error) => void
 ): Unsubscribe => {
   const firestore = requireDb();
+  // Do not cap the live query: a hard limit can hide newly created direct contacts.
   const chatsQuery = query(
     collection(firestore, "chats"),
-    where("participants", "array-contains", currentUserId),
-    limit(80)
+    where("participants", "array-contains", currentUserId)
   );
 
   return onSnapshot(

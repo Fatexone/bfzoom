@@ -42,6 +42,14 @@ const FORCED_LOGOUT_MESSAGE =
 
 type AppModule = "home" | "login" | "dashboard" | "conference" | "coach" | "chat";
 const PROTECTED_MODULES: AppModule[] = ["dashboard", "conference", "coach", "chat"];
+type PendingIncomingCallNotification = {
+  chatId: string;
+  roomId: string;
+  callUUID: string;
+  callerId: string;
+  callerName?: string;
+  mode: "audio" | "video";
+};
 const normalizeUrl = (value: string) => value.trim().replace(/\/+$/, "");
 const randomIdentity = (prefix: string) => `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
 const randomRoomId = (prefix: string) => `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
@@ -106,6 +114,8 @@ export default function App() {
   >("checking");
   const [voipMessage, setVoipMessage] = useState("");
   const [pendingChatIdFromNotification, setPendingChatIdFromNotification] = useState("");
+  const [pendingIncomingCallNotification, setPendingIncomingCallNotification] =
+    useState<PendingIncomingCallNotification | null>(null);
 
   const currentUserRef = useRef<User | null>(null);
   const sessionRef = useRef<MobileCallSession | null>(null);
@@ -115,6 +125,7 @@ export default function App() {
   const lastAuthUidRef = useRef("");
   const activePushTokenRef = useRef("");
   const pushTokenOwnerUidRef = useRef("");
+  const lastHandledIncomingNotificationRef = useRef("");
 
   useEffect(() => {
     currentUserRef.current = currentUser;
@@ -408,6 +419,29 @@ export default function App() {
       if (!chatId) return;
 
       setPendingChatIdFromNotification(chatId);
+
+      if (type === "incoming_call") {
+        const roomId = typeof payload.roomId === "string" ? payload.roomId.trim() : "";
+        const callerId = typeof payload.callerId === "string" ? payload.callerId.trim() : "";
+        const callUUID = typeof payload.callUUID === "string" ? payload.callUUID.trim() : "";
+        const callerName =
+          typeof payload.callerName === "string" ? payload.callerName.trim() : "";
+        const modeRaw = typeof payload.mode === "string" ? payload.mode.trim().toLowerCase() : "";
+        const mode: "audio" | "video" = modeRaw === "video" ? "video" : "audio";
+        const dedupeKey = `${callUUID}:${roomId}:${callerId}`;
+        if (roomId && callerId && dedupeKey && lastHandledIncomingNotificationRef.current !== dedupeKey) {
+          lastHandledIncomingNotificationRef.current = dedupeKey;
+          setPendingIncomingCallNotification({
+            chatId,
+            roomId,
+            callUUID,
+            callerId,
+            callerName: callerName || undefined,
+            mode,
+          });
+        }
+      }
+
       if (currentUserRef.current) {
         setActiveModule("chat");
         return;
@@ -432,6 +466,49 @@ export default function App() {
       subscription.remove();
     };
   }, []);
+
+  useEffect(() => {
+    if (!currentUser || !pendingIncomingCallNotification) return;
+    if (sessionRef.current) {
+      setPendingIncomingCallNotification(null);
+      return;
+    }
+
+    const incoming = pendingIncomingCallNotification;
+    Alert.alert(
+      "Appel entrant",
+      `${incoming.callerName || "Contact"} t'appelle (${incoming.mode === "video" ? "visio" : "audio"}).`,
+      [
+        {
+          text: "Refuser",
+          style: "cancel",
+          onPress: () => {
+            setPendingIncomingCallNotification(null);
+          },
+        },
+        {
+          text: "Répondre",
+          onPress: () => {
+            void startChatCall({
+              userId: incoming.callerId,
+              label: incoming.callerName,
+              mode: incoming.mode,
+              chatId: incoming.chatId,
+              roomId: incoming.roomId,
+              callUUID: incoming.callUUID,
+              skipRemoteNotify: true,
+            }).catch((error) => {
+              setVoipMessage(
+                error instanceof Error ? error.message : "Impossible de rejoindre l'appel entrant."
+              );
+            });
+            setPendingIncomingCallNotification(null);
+          },
+        },
+      ],
+      { cancelable: true }
+    );
+  }, [currentUser, pendingIncomingCallNotification, startChatCall]);
 
   useEffect(() => {
     const handleDeepLink = (url: string) => {

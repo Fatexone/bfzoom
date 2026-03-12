@@ -536,6 +536,7 @@ export function ChatScreen({
   const voiceMonitorRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const selectedChatIdRef = useRef<string | null>(null);
   const shouldAutoScrollRef = useRef(true);
+  const pendingInitialScrollRef = useRef(false);
   const chatSnapshotReadyRef = useRef(false);
   const lastChatMessageKeyRef = useRef<Record<string, string>>({});
 
@@ -571,7 +572,19 @@ export function ChatScreen({
   useEffect(() => {
     selectedChatIdRef.current = selectedChatId;
     shouldAutoScrollRef.current = true;
+    pendingInitialScrollRef.current = Boolean(selectedChatId);
   }, [selectedChatId]);
+
+  useEffect(() => {
+    if (!selectedChatId) return;
+    if (!messages.length) return;
+    if (!pendingInitialScrollRef.current) return;
+
+    pendingInitialScrollRef.current = false;
+    requestAnimationFrame(() => {
+      messageListRef.current?.scrollToEnd({ animated: false });
+    });
+  }, [messages.length, selectedChatId]);
 
   useEffect(() => {
     chatSnapshotReadyRef.current = false;

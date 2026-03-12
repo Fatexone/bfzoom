@@ -47,6 +47,7 @@ const sendExpoIncomingCallFallback = async ({
   targetUid,
   chatId,
   roomId,
+  callerId,
   callerName,
   callMode,
   callUUID,
@@ -55,6 +56,7 @@ const sendExpoIncomingCallFallback = async ({
   targetUid: string;
   chatId: string;
   roomId: string;
+  callerId: string;
   callerName: string;
   callMode: "audio" | "video";
   callUUID: string;
@@ -78,6 +80,7 @@ const sendExpoIncomingCallFallback = async ({
       type: "incoming_call",
       chatId,
       roomId,
+      callerId,
       mode: callMode,
       callUUID,
       callerName,
@@ -341,6 +344,7 @@ export async function POST(req: Request) {
       targetUid,
       chatId,
       roomId,
+      callerId: user.uid,
       callerName,
       callMode,
       callUUID,
@@ -373,6 +377,8 @@ export async function POST(req: Request) {
       "content-available": 1,
     },
     callUUID,
+    chatId,
+    callerId: user.uid,
     roomId,
     callerName,
     role,
@@ -434,6 +440,7 @@ export async function POST(req: Request) {
       targetUid,
       chatId,
       roomId,
+      callerId: user.uid,
       callerName,
       callMode,
       callUUID,
