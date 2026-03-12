@@ -9,6 +9,7 @@ import {
   getDoc,
   getDocs,
   limit,
+  limitToLast,
   onSnapshot,
   query,
   serverTimestamp,
@@ -205,9 +206,9 @@ export const subscribeMessages = (
   const firestore = requireDb();
   const messageQuery = query(
     collection(firestore, `chats/${chatId}/messages`),
-    // Keep the listener focused on recent traffic, then restore chronological UI order.
-    orderBy("createdAt", "desc"),
-    limit(300)
+    // Keep only recent messages while preserving natural chronological order.
+    orderBy("createdAt", "asc"),
+    limitToLast(300)
   );
 
   return onSnapshot(
@@ -268,7 +269,7 @@ export const subscribeMessages = (
           createdAt: (data.createdAt as ChatMessageDoc["createdAt"]) || null,
         };
       });
-      onUpdate(messages.reverse());
+      onUpdate(messages);
     },
     (error) => {
       if (onError) {
