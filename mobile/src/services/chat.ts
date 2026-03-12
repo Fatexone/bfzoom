@@ -52,6 +52,19 @@ const toMillis = (value?: { toMillis?: () => number } | null) => {
   return 0;
 };
 
+const normalizeStringArray = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  value.forEach((entry) => {
+    const clean = typeof entry === "string" ? entry.trim() : "";
+    if (!clean || seen.has(clean)) return;
+    seen.add(clean);
+    out.push(clean);
+  });
+  return out;
+};
+
 const normalizeChatDocs = (
   snapshot: QuerySnapshot<DocumentData>,
   currentUserId?: string
@@ -59,6 +72,9 @@ const normalizeChatDocs = (
   const mapped: ChatDoc[] = [];
   snapshot.docs.forEach((chatSnap) => {
     const data = chatSnap.data() as DocumentData;
+    const participants = normalizeStringArray(data.participants);
+    const admins = normalizeStringArray(data.admins);
+    const chatType = data.type === "group" ? "group" : "direct";
     const hiddenBy =
       data.hiddenBy && typeof data.hiddenBy === "object"
         ? (data.hiddenBy as Record<string, boolean>)
@@ -77,11 +93,9 @@ const normalizeChatDocs = (
     }
     mapped.push({
       id: chatSnap.id,
-      type: (data.type as ChatDoc["type"]) || "direct",
-      participants: Array.isArray(data.participants)
-        ? (data.participants as string[])
-        : [],
-      admins: Array.isArray(data.admins) ? (data.admins as string[]) : undefined,
+      type: chatType,
+      participants,
+      admins: admins.length > 0 ? admins : undefined,
       createdBy: typeof data.createdBy === "string" ? data.createdBy : undefined,
       title: typeof data.title === "string" ? data.title : undefined,
       lastMessage: (data.lastMessage as ChatDoc["lastMessage"]) || null,
