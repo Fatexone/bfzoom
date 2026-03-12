@@ -665,6 +665,7 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
         message?: string;
         sent?: number;
         fallback?: string;
+        fallbackSent?: number;
         error?: string;
         detail?: string;
       };
@@ -675,8 +676,12 @@ export default function ChatShell({ currentUser }: { currentUser: User }) {
 
       const degradedNoVoipToken = payload.reason === "target_has_no_voip_token";
       const degradedFirestoreFallback = payload.fallback === "firestore_online";
+      const expoFallbackDelivered =
+        payload.fallback === "expo_push" &&
+        typeof payload.fallbackSent === "number" &&
+        payload.fallbackSent > 0;
 
-      if (degradedNoVoipToken || degradedFirestoreFallback) {
+      if ((degradedNoVoipToken && !expoFallbackDelivered) || degradedFirestoreFallback) {
         return {
           callUUID: (payload.callUUID || "").trim() || undefined,
           degraded: true,

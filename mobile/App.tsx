@@ -403,7 +403,7 @@ export default function App() {
       if (!data || typeof data !== "object") return;
       const payload = data as Record<string, unknown>;
       const type = typeof payload.type === "string" ? payload.type.trim() : "";
-      if (type !== "chat_message") return;
+      if (type !== "chat_message" && type !== "incoming_call") return;
       const chatId = typeof payload.chatId === "string" ? payload.chatId.trim() : "";
       if (!chatId) return;
 

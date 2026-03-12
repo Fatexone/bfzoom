@@ -9,12 +9,15 @@ import { getAdminDb } from "@/lib/firebaseAdmin";
 export const runtime = "nodejs";
 
 const VOIP_TOKEN_COLLECTION = "voip_tokens";
+const EXPO_PUSH_ENDPOINT = "https://exp.host/--/api/v2/push/send";
+const EXPO_TOKEN_REGEX = /^(ExponentPushToken|ExpoPushToken)\[[^\]]+\]$/;
 const ROOM_ID_MAX_LEN = 96;
 const CALLER_NAME_MAX_LEN = 80;
 const IDENTITY_MAX_LEN = 120;
 const DISPLAY_NAME_MAX_LEN = 120;
 
 type StartVoipCallBody = {
+  chatId?: string;
   targetUid?: string;
   roomId?: string;
   callerName?: string;
@@ -30,6 +33,115 @@ type StartVoipCallBody = {
 type VoipTokenLookupResult = {
   docId: string;
   tokens: string[];
+};
+
+const normalizeExpoTokens = (value: unknown) =>
+  Array.isArray(value)
+    ? value
+        .map((item) => (typeof item === "string" ? item.trim() : ""))
+        .filter((token) => token.length > 0 && EXPO_TOKEN_REGEX.test(token))
+    : [];
+
+const sendExpoIncomingCallFallback = async ({
+  db,
+  targetUid,
+  chatId,
+  roomId,
+  callerName,
+  callMode,
+  callUUID,
+}: {
+  db: ReturnType<typeof getAdminDb>;
+  targetUid: string;
+  chatId: string;
+  roomId: string;
+  callerName: string;
+  callMode: "audio" | "video";
+  callUUID: string;
+}) => {
+  const targetUserSnap = await db.collection("users").doc(targetUid).get();
+  if (!targetUserSnap.exists) {
+    return { attempted: false, sent: 0, failed: 0, pruned: 0 };
+  }
+
+  const tokens = normalizeExpoTokens(targetUserSnap.data()?.mobilePushTokens);
+  if (!tokens.length) {
+    return { attempted: false, sent: 0, failed: 0, pruned: 0 };
+  }
+
+  const payload = tokens.map((token) => ({
+    to: token,
+    sound: "default",
+    title: `Appel entrant · ${callerName}`,
+    body: callMode === "video" ? "Appel video entrant." : "Appel audio entrant.",
+    data: {
+      type: "incoming_call",
+      chatId,
+      roomId,
+      mode: callMode,
+      callUUID,
+      callerName,
+    },
+  }));
+
+  let response: Response;
+  try {
+    response = await fetch(EXPO_PUSH_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "Accept-Encoding": "gzip, deflate",
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    return { attempted: true, sent: 0, failed: tokens.length, pruned: 0 };
+  }
+
+  const raw = await response.text().catch(() => "");
+  if (!response.ok || !raw) {
+    return { attempted: true, sent: 0, failed: tokens.length, pruned: 0 };
+  }
+
+  let parsed: { data?: Array<{ status?: string; details?: { error?: string } }> } | null = null;
+  try {
+    parsed = JSON.parse(raw) as { data?: Array<{ status?: string; details?: { error?: string } }> };
+  } catch {
+    parsed = null;
+  }
+
+  if (!parsed || !Array.isArray(parsed.data)) {
+    return { attempted: true, sent: 0, failed: tokens.length, pruned: 0 };
+  }
+
+  let sent = 0;
+  let failed = 0;
+  const invalidTokens: string[] = [];
+  parsed.data.forEach((ticket, index) => {
+    const token = tokens[index];
+    if (!token) return;
+    if (ticket?.status === "ok") {
+      sent += 1;
+      return;
+    }
+    failed += 1;
+    if (ticket?.details?.error === "DeviceNotRegistered") {
+      invalidTokens.push(token);
+    }
+  });
+
+  if (invalidTokens.length > 0) {
+    await db.collection("users").doc(targetUid).set(
+      {
+        mobilePushTokens: FieldValue.arrayRemove(...invalidTokens),
+        lastPushTokenPrunedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+  }
+
+  return { attempted: true, sent, failed, pruned: invalidTokens.length };
 };
 
 const base64Url = (value: string | Buffer) =>
@@ -193,6 +305,7 @@ export async function POST(req: Request) {
     }
   }
 
+  const chatId = trimBounded(body.chatId, 190);
   const targetUid = (body.targetUid || "").trim();
   const roomId = trimBounded(body.roomId, ROOM_ID_MAX_LEN);
   if (!targetUid || !roomId) {
@@ -219,13 +332,29 @@ export async function POST(req: Request) {
   const db = getAdminDb();
   const targetTokenLookup = await resolveTargetVoipTokens(db, targetUid);
   const tokens = targetTokenLookup?.tokens || [];
+  const callMode = body.callMode === "video" ? "video" : "audio";
+  const callerName = trimBounded(body.callerName || user.email || "BFZoom", CALLER_NAME_MAX_LEN);
+  const callUUID = (body.callUUID || randomUUID()).trim().toLowerCase();
   if (!targetTokenLookup || !tokens.length) {
+    const fallback = await sendExpoIncomingCallFallback({
+      db,
+      targetUid,
+      chatId,
+      roomId,
+      callerName,
+      callMode,
+      callUUID,
+    });
     return NextResponse.json(
       {
         ok: true,
         sent: 0,
         total: 0,
         reason: "target_has_no_voip_token",
+        fallback: fallback.sent > 0 ? "expo_push" : "none",
+        fallbackSent: fallback.sent,
+        fallbackFailed: fallback.failed,
+        callUUID,
         message:
           "No VoIP token registered for target user. Falling back to in-app call state only.",
       },
@@ -234,10 +363,7 @@ export async function POST(req: Request) {
   }
   const targetTokenDocId = targetTokenLookup.docId;
 
-  const callerName = trimBounded(body.callerName || user.email || "BFZoom", CALLER_NAME_MAX_LEN);
-  const callUUID = (body.callUUID || randomUUID()).trim().toLowerCase();
   const role = requestedRole;
-  const callMode = body.callMode === "video" ? "video" : "audio";
   const jwt = buildApnsJwt(apnsTeamId, apnsKeyId, apnsPrivateKey);
   const apiBaseFromEnv = trimBounded(process.env.NEXT_PUBLIC_APP_URL || "", 260);
   const livekitFromEnv = trimBounded(process.env.NEXT_PUBLIC_LIVEKIT_URL || "", 260);
@@ -303,6 +429,29 @@ export async function POST(req: Request) {
 
   const successCount = responses.filter((item) => item.ok).length;
   if (!successCount) {
+    const fallback = await sendExpoIncomingCallFallback({
+      db,
+      targetUid,
+      chatId,
+      roomId,
+      callerName,
+      callMode,
+      callUUID,
+    });
+    if (fallback.sent > 0) {
+      return NextResponse.json({
+        ok: true,
+        callUUID,
+        roomId,
+        sent: 0,
+        total: responses.length,
+        removedInvalidTokens: invalidTokens.length,
+        fallback: "expo_push",
+        fallbackSent: fallback.sent,
+        fallbackFailed: fallback.failed,
+        responses,
+      });
+    }
     return NextResponse.json(
       {
         error: "APNS rejected all VoIP push requests.",
