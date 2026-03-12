@@ -1506,6 +1506,12 @@ function RoomView({
   }, [manualDraftVisible]);
 
   useEffect(() => {
+    if (!isChatCall || isChatAudioCall) return;
+    setControlsOpen(false);
+    setTranslationPanelOpen(true);
+  }, [isChatAudioCall, isChatCall]);
+
+  useEffect(() => {
     if (!isCoachSession || !coachConversationEnabled || isChatCall) return;
     setVideoFullscreen(false);
     setControlsOpen(false);
@@ -4565,7 +4571,119 @@ function RoomView({
               {cameraFacingMode === "user" ? "Front camera" : "Back camera"}
             </Text>
           </Pressable>
+          <Pressable
+            style={[styles.controlButton, styles.realtimeButton]}
+            onPress={() => setTranslationPanelOpen((current) => !current)}
+          >
+            <Text style={styles.controlButtonText}>
+              {translationPanelOpen ? "Masquer traduction" : "Menu traduction"}
+            </Text>
+          </Pressable>
         </View>
+
+        {translationPanelOpen ? (
+          <View style={styles.chatVideoTranslationCard}>
+            <Text style={styles.panelTitle}>Traduction</Text>
+            <Text style={styles.langSelectorLabel}>Langue que tu parles: {sourceLanguageLabel}</Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.langScroller}
+              contentContainerStyle={styles.langScrollerContent}
+            >
+              {LANGUAGE_OPTIONS.map((lang) => (
+                <Pressable
+                  key={`chat-src-${lang.code}`}
+                  onPress={() => setSourceLanguage(lang.code)}
+                  onLongPress={() => showLanguageInfo(lang)}
+                  style={[
+                    styles.langChip,
+                    sourceLanguage === lang.code && styles.langChipActive,
+                  ]}
+                >
+                  <Text style={styles.langChipText}>{getLanguageChipLabel(lang)}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+
+            <Text style={styles.langSelectorLabel}>Langue de reception: {targetLanguageLabel}</Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.langScroller}
+              contentContainerStyle={styles.langScrollerContent}
+            >
+              {LANGUAGE_OPTIONS.map((lang) => (
+                <Pressable
+                  key={`chat-dst-${lang.code}`}
+                  onPress={() => setTargetLanguage(lang.code)}
+                  onLongPress={() => showLanguageInfo(lang)}
+                  style={[
+                    styles.langChip,
+                    targetLanguage === lang.code && styles.langChipActive,
+                  ]}
+                >
+                  <Text style={styles.langChipText}>{getLanguageChipLabel(lang)}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+
+            {translationRemainingLabel ? (
+              <Text style={styles.realtimeStatus}>
+                Temps traduction restant (hote): {translationRemainingLabel}
+              </Text>
+            ) : null}
+            {!effectiveTranslationEnabled ? (
+              <Text style={styles.translationLockNotice}>
+                {effectiveTranslationLockMessage || TRANSLATION_WAIT_HOST_HINT}
+              </Text>
+            ) : null}
+
+            <View style={styles.row}>
+              <Animated.View
+                style={talkiePulseEnabled ? { opacity: talkiePulseOpacityRef.current } : undefined}
+              >
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.talkieButton,
+                    isCompactPhone && styles.talkieButtonCompact,
+                    talkieUiState === "starting" && styles.talkieButtonStarting,
+                    talkieLooksRecording && styles.talkieButtonRecording,
+                    (talkieUiState === "stopping" || translationBusy) && styles.talkieButtonBusy,
+                    translationControlsDisabled && styles.talkieButtonLocked,
+                    isTalkieLockedByOther && styles.talkieButtonLocked,
+                    pressed &&
+                      !talkieBusyVisual &&
+                      !translationControlsDisabled &&
+                      !isTalkieLockedByOther &&
+                      talkieUiState === "idle" &&
+                      styles.talkieButtonPressed,
+                  ]}
+                  onPressIn={handleManualPushToTalkPressIn}
+                  onPressOut={handleManualPushToTalkPressOut}
+                  disabled={
+                    translationBusy ||
+                    isTalkieLockedByOther ||
+                    translationControlsDisabled
+                  }
+                >
+                  <View style={styles.talkieButtonContent}>
+                    {(talkieUiState === "starting" ||
+                      talkieUiState === "stopping" ||
+                      translationBusy) && <ActivityIndicator size="small" color="#ffffff" />}
+                    <Text style={styles.talkieButtonText}>{talkieButtonLabel}</Text>
+                  </View>
+                </Pressable>
+              </Animated.View>
+            </View>
+
+            {isTalkieLockedByOther ? (
+              <Text style={styles.realtimeStatus}>
+                Talkie occupe par {talkieLockHolderName || "un interlocuteur"}.
+              </Text>
+            ) : null}
+          </View>
+        ) : null}
       </View>
     );
   }
@@ -5663,6 +5781,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingBottom: 6,
     gap: 4,
+  },
+  chatVideoTranslationCard: {
+    marginHorizontal: 10,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: "#1e293b",
+    borderRadius: 14,
+    backgroundColor: "rgba(2,6,23,0.88)",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 8,
   },
   connectionBadge: {
     paddingHorizontal: 12,

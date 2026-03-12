@@ -205,7 +205,8 @@ export const subscribeMessages = (
   const firestore = requireDb();
   const messageQuery = query(
     collection(firestore, `chats/${chatId}/messages`),
-    orderBy("createdAt", "asc"),
+    // Keep the listener focused on recent traffic, then restore chronological UI order.
+    orderBy("createdAt", "desc"),
     limit(300)
   );
 
@@ -267,7 +268,7 @@ export const subscribeMessages = (
           createdAt: (data.createdAt as ChatMessageDoc["createdAt"]) || null,
         };
       });
-      onUpdate(messages);
+      onUpdate(messages.reverse());
     },
     (error) => {
       if (onError) {
