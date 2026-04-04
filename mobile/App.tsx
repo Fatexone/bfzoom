@@ -1,571 +1,260 @@
 import { StatusBar } from "expo-status-bar";
-import { Alert, Linking, Pressable, StyleSheet, Text, View } from "react-native";
-import * as Notifications from "expo-notifications";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { ActivityIndicator, Linking, Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { onAuthStateChanged, signOut, type User } from "firebase/auth";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import { doc, onSnapshot } from "firebase/firestore";
+import { onAuthStateChanged, signInWithCustomToken, signOut, type User } from "firebase/auth";
+import { I18nProvider, LanguageSwitcher, useI18n } from "./src/i18n";
+import { env } from "./src/config/env";
 import { auth } from "./src/services/firebase";
-import { db } from "./src/services/firebase";
 import { CallScreen } from "./src/screens/CallScreen";
-import { ChatScreen } from "./src/screens/ChatScreen";
 import { ConferenceLobbyScreen } from "./src/screens/ConferenceLobbyScreen";
-import { CoachPracticeScreen } from "./src/screens/CoachPracticeScreen";
 import { DashboardScreen } from "./src/screens/DashboardScreen";
 import { LandingScreen } from "./src/screens/LandingScreen";
 import { LoginOtpScreen } from "./src/screens/LoginOtpScreen";
-import { env } from "./src/config/env";
-import { fetchLiveKitToken } from "./src/services/livekit";
-import {
-  INCOMING_CALL_ACCEPT_ACTION_ID,
-  INCOMING_CALL_DECLINE_ACTION_ID,
-  initializeNotifications,
-  registerPushTokenForUser,
-  unregisterPushTokenForUser,
-} from "./src/services/notifications";
-import {
-  createVoipCallBridge,
-  isVoipCallNativeAvailable,
-  type VoipCallBridge,
-  type VoipCallIncomingPayload,
-} from "./src/services/voipCall";
-import {
-  endSignalCall,
-  startSignalCall,
-  subscribeIncomingSignalCalls,
-} from "./src/services/callSignal";
-import type { LiveKitRole } from "./src/types/livekit";
+import { PocketInterpreterScreen } from "./src/screens/PocketInterpreterScreen";
 import type { MobileCallSession } from "./src/types/session";
 
-const ACTIVE_SESSION_STORAGE_KEY = "bfzoom.activeSessionId";
-const FORCED_LOGOUT_MESSAGE =
-  "Votre compte a ete ouvert sur un autre appareil. Vous avez ete deconnecte de cette session.";
+type ActiveModule = "home" | "login" | "dashboard" | "conference" | "interpreter";
+type AppTargetModule = Exclude<ActiveModule, "login">;
 
-type AppModule = "home" | "login" | "dashboard" | "conference" | "coach" | "chat";
-const PROTECTED_MODULES: AppModule[] = ["dashboard", "conference", "coach", "chat"];
-type PendingIncomingCallNotification = {
-  chatId: string;
-  roomId: string;
-  callUUID: string;
-  callerId: string;
-  callerName?: string;
-  mode: "audio" | "video";
-};
-const normalizeUrl = (value: string) => value.trim().replace(/\/+$/, "");
-const randomIdentity = (prefix: string) => `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
-const randomRoomId = (prefix: string) => `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
-const parseConferenceLink = (rawUrl: string) => {
-  const trimmed = rawUrl.trim();
-  if (!trimmed) return null;
-  try {
-    const parsedUrl = new URL(trimmed);
-    const scheme = parsedUrl.protocol.replace(":", "").toLowerCase();
-    const host = parsedUrl.hostname.toLowerCase();
-    const path = parsedUrl.pathname.toLowerCase();
-    const hostAndPath = `${host}${path}`;
-    const isJoinPath = path === "/join" || path.startsWith("/join/");
-    const isConferenceLink =
-      scheme === "bfzoom"
-        ? hostAndPath.includes("videoconference")
-        : path.startsWith("/videoconference") ||
-          hostAndPath.includes("videoconference") ||
-          isJoinPath;
-    if (!isConferenceLink) return null;
-
-    const roomFromQuery = (parsedUrl.searchParams.get("room") || "").trim();
-    const roomFromJoinPath = isJoinPath
-      ? decodeURIComponent(parsedUrl.pathname.split("/").filter(Boolean)[1] || "").trim()
-      : "";
-    const roomId = roomFromQuery || roomFromJoinPath;
-    if (!roomId) return null;
-    return {
-      roomId,
-      host: parsedUrl.searchParams.get("host") === "1",
-    };
-  } catch {
-    const looksConference =
-      /videoconference/i.test(trimmed) || /\/join\//i.test(trimmed) || /^bfzoom:\/\//i.test(trimmed);
-    if (!looksConference) return null;
-    const queryIndex = trimmed.indexOf("?");
-    const query = queryIndex >= 0 ? trimmed.slice(queryIndex + 1) : "";
-    const params = new URLSearchParams(query);
-    const roomFromQuery = (params.get("room") || "").trim();
-    const joinMatch = trimmed.match(/\/join\/([^/?#]+)/i);
-    const roomFromJoinPath = joinMatch?.[1] ? decodeURIComponent(joinMatch[1]).trim() : "";
-    const roomId = roomFromQuery || roomFromJoinPath;
-    if (!roomId) return null;
-    return {
-      roomId,
-      host: params.get("host") === "1",
-    };
-  }
-};
-
-export default function App() {
+function AppShell() {
+  const { language } = useI18n();
   const [session, setSession] = useState<MobileCallSession | null>(null);
-  const [activeModule, setActiveModule] = useState<AppModule>("home");
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [loginTargetModule, setLoginTargetModule] = useState<AppModule>("dashboard");
-  const [conferenceCreateIntent, setConferenceCreateIntent] = useState(false);
-  const [activeVoipCallUUID, setActiveVoipCallUUID] = useState("");
-  const [deepLinkRoomId, setDeepLinkRoomId] = useState("");
-  const [deepLinkAutoJoinGuest, setDeepLinkAutoJoinGuest] = useState(false);
-  const [voipStatus, setVoipStatus] = useState<
-    "checking" | "active" | "inactive" | "error" | "unsupported"
-  >("checking");
-  const [voipMessage, setVoipMessage] = useState("");
-  const [pendingChatIdFromNotification, setPendingChatIdFromNotification] = useState("");
-  const [pendingIncomingCallNotification, setPendingIncomingCallNotification] =
-    useState<PendingIncomingCallNotification | null>(null);
-
-  const currentUserRef = useRef<User | null>(null);
-  const sessionRef = useRef<MobileCallSession | null>(null);
-  const activeVoipCallUUIDRef = useRef("");
-  const voipBridgeRef = useRef<VoipCallBridge | null>(null);
-  const lastHandledDeepLinkRef = useRef("");
-  const lastAuthUidRef = useRef("");
-  const activePushTokenRef = useRef("");
-  const pushTokenOwnerUidRef = useRef("");
-  const lastHandledIncomingNotificationRef = useRef("");
-
-  useEffect(() => {
-    currentUserRef.current = currentUser;
-  }, [currentUser]);
-
-  useEffect(() => {
-    activeVoipCallUUIDRef.current = activeVoipCallUUID;
-  }, [activeVoipCallUUID]);
-
-  useEffect(() => {
-    sessionRef.current = session;
-  }, [session]);
-
-  const endActiveVoipCall = useCallback((reason = "ended") => {
-    const callUUID = activeVoipCallUUIDRef.current;
-    if (!callUUID) return;
-    activeVoipCallUUIDRef.current = "";
-    setActiveVoipCallUUID("");
-    void voipBridgeRef.current?.endCall(callUUID, reason).catch(() => {});
-  }, []);
-
-  const registerVoipToken = useCallback(async (token: string) => {
-    const voipToken = token.trim();
-    const user = currentUserRef.current;
-    if (!voipToken || !user) return;
-
-    const bearerToken = await user.getIdToken().catch(() => "");
-    if (!bearerToken) return;
-
-    const apiBaseUrl = normalizeUrl(env.apiBaseUrl);
-    if (!apiBaseUrl) return;
-
-    try {
-      const response = await fetch(`${apiBaseUrl}/api/voip/register`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${bearerToken}`,
-        },
-        body: JSON.stringify({
-          token: voipToken,
-          platform: "ios",
-        }),
-      });
-
-      if (response.status === 404 || response.status === 405) {
-        return;
-      }
-      if (!response.ok) {
-        throw new Error(`VoIP token registration failed (${response.status})`);
-      }
-    } catch (error) {
-      console.warn(
-        error instanceof Error
-          ? error.message
-          : "VoIP token registration failed."
-      );
-    }
-  }, []);
-
-  const joinFromVoipAnswer = useCallback(async (payload: VoipCallIncomingPayload) => {
-    const roomId = payload.roomId.trim();
-    if (!roomId) throw new Error("Incoming call payload missing roomId.");
-
-    const role: LiveKitRole = payload.role === "host" ? "host" : "guest";
-    const user = currentUserRef.current;
-    const apiBaseUrl = normalizeUrl(payload.apiBaseUrl || env.apiBaseUrl);
-    const livekitUrl = normalizeUrl(payload.livekitUrl || env.livekitUrl);
-    if (!apiBaseUrl) throw new Error("Missing API base URL for incoming call.");
-    if (!livekitUrl) throw new Error("Missing LiveKit URL for incoming call.");
-
-    const identity =
-      payload.identity?.trim() ||
-      (user?.uid ? `${user.uid}-${role}` : randomIdentity(role));
-    const displayName =
-      payload.displayName?.trim() ||
-      user?.email ||
-      payload.callerName?.trim() ||
-      "BFZoom Guest";
-    const bearerToken =
-      payload.bearerToken?.trim() ||
-      (user ? await user.getIdToken().catch(() => "") : "");
-
-    const livekitAuth = await fetchLiveKitToken({
-      apiBaseUrl,
-      payload: {
-        room: roomId,
-        identity,
-        name: displayName,
-        role,
-      },
-      bearerToken,
-    });
-
-    const nextSession: MobileCallSession = {
-      apiBaseUrl,
-      livekitUrl,
-      roomId,
-      role,
-      identity,
-      displayName,
-      livekitToken: livekitAuth.token,
-      bearerToken: bearerToken || undefined,
-      callMode: payload.callMode || "audio",
-      originModule: "conference",
-    };
-
-    setConferenceCreateIntent(false);
-    setSession(nextSession);
-    setActiveModule("conference");
-    setActiveVoipCallUUID(payload.callUUID);
-    activeVoipCallUUIDRef.current = payload.callUUID;
-    void voipBridgeRef.current?.reportConnected(payload.callUUID).catch(() => {});
-  }, []);
-
-  const startChatCall = useCallback(
-    async ({
-      userId,
-      label,
-      mode,
-      chatId,
-      roomId,
-      callUUID,
-      skipRemoteNotify,
-    }: {
-      userId: string;
-      label?: string;
-      mode: "audio" | "video";
-      chatId?: string;
-      roomId?: string;
-      callUUID?: string;
-      skipRemoteNotify?: boolean;
-    }) => {
-      const targetUid = userId.trim();
-      const normalizedChatId = (chatId || "").trim();
-      if (!targetUid) {
-        throw new Error("Contact introuvable.");
-      }
-
-      const user = currentUserRef.current;
-      if (!user) {
-        setLoginTargetModule("chat");
-        setActiveModule("login");
-        throw new Error("Connecte-toi pour lancer un appel.");
-      }
-
-      const apiBaseUrl = normalizeUrl(env.apiBaseUrl);
-      const livekitUrl = normalizeUrl(env.livekitUrl);
-      if (!apiBaseUrl) {
-        throw new Error("API BFZoom indisponible.");
-      }
-      if (!livekitUrl) {
-        throw new Error("LiveKit URL manquante.");
-      }
-
-      const bearerToken = await user.getIdToken(true).catch(() => "");
-      if (!bearerToken) {
-        throw new Error("Session expirée. Reconnecte-toi.");
-      }
-
-      const normalizedRoomId = (roomId || "").trim() || randomRoomId("chat");
-      const identity = user.uid ? `${user.uid}-caller` : randomIdentity("caller");
-      const displayName = user.email || "BFZoom caller";
-      const livekitAuth = await fetchLiveKitToken({
-        apiBaseUrl,
-        payload: {
-          room: normalizedRoomId,
-          identity,
-          name: displayName,
-          role: "guest",
-        },
-        bearerToken,
-      });
-
-      const nextSession: MobileCallSession = {
-        apiBaseUrl,
-        livekitUrl,
-        roomId: normalizedRoomId,
-        chatId: normalizedChatId || undefined,
-        role: "guest",
-        identity,
-        displayName,
-        livekitToken: livekitAuth.token,
-        bearerToken,
-        callMode: mode,
-        originModule: "chat",
-      };
-
-      const normalizedCallUUID = (callUUID || "").trim() || randomIdentity("call");
-
-      if (!skipRemoteNotify && normalizedChatId) {
-        await startSignalCall({
-          chatId: normalizedChatId,
-          roomId: normalizedRoomId,
-          fromUserId: user.uid,
-          targetUserId: targetUid,
-          callMode: mode,
-          callUUID: normalizedCallUUID,
-        });
-      }
-
-      if (!skipRemoteNotify) {
-        const pushResponse = await fetch(`${apiBaseUrl}/api/voip/call`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${bearerToken}`,
-          },
-          body: JSON.stringify({
-            targetUid,
-            roomId: normalizedRoomId,
-            callerName: displayName,
-            role: "guest",
-            callMode: mode,
-            callUUID: normalizedCallUUID,
-            apiBaseUrl,
-            livekitUrl,
-          }),
-        });
-
-        if (!pushResponse.ok) {
-          const raw = await pushResponse.text().catch(() => "");
-          let detail = raw.trim();
-          if (detail.startsWith("{")) {
-            try {
-              const parsed = JSON.parse(detail) as { error?: string; detail?: string };
-              detail = (parsed.detail || parsed.error || "").trim() || detail;
-            } catch {}
-          }
-          setVoipMessage(
-            `Le destinataire n'a pas pu etre notifie (${pushResponse.status}). ${
-              detail || `target=${label || targetUid}`
-            }`
-          );
-        }
-      }
-
-      setConferenceCreateIntent(false);
-      setDeepLinkAutoJoinGuest(false);
-      setDeepLinkRoomId("");
-      setSession(nextSession);
-      setActiveModule("chat");
-    },
-    []
+  const [activeModule, setActiveModule] = useState<ActiveModule>("home");
+  const [loginTargetModule, setLoginTargetModule] = useState<Exclude<ActiveModule, "login">>(
+    "dashboard"
   );
+  const [conferenceCreateIntent, setConferenceCreateIntent] = useState(false);
+  const [deepLinkJoinToken, setDeepLinkJoinToken] = useState("");
+  const [deepLinkAutoJoinGuest, setDeepLinkAutoJoinGuest] = useState(false);
+  const [dashboardGuestBootstrapPending, setDashboardGuestBootstrapPending] = useState(false);
+  const [dashboardGuestBootstrapError, setDashboardGuestBootstrapError] = useState("");
+  const [dashboardGuestBootstrapAttempt, setDashboardGuestBootstrapAttempt] = useState(0);
+  const hasRegisteredUser = Boolean(currentUser?.email);
+  const hasConferenceGuestAccess =
+    Boolean(session?.role === "guest") ||
+    deepLinkAutoJoinGuest ||
+    Boolean(deepLinkJoinToken.trim());
 
   useEffect(() => {
     if (!auth) return;
-    const unsub = onAuthStateChanged(auth, (user) => {
-      setCurrentUser(user);
+    const unsubscribe = onAuthStateChanged(auth, (nextUser) => {
+      console.log(
+        `[BFZoom][auth] onAuthStateChanged hasUser=${Boolean(nextUser)} uid=${nextUser?.uid ?? "none"}`
+      );
+      setCurrentUser(nextUser);
     });
-    return () => unsub();
+    return () => unsubscribe();
   }, []);
 
   useEffect(() => {
-    initializeNotifications();
-  }, []);
+    console.log(
+      `[BFZoom][nav] activeModule=${activeModule} loginTarget=${loginTargetModule} hasUser=${Boolean(
+        currentUser
+      )} hasSession=${Boolean(session)}`
+    );
+  }, [activeModule, currentUser, loginTargetModule, session]);
 
   useEffect(() => {
-    const nextUid = currentUser?.uid || "";
-    const prevUid = lastAuthUidRef.current;
-    const currentToken = activePushTokenRef.current;
-
-    if (prevUid && prevUid !== nextUid && currentToken) {
-      void unregisterPushTokenForUser(prevUid, currentToken).catch(() => {});
-      activePushTokenRef.current = "";
-      pushTokenOwnerUidRef.current = "";
-    }
-
-    lastAuthUidRef.current = nextUid;
-
-    if (!nextUid) return;
-
-    void registerPushTokenForUser(nextUid)
-      .then((token) => {
-        const cleanToken = token.trim();
-        if (!cleanToken) return;
-        activePushTokenRef.current = cleanToken;
-        pushTokenOwnerUidRef.current = nextUid;
-      })
-      .catch(() => {});
-  }, [currentUser]);
+    if (activeModule === "dashboard") return;
+    if (activeModule !== "conference" && activeModule !== "interpreter") return;
+    if (activeModule === "conference" && hasConferenceGuestAccess) return;
+    if (hasRegisteredUser) return;
+    setLoginTargetModule(activeModule);
+    setActiveModule("login");
+  }, [activeModule, hasConferenceGuestAccess, hasRegisteredUser]);
 
   useEffect(() => {
-    const openChatFromNotificationData = (
-      data: unknown,
-      actionIdentifier?: string
-    ) => {
-      if (!data || typeof data !== "object") return;
-      const payload = data as Record<string, unknown>;
-      const type = typeof payload.type === "string" ? payload.type.trim() : "";
-      if (type !== "chat_message" && type !== "incoming_call") return;
-      const chatId = typeof payload.chatId === "string" ? payload.chatId.trim() : "";
-      if (!chatId) return;
-
-      setPendingChatIdFromNotification(chatId);
-
-      if (type === "incoming_call") {
-        const roomId = typeof payload.roomId === "string" ? payload.roomId.trim() : "";
-        const callerId = typeof payload.callerId === "string" ? payload.callerId.trim() : "";
-        const callUUID = typeof payload.callUUID === "string" ? payload.callUUID.trim() : "";
-        const callerName =
-          typeof payload.callerName === "string" ? payload.callerName.trim() : "";
-        const modeRaw = typeof payload.mode === "string" ? payload.mode.trim().toLowerCase() : "";
-        const mode: "audio" | "video" = modeRaw === "video" ? "video" : "audio";
-        const dedupeKey = `${callUUID}:${roomId}:${callerId}`;
-
-        if (
-          actionIdentifier === INCOMING_CALL_DECLINE_ACTION_ID &&
-          chatId &&
-          currentUserRef.current?.uid
-        ) {
-          void endSignalCall({
-            chatId,
-            endedBy: currentUserRef.current.uid,
-            reason: "declined",
-          }).catch(() => {});
-          return;
-        }
-
-        if (
-          actionIdentifier === INCOMING_CALL_ACCEPT_ACTION_ID &&
-          roomId &&
-          callerId
-        ) {
-          void startChatCall({
-            userId: callerId,
-            label: callerName || undefined,
-            mode,
-            chatId,
-            roomId,
-            callUUID,
-            skipRemoteNotify: true,
-          }).catch((error) => {
-            setVoipMessage(
-              error instanceof Error
-                ? error.message
-                : "Impossible de rejoindre l'appel entrant."
-            );
-          });
-          return;
-        }
-
-        if (roomId && callerId && dedupeKey && lastHandledIncomingNotificationRef.current !== dedupeKey) {
-          lastHandledIncomingNotificationRef.current = dedupeKey;
-          setPendingIncomingCallNotification({
-            chatId,
-            roomId,
-            callUUID,
-            callerId,
-            callerName: callerName || undefined,
-            mode,
-          });
-        }
+    const authInstance = auth;
+    if (activeModule !== "dashboard" || currentUser || !authInstance) {
+      setDashboardGuestBootstrapPending(false);
+      if (currentUser || activeModule !== "dashboard") {
+        setDashboardGuestBootstrapError("");
       }
-
-      if (currentUserRef.current) {
-        setActiveModule("chat");
-        return;
-      }
-      setLoginTargetModule("chat");
-      setActiveModule("login");
-    };
-
-    void Notifications.getLastNotificationResponseAsync()
-      .then((response) => {
-        const data = response?.notification?.request?.content?.data;
-        openChatFromNotificationData(data, response?.actionIdentifier);
-      })
-      .catch(() => {});
-
-    const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
-      const data = response.notification.request.content.data;
-      openChatFromNotificationData(data, response.actionIdentifier);
-    });
-
-    return () => {
-      subscription.remove();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!currentUser || !pendingIncomingCallNotification) return;
-    if (sessionRef.current) {
-      setPendingIncomingCallNotification(null);
       return;
     }
-
-    const incoming = pendingIncomingCallNotification;
-    Alert.alert(
-      "Appel entrant",
-      `${incoming.callerName || "Contact"} t'appelle (${incoming.mode === "video" ? "visio" : "audio"}).`,
-      [
-        {
-          text: "Refuser",
-          style: "cancel",
-          onPress: () => {
-            setPendingIncomingCallNotification(null);
-          },
-        },
-        {
-          text: "Répondre",
-          onPress: () => {
-            void startChatCall({
-              userId: incoming.callerId,
-              label: incoming.callerName,
-              mode: incoming.mode,
-              chatId: incoming.chatId,
-              roomId: incoming.roomId,
-              callUUID: incoming.callUUID,
-              skipRemoteNotify: true,
-            }).catch((error) => {
-              setVoipMessage(
-                error instanceof Error ? error.message : "Impossible de rejoindre l'appel entrant."
-              );
-            });
-            setPendingIncomingCallNotification(null);
-          },
-        },
-      ],
-      { cancelable: true }
-    );
-  }, [currentUser, pendingIncomingCallNotification, startChatCall]);
+    let cancelled = false;
+    setDashboardGuestBootstrapPending(true);
+    setDashboardGuestBootstrapError("");
+    const apiBaseUrl = env.apiBaseUrl.trim().replace(/\/+$/, "");
+    if (!apiBaseUrl) {
+      setDashboardGuestBootstrapPending(false);
+      setDashboardGuestBootstrapError(
+        language === "fr"
+          ? "Impossible d'ouvrir les packs iPhone pour l'instant."
+          : "Unable to open iPhone packs right now."
+      );
+      return;
+    }
+    void fetch(`${apiBaseUrl}/api/auth/guest`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+    })
+      .then(async (response) => {
+        const payload = (await response.json().catch(() => ({}))) as {
+          token?: string;
+          error?: string;
+        };
+        if (!response.ok || !payload.token) {
+          throw new Error(payload.error || "Guest access unavailable.");
+        }
+        return signInWithCustomToken(authInstance, payload.token);
+      })
+      .catch((error) => {
+        console.log(
+          `[BFZoom][auth] anonymous_dashboard_bootstrap_failed=${
+            error instanceof Error ? error.message : "unknown_error"
+          }`
+        );
+        if (cancelled) return;
+        setDashboardGuestBootstrapError(
+          language === "fr"
+            ? "L'ouverture des packs sans compte a échoué. Réessaie."
+            : "Opening packs without an account failed. Please retry."
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setDashboardGuestBootstrapPending(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeModule, currentUser, dashboardGuestBootstrapAttempt, language]);
 
   useEffect(() => {
-    const handleDeepLink = (url: string) => {
-      if (!url) return;
-      if (lastHandledDeepLinkRef.current === url) return;
-      const parsed = parseConferenceLink(url);
-      if (!parsed) return;
+    if (!session) return;
+    if (currentUser || session.role === "guest") return;
+    setSession(null);
+    setActiveModule("home");
+  }, [currentUser, session]);
 
-      lastHandledDeepLinkRef.current = url;
-      setDeepLinkRoomId(parsed.roomId);
-      // For shared links we always default to guest join to avoid host allowlist lock.
-      setDeepLinkAutoJoinGuest(true);
+  useEffect(() => {
+    if (currentUser || !conferenceCreateIntent) return;
+    setConferenceCreateIntent(false);
+  }, [conferenceCreateIntent, currentUser]);
+
+  const handleSessionLeave = useCallback(
+    (
+      endedSession: MobileCallSession,
+      nextModule: AppTargetModule = "conference",
+      leaveReason?: string
+    ) => {
+      setSession(null);
       setConferenceCreateIntent(false);
-      setLoginTargetModule("conference");
-      setActiveModule(currentUserRef.current ? "conference" : "login");
+      setDeepLinkAutoJoinGuest(false);
+      setDeepLinkJoinToken("");
+      setActiveModule(currentUser ? nextModule : "home");
+
+      if (endedSession.role !== "host") return;
+      if (leaveReason === "host_room_ended") return;
+      const apiBaseUrl = endedSession.apiBaseUrl.trim().replace(/\/+$/, "");
+      const roomId = endedSession.roomId.trim();
+      if (!apiBaseUrl || !roomId) return;
+
+      void (async () => {
+        const freshToken = auth?.currentUser ? await auth.currentUser.getIdToken().catch(() => "") : "";
+        const bearerToken = (freshToken || endedSession.bearerToken || "").trim();
+        if (!bearerToken) return;
+        try {
+          await fetch(`${apiBaseUrl}/api/livekit/room/end`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${bearerToken}`,
+            },
+            body: JSON.stringify({ room: roomId }),
+          });
+        } catch {}
+      })();
+    },
+    [currentUser]
+  );
+
+  useEffect(() => {
+    const parseAppTargetFromUrl = (value: string): AppTargetModule | null => {
+      try {
+        const url = new URL(value);
+        const host = url.hostname.trim().toLowerCase();
+        const firstSegment = url.pathname.split("/").filter(Boolean)[0]?.toLowerCase() || "";
+        const candidate = [host, firstSegment].find(
+          (part) =>
+            part === "home" ||
+            part === "dashboard" ||
+            part === "conference" ||
+            part === "interpreter"
+        );
+        return candidate ? (candidate as AppTargetModule) : null;
+      } catch {
+        return null;
+      }
+    };
+
+    const parseJoinTokenFromUrl = (value: string) => {
+      const raw = value.trim();
+      if (!raw) return "";
+
+      try {
+        const url = new URL(raw);
+        const inviteQuery = (url.searchParams.get("invite") || "").trim();
+        if (inviteQuery) return inviteQuery;
+
+        const host = url.hostname.trim().toLowerCase();
+        const segments = url.pathname.split("/").filter(Boolean);
+        if (host === "join" && segments[0]) {
+          return decodeURIComponent(segments[0]);
+        }
+        const joinIndex = segments.findIndex((segment) => segment === "join");
+        if (joinIndex >= 0 && segments[joinIndex + 1]) {
+          return decodeURIComponent(segments[joinIndex + 1]);
+        }
+      } catch {
+        const match = raw.match(/\/join\/([^/?#]+)/i);
+        if (match?.[1]) {
+          return decodeURIComponent(match[1]);
+        }
+        const inviteQueryMatch = raw.match(/[?&]invite=([^&#]+)/i);
+        if (inviteQueryMatch?.[1]) {
+          return decodeURIComponent(inviteQueryMatch[1]);
+        }
+      }
+
+      return "";
+    };
+
+    const handleDeepLink = (url: string) => {
+      const joinToken = parseJoinTokenFromUrl(url);
+      if (joinToken) {
+        setDeepLinkJoinToken(joinToken);
+        setDeepLinkAutoJoinGuest(true);
+        setConferenceCreateIntent(false);
+        setActiveModule("conference");
+        return;
+      }
+
+      const targetModule = parseAppTargetFromUrl(url);
+      if (targetModule) {
+        setConferenceCreateIntent(false);
+        setDeepLinkJoinToken("");
+        setDeepLinkAutoJoinGuest(false);
+        if (targetModule === "home") {
+          setActiveModule("home");
+          return;
+        }
+        if (targetModule === "dashboard") {
+          setActiveModule("dashboard");
+          return;
+        }
+        if (currentUser) {
+          setActiveModule(targetModule);
+        } else {
+          setLoginTargetModule(targetModule);
+          setActiveModule("login");
+        }
+        return;
+      }
     };
 
     void Linking.getInitialURL()
@@ -579,175 +268,24 @@ export default function App() {
     });
 
     return () => sub.remove();
-  }, []);
-
-  useEffect(() => {
-    if (!currentUser && PROTECTED_MODULES.includes(activeModule)) {
-      setLoginTargetModule(activeModule);
-      setActiveModule("login");
-    }
-  }, [activeModule, currentUser]);
-
-  useEffect(() => {
-    if (currentUser || !session) return;
-    endActiveVoipCall("ended");
-    setSession(null);
-    setActiveModule("login");
-  }, [currentUser, endActiveVoipCall, session]);
-
-  useEffect(() => {
-    if (!currentUser && conferenceCreateIntent) {
-      setConferenceCreateIntent(false);
-    }
-  }, [conferenceCreateIntent, currentUser]);
-
-  useEffect(() => {
-    if (!currentUser) return;
-
-    const unsubscribe = subscribeIncomingSignalCalls({
-      userId: currentUser.uid,
-      onIncoming: (incoming) => {
-        if (!incoming) return;
-        if (sessionRef.current) return;
-
-        setPendingChatIdFromNotification(incoming.chatId);
-        setActiveModule("chat");
-      },
-    });
-
-    return () => unsubscribe();
-  }, [currentUser]);
-
-  useEffect(() => {
-    if (!isVoipCallNativeAvailable()) {
-      setVoipStatus("unsupported");
-      setVoipMessage("Bridge VoIP natif indisponible sur cet appareil.");
-      return;
-    }
-
-    setVoipStatus("checking");
-    setVoipMessage("");
-
-    const bridge = createVoipCallBridge({
-      onToken: (token) => {
-        void registerVoipToken(token);
-      },
-      onCallAnswered: (payload) => {
-        void joinFromVoipAnswer(payload).catch((error) => {
-          void voipBridgeRef.current
-            ?.endCall(payload.callUUID, "failed")
-            .catch(() => {});
-          console.warn(
-            error instanceof Error
-              ? error.message
-              : "Unable to join room after CallKit answer."
-          );
-        });
-      },
-      onCallEnded: (payload) => {
-        if (payload.callUUID !== activeVoipCallUUIDRef.current) return;
-        activeVoipCallUUIDRef.current = "";
-        setActiveVoipCallUUID("");
-        setSession(null);
-        if (!currentUserRef.current) {
-          setActiveModule("login");
-          return;
-        }
-        setActiveModule(sessionRef.current?.originModule || "conference");
-      },
-      onError: (message) => {
-        setVoipStatus("error");
-        setVoipMessage(message || "Erreur bridge VoIP.");
-        console.warn(message);
-      },
-    });
-
-    voipBridgeRef.current = bridge;
-    void bridge
-      .start()
-      .then(() => {
-        setVoipStatus("active");
-        setVoipMessage("");
-      })
-      .catch((error) => {
-        setVoipStatus("error");
-        setVoipMessage(error instanceof Error ? error.message : "Impossible d'activer la VoIP.");
-      });
-    return () => {
-      bridge.dispose();
-      voipBridgeRef.current = null;
-      setVoipStatus("inactive");
-    };
-  }, [joinFromVoipAnswer, registerVoipToken]);
-
-  useEffect(() => {
-    if (!currentUser) return;
-    const bridge = voipBridgeRef.current;
-    if (!bridge) return;
-    void bridge
-      .getVoipToken()
-      .then((token) => {
-        if (!token) return Promise.resolve();
-        return registerVoipToken(token);
-      })
-      .catch(() => {});
-  }, [currentUser, registerVoipToken]);
-
-  useEffect(() => {
-    if (!currentUser || !db || !auth) return;
-
-    let handledMismatch = false;
-    const userRef = doc(db, "users", currentUser.uid);
-    const unsubscribe = onSnapshot(
-      userRef,
-      (snapshot) => {
-        void (async () => {
-          const remoteSessionId =
-            typeof snapshot.data()?.activeSessionId === "string"
-              ? snapshot.data()?.activeSessionId.trim()
-              : "";
-          if (!remoteSessionId) return;
-
-          const localSessionId = (await AsyncStorage.getItem(ACTIVE_SESSION_STORAGE_KEY))?.trim() || "";
-
-          // Backward compatibility for users already connected before the session guard.
-          if (!localSessionId) {
-            await AsyncStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, remoteSessionId);
-            return;
-          }
-
-          if (!handledMismatch && localSessionId !== remoteSessionId) {
-            handledMismatch = true;
-            await AsyncStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY).catch(() => {});
-            Alert.alert("Session fermee", FORCED_LOGOUT_MESSAGE);
-            const authInstance = auth;
-            if (authInstance) {
-              await signOut(authInstance).catch(() => {});
-            }
-          }
-        })();
-      },
-      () => {}
-    );
-
-    return () => unsubscribe();
   }, [currentUser]);
 
   const tabItems = useMemo(() => {
-    if (currentUser) {
+    if (!hasRegisteredUser) {
       return [
-        { id: "home" as AppModule, label: "Accueil" },
-        { id: "dashboard" as AppModule, label: "Dashboard" },
-        { id: "conference" as AppModule, label: "Conférence" },
-        { id: "coach" as AppModule, label: "Exercice IA" },
-        { id: "chat" as AppModule, label: "Chat" },
+        { id: "home" as const, label: language === "fr" ? "Accueil" : "Home" },
+        { id: "dashboard" as const, label: language === "fr" ? "Packs" : "Packs" },
+        { id: "login" as const, label: language === "fr" ? "Connexion" : "Sign in" },
       ];
     }
+
     return [
-      { id: "home" as AppModule, label: "Accueil" },
-      { id: "login" as AppModule, label: "Connexion" },
+      { id: "home" as const, label: language === "fr" ? "Accueil" : "Home" },
+      { id: "dashboard" as const, label: "Dashboard" },
+      { id: "interpreter" as const, label: "Pocket" },
+      { id: "conference" as const, label: language === "fr" ? "Visio" : "Call" },
     ];
-  }, [currentUser]);
+  }, [hasRegisteredUser, language]);
 
   const renderModule = () => {
     switch (activeModule) {
@@ -755,11 +293,18 @@ export default function App() {
         return (
           <LandingScreen
             onOpenLogin={() => {
+              console.log("[BFZoom][nav] landing_onOpenLogin");
               setLoginTargetModule("dashboard");
               setActiveModule("login");
             }}
+            onOpenDashboard={() => {
+              console.log("[BFZoom][nav] landing_onOpenDashboard");
+              setActiveModule("dashboard");
+            }}
             onOpenConference={() => {
-              if (currentUser) {
+              console.log(`[BFZoom][nav] landing_onOpenConference hasUser=${Boolean(hasRegisteredUser)}`);
+              if (hasRegisteredUser) {
+                setConferenceCreateIntent(true);
                 setActiveModule("conference");
                 return;
               }
@@ -774,33 +319,114 @@ export default function App() {
             onLoggedIn={() => {
               setActiveModule(loginTargetModule);
             }}
+            onContinueAsGuestForPacks={
+              loginTargetModule === "dashboard"
+                ? () => {
+                    setActiveModule("dashboard");
+                  }
+                : undefined
+            }
             onBack={() => setActiveModule("home")}
           />
         );
       case "dashboard":
         if (!currentUser) {
           return (
-            <LoginOtpScreen
-              onLoggedIn={() => setActiveModule("dashboard")}
-              onBack={() => setActiveModule("home")}
-            />
+            <View style={styles.bootstrapCard}>
+              {dashboardGuestBootstrapPending ? (
+                <>
+                  <ActivityIndicator size="small" color="#93c5fd" />
+                  <Text style={styles.bootstrapText}>
+                    {language === "fr"
+                      ? "Ouverture des packs iPhone sans compte..."
+                      : "Opening iPhone packs without an account..."}
+                  </Text>
+                </>
+              ) : (
+                <>
+                  <Text style={styles.bootstrapText}>
+                    {dashboardGuestBootstrapError ||
+                      (language === "fr"
+                        ? "Preparation des achats iPhone..."
+                        : "Preparing iPhone purchases...")}
+                  </Text>
+                  <Pressable
+                    style={[styles.bootstrapAction, styles.bootstrapPrimary]}
+                    onPress={() => {
+                      setDashboardGuestBootstrapAttempt((value) => value + 1);
+                    }}
+                  >
+                    <Text style={styles.bootstrapActionText}>
+                      {language === "fr" ? "Réessayer les packs" : "Retry packs"}
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.bootstrapAction, styles.bootstrapSecondary]}
+                    onPress={() => {
+                      setLoginTargetModule("dashboard");
+                      setActiveModule("login");
+                    }}
+                  >
+                    <Text style={styles.bootstrapSecondaryText}>
+                      {language === "fr" ? "Se connecter à la place" : "Sign in instead"}
+                    </Text>
+                  </Pressable>
+                </>
+              )}
+            </View>
           );
         }
         return (
           <DashboardScreen
             user={currentUser}
-            voipStatus={voipStatus}
-            voipMessage={voipMessage}
+            onOpenLogin={() => {
+              setLoginTargetModule("dashboard");
+              setActiveModule("login");
+            }}
+            onOpenInterpreter={() => {
+              setActiveModule("interpreter");
+            }}
+            onOpenConference={() => {
+              setConferenceCreateIntent(true);
+              setDeepLinkJoinToken("");
+              setDeepLinkAutoJoinGuest(false);
+              setActiveModule("conference");
+            }}
             onSignOut={() => {
               if (!auth) return;
               void signOut(auth).finally(() => {
+                setSession(null);
+                setConferenceCreateIntent(false);
                 setActiveModule("home");
               });
             }}
           />
         );
-      case "conference":
+      case "interpreter":
         if (!currentUser) {
+          return (
+            <LoginOtpScreen
+              onLoggedIn={() => setActiveModule("interpreter")}
+              onBack={() => setActiveModule("home")}
+            />
+          );
+        }
+        return (
+          <PocketInterpreterScreen
+            user={currentUser}
+            onOpenDashboard={() => {
+              setActiveModule("dashboard");
+            }}
+            onOpenConference={() => {
+              setConferenceCreateIntent(true);
+              setDeepLinkJoinToken("");
+              setDeepLinkAutoJoinGuest(false);
+              setActiveModule("conference");
+            }}
+          />
+        );
+      case "conference":
+        if (!currentUser && !hasConferenceGuestAccess) {
           return (
             <LoginOtpScreen
               onLoggedIn={() => setActiveModule("conference")}
@@ -812,116 +438,88 @@ export default function App() {
           <ConferenceLobbyScreen
             user={currentUser}
             defaultCreateHost={conferenceCreateIntent}
-            initialRoomId={deepLinkRoomId || undefined}
+            initialJoinToken={deepLinkJoinToken || undefined}
             autoJoinAsGuest={deepLinkAutoJoinGuest}
             onAutoJoinHandled={() => {
-              setDeepLinkAutoJoinGuest(false);
-              setDeepLinkRoomId("");
-            }}
-            onNeedLogin={() => setActiveModule("login")}
-            onJoin={(nextSession) => {
               setConferenceCreateIntent(false);
               setDeepLinkAutoJoinGuest(false);
-              setDeepLinkRoomId("");
-              setSession(nextSession);
+              setDeepLinkJoinToken("");
             }}
-          />
-        );
-      case "coach":
-        if (!currentUser) {
-          return (
-            <LoginOtpScreen
-              onLoggedIn={() => setActiveModule("coach")}
-              onBack={() => setActiveModule("home")}
-            />
-          );
-        }
-        return (
-          <CoachPracticeScreen
-            user={currentUser}
-            onStart={(nextSession) => {
-              setSession(nextSession);
-              setActiveModule("coach");
-            }}
-          />
-        );
-      case "chat":
-        if (!currentUser) {
-          return (
-            <LoginOtpScreen
-              onLoggedIn={() => setActiveModule("chat")}
-              onBack={() => setActiveModule("home")}
-            />
-          );
-        }
-        return (
-          <ChatScreen
-            onStartCall={startChatCall}
-            initialSelectedChatId={pendingChatIdFromNotification || undefined}
-            onInitialSelectedChatIdHandled={() => setPendingChatIdFromNotification("")}
-          />
-        );
-      default:
-        return (
-          <LandingScreen
-            onOpenLogin={() => {
-              setLoginTargetModule("dashboard");
-              setActiveModule("login");
-            }}
-            onOpenConference={() => {
-              if (currentUser) {
-                setActiveModule("conference");
-                return;
-              }
+            onNeedLogin={() => {
               setLoginTargetModule("conference");
               setActiveModule("login");
             }}
+            onJoin={(nextSession) => {
+              setConferenceCreateIntent(false);
+              setDeepLinkAutoJoinGuest(false);
+              setDeepLinkJoinToken("");
+              setSession(nextSession);
+            }}
           />
         );
+      default:
+        return null;
     }
   };
 
+  if (session) {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <StatusBar style="light" />
+        <CallScreen
+          session={session}
+          onLeave={(reason) => {
+            handleSessionLeave(session, "conference", reason);
+          }}
+        />
+      </SafeAreaView>
+    );
+  }
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <StatusBar style="light" />
+      <View style={styles.root}>
+        <View style={styles.topBar}>
+          <LanguageSwitcher compact />
+        </View>
+        <View style={styles.content}>{renderModule()}</View>
+        <View style={styles.tabBar}>
+          {tabItems.map((item) => {
+            const selected = activeModule === item.id;
+            return (
+              <Pressable
+                key={item.id}
+                onPress={() => {
+                  console.log(`[BFZoom][nav] tab_press target=${item.id}`);
+                  if (item.id === "login") {
+                    setLoginTargetModule("dashboard");
+                  }
+                  if (item.id === "conference") {
+                    setConferenceCreateIntent(false);
+                  }
+                  setActiveModule(item.id);
+                }}
+                style={[styles.tab, selected && styles.tabActive]}
+              >
+                <Text style={[styles.tabText, selected && styles.tabTextActive]}>
+                  {item.label}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      </View>
+    </SafeAreaView>
+  );
+}
+
+export default function App() {
   return (
     <SafeAreaProvider>
-      <StatusBar style="light" />
-      <SafeAreaView style={styles.safeArea}>
-        <View style={styles.root}>
-          {session ? (
-            <CallScreen
-              session={session}
-              onLeave={() => {
-                endActiveVoipCall("ended");
-                if (session.originModule === "chat" && session.chatId && currentUserRef.current?.uid) {
-                  void endSignalCall({
-                    chatId: session.chatId,
-                    endedBy: currentUserRef.current.uid,
-                    reason: "ended",
-                  });
-                }
-                setSession(null);
-                setActiveModule(session.originModule || "conference");
-              }}
-            />
-          ) : (
-            <>
-              <View style={styles.content}>{renderModule()}</View>
-              <View style={styles.tabBar}>
-                {tabItems.map((item) => (
-                  <Pressable
-                    key={item.id}
-                    onPress={() => setActiveModule(item.id)}
-                    style={[styles.tab, activeModule === item.id && styles.tabActive]}
-                  >
-                    <Text style={[styles.tabText, activeModule === item.id && styles.tabTextActive]}>
-                      {item.label}
-                    </Text>
-                  </Pressable>
-                ))}
-              </View>
-            </>
-          )}
-        </View>
-      </SafeAreaView>
+      <I18nProvider>
+        <AppShell />
+      </I18nProvider>
     </SafeAreaProvider>
   );
 }
@@ -936,6 +534,52 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
+  },
+  bootstrapCard: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    paddingHorizontal: 24,
+  },
+  bootstrapText: {
+    color: "#cbd5e1",
+    fontSize: 14,
+    fontWeight: "700",
+    textAlign: "center",
+  },
+  bootstrapAction: {
+    minWidth: 220,
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  bootstrapPrimary: {
+    backgroundColor: "#2563eb",
+  },
+  bootstrapSecondary: {
+    borderWidth: 1,
+    borderColor: "#334155",
+    backgroundColor: "#0b1220",
+  },
+  bootstrapActionText: {
+    color: "#ffffff",
+    fontSize: 14,
+    fontWeight: "800",
+  },
+  bootstrapSecondaryText: {
+    color: "#e2e8f0",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  topBar: {
+    paddingHorizontal: 12,
+    paddingTop: 10,
+    paddingBottom: 6,
+    alignItems: "flex-end",
+    backgroundColor: "#020617",
   },
   tabBar: {
     flexDirection: "row",

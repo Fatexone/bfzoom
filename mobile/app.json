@@ -1,0 +1,66 @@
+{
+  "expo": {
+    "name": "BFZoom",
+    "slug": "bfzoom-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "bfzoom",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": false,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "buildNumber": "171",
+      "associatedDomains": [
+        "applinks:www.bfzoom.fr",
+        "applinks:bfzoom.fr"
+      ],
+      "infoPlist": {
+        "NSCameraUsageDescription": "BFZoom needs camera access for video calls.",
+        "NSMicrophoneUsageDescription": "BFZoom needs microphone access for calls and live translation.",
+        "UIBackgroundModes": [
+          "audio"
+        ],
+        "ITSAppUsesNonExemptEncryption": false
+      },
+      "bundleIdentifier": "com.smartideaagency.bfzoommobileapp"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ],
+      "package": "com.smartideaagency.bfzoommobileapp"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "@livekit/react-native-expo-plugin",
+      "expo-audio",
+      "expo-video",
+      "expo-asset"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "b24f33b3-ecfb-46ff-9e09-e0bc0c109556"
+      }
+    },
+    "owner": "fatexone",
+    "runtimeVersion": "1.0.0",
+    "updates": {
+      "url": "https://u.expo.dev/b24f33b3-ecfb-46ff-9e09-e0bc0c109556"
+    }
+  }
+}

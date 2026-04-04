@@ -1,0 +1,13 @@
+Nouveautes
+
+Cette mise a jour ameliore l'experience BFZoom sur la visio, le chat et le training.
+
+- Meilleure stabilite des appels et des controles en visioconference
+- Amelioration du basculement de traduction quand le mode realtime est indisponible
+- Partage d'invitation plus clair avec lien intelligent, lien iOS et lien web
+- Nouveau bouton pour copier un message testeur complet
+- Amelioration de l'ouverture des liens de salle (deep links)
+- Fiabilite renforcee pour l'acces aux salles et la generation de tokens
+- Optimisations UI et performances sur les ecrans principaux
+
+Merci pour vos retours sur BFZoom.

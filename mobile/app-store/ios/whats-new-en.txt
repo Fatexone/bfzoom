@@ -1,0 +1,13 @@
+What's New
+
+This update improves the core BFZoom experience across video, chat, and training.
+
+- Better call flow and control stability in video conferencing
+- Improved translation fallback behavior when realtime connection is unavailable
+- Faster and clearer invite sharing with smart link, iOS link, and web link options
+- New tester message copy option in the share panel
+- Improved deep-link handling for room join links
+- Better reliability for room access and token flow
+- UI and performance refinements across key screens
+
+Thanks for testing BFZoom.

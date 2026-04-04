@@ -1,9 +1,25 @@
 node_modules/
 .next/
-.env.local
-.env*
+.env
+.env.*
+!.env.example
+!**/.env.example
 .DS_Store
 .vercel
 npm-debug.log*
+*.log
+*.tsbuildinfo
+coverage/
+.nyc_output/
+.turbo/
+.cache/
+mobile/.expo/
+mobile/.crashlogs/
+mobile/.crash_now/
+mobile/android/
+mobile/ios/build/
+mobile/ios/Pods/
+mobile/ios/.xcode.env.local
 
 bfzoom-90e89-firebase-adminsdk-fbsvc-b4e64c7c22.json
+*.p8

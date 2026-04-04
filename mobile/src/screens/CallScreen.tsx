@@ -8,6 +8,7 @@ import {
   KeyboardAvoidingView,
   Keyboard,
   Modal,
+  PanResponder,
   Platform,
   Pressable,
   Share,
@@ -16,10 +17,13 @@ import {
   Text,
   TextInput,
   useWindowDimensions,
+  Vibration,
   View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as FileSystemLegacy from "expo-file-system/legacy";
+import * as Haptics from "expo-haptics";
 import {
   createAudioPlayer,
   RecordingPresets,
@@ -29,20 +33,33 @@ import {
   useAudioRecorder,
   useAudioRecorderState,
 } from "expo-audio";
-import { useKeepAwake } from "expo-keep-awake";
+import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import * as Speech from "expo-speech";
 import type { Voice } from "expo-speech";
 import {
   AudioSession,
-  LiveKitRoom,
+  RoomContext,
   VideoTrack,
+  getDefaultAppleAudioConfigurationForMode,
   useLocalParticipant,
   useRoomContext,
   useTracks,
 } from "@livekit/react-native";
-import { ConnectionQuality, RoomEvent, Track, type Participant } from "livekit-client";
+import {
+  AudioPresets,
+  ConnectionState,
+  ConnectionQuality,
+  Room,
+  RoomEvent,
+  Track,
+  VideoPresets,
+  type Participant,
+} from "livekit-client";
 import type { TrackReference } from "@livekit/components-core";
+import { LanguageSwitcher, useI18n, type AppLanguage } from "../i18n";
 import { env } from "../config/env";
+import { auth } from "../services/firebase";
+import { createLiveKitInvite } from "../services/livekit";
 import {
   configureNativeVirtualBackground,
   createRealtimePcmBridge,
@@ -67,6 +84,7 @@ const LANGUAGE_OPTIONS = [
   { code: "de", label: "Deutsch", speechLocale: "de-DE" },
   { code: "he", label: "עברית", speechLocale: "he-IL" },
   { code: "it", label: "Italiano", speechLocale: "it-IT" },
+  { code: "id", label: "Bahasa Indonesia", speechLocale: "id-ID" },
   { code: "ja", label: "日本語", speechLocale: "ja-JP" },
   { code: "ru", label: "Русский", speechLocale: "ru-RU" },
   { code: "fa", label: "فارسی", speechLocale: "fa-IR" },
@@ -78,8 +96,12 @@ const REALTIME_SEGMENT_MS = 1200;
 const REALTIME_SEGMENT_GAP_MS = 60;
 const REALTIME_MAX_QUEUE = 4;
 const REALTIME_MIN_SEGMENT_BYTES = 1300;
-const MANUAL_MIN_RECORDING_MS = 700;
+const MANUAL_MIN_RECORDING_MS = 600;
 const MANUAL_MIN_SEGMENT_BYTES = 1200;
+const MANUAL_POST_STOP_SETTLE_MS = Platform.OS === "ios" ? 180 : 240;
+// On iOS, toggling the LiveKit room mic around recorder start is unstable and
+// can lead to silent captures ("No speech detected"). Keep the room mic lifecycle
+// unchanged during talkie until we implement a safer isolation strategy.
 const IOS_SKIP_ROOM_MIC_TOGGLE_DURING_TALKIE = true;
 const REALTIME_NATIVE_SAMPLE_RATE = 24_000;
 const REALTIME_NATIVE_CHUNK_MS = 80;
@@ -88,24 +110,37 @@ const REALTIME_WS_PROTOCOL = "realtime";
 const IOS_RECORDER_START_RETRY_DELAYS_MS = [220, 380, 560, 760];
 const REALTIME_TRANSLATION_ENABLED = false;
 const CAPTIONS_ALWAYS_ON = true;
-const VOICE_TRANSLATION_ENABLED = false;
+const VOICE_TRANSLATION_ENABLED = true;
 const AI_TTS_ENABLED = true;
 const AI_TTS_DEFAULT_VOICE = "nova";
 const AI_TTS_MAX_CHARS = 650;
+const IOS_AI_TTS_FORMAT_PREFERENCE: ReadonlyArray<"wav" | "mp3"> = ["mp3", "wav"];
+const DEFAULT_AI_TTS_FORMAT: "mp3" = "mp3";
+const IOS_AI_TTS_PLAYBACK_START_TIMEOUT_MS = 1800;
+const CAPTION_PHONETIC_IDLE_DELAY_MS = 650;
 const IOS_REMOTE_AUDIO_VOLUME_NORMAL = 1;
 const IOS_REMOTE_AUDIO_VOLUME_DUCKED_FOR_TTS = 0.62;
+const TALKIE_REMOTE_AUDIO_MUTED_VOLUME = 0;
+const MEDIA_ERROR_AUTO_LEAVE_GRACE_MS = 30_000;
+const ROOM_RECOVERY_RETRY_DELAYS_MS = [900, 1800, 3200] as const;
+const IOS_VISIO_BALANCED_VIDEO_RESOLUTION = VideoPresets.h540.resolution;
+const IOS_VISIO_LOW_SIGNAL_VIDEO_RESOLUTION = VideoPresets.h360.resolution;
+const IOS_PREVIEW_CARD_WIDTH = 110;
+const IOS_PREVIEW_CARD_HEIGHT = 160;
+const IOS_PREVIEW_CARD_WIDTH_COMPACT = 96;
+const IOS_PREVIEW_CARD_HEIGHT_COMPACT = 136;
+const IOS_PREVIEW_CARD_MARGIN = 10;
+const IOS_PREVIEW_DEFAULT_CORNER: PreviewCorner = "topRight";
+const IOS_PREVIEW_DOUBLE_TAP_DELAY_MS = 220;
 const TALKIE_LOCK_TOPIC = "bfzoom-ptt-lock";
 const TALKIE_LOCK_TIMEOUT_MS = 10_000;
 const TALKIE_LOCK_HEARTBEAT_MS = 2_500;
+const CALL_KEEP_AWAKE_TAG = "bfzoom-call-room";
 const CALL_PREFS_STORAGE_KEY_PREFIX = "bfzoom.call.prefs";
 const REALTIME_VOICE_STORAGE_KEY_PREFIX = "bfzoom.voice.realtime";
 const TTS_VOICE_STORAGE_KEY_PREFIX = "bfzoom.voice.tts";
 const TRANSLATOR_IDENTITY_PREFIX = "bfzoom-translator-";
 const TRANSLATION_ACCESS_TOPIC = "bfzoom-translation-access";
-const TRANSLATION_UNLOCK_HINT =
-  "Traduction indisponible: tes 3 minutes d'essai gratuit sont epuisees et tu n'as plus de credits actifs. La visio simple reste disponible.";
-const TRANSLATION_WAIT_HOST_HINT =
-  "Traduction en attente: l'hote doit disposer de minutes offertes ou de credits actifs.";
 const VIRTUAL_BACKGROUND_EFFECT_NAME = "bfzoom_virtual_background";
 const REALTIME_OUTPUT_VOICE_OPTIONS = [
   "alloy",
@@ -129,170 +164,38 @@ const STAGE_BACKGROUND_PRESETS = [
   { id: "ai", label: "DALL·E", mode: "ai" as const, color: "#020617" },
 ] as const;
 
-type CoachPresetItem = {
-  id: string;
-  title: string;
-  prompt: string;
-  local: string;
-};
-
-type CoachPresetMode = {
-  id: string;
-  title: string;
-  description: string;
-  items: CoachPresetItem[];
-};
-
-const COACH_MODES: CoachPresetMode[] = [
-  {
-    id: "opening",
-    title: "Ouverture & cadrage",
-    description: "Demarrer la discussion avec clarte.",
-    items: [
-      {
-        id: "opening-60",
-        title: "Ouverture 60s",
-        prompt: "Genere une ouverture de conversation en 60 secondes pour installer confiance, objectif et cadre.",
-        local:
-          "Ouverture 60s: salutation claire, contexte en 1 phrase, objectif de l'echange, proposition d'ordre du jour court.",
-      },
-      {
-        id: "framing",
-        title: "Cadrer le sujet",
-        prompt: "Propose une structure de cadrage en 4 phrases pour eviter la confusion des enjeux.",
-        local: "Cadrage: sujet exact, pourquoi maintenant, impact attendu, decision a prendre.",
-      },
-      {
-        id: "agenda",
-        title: "Agenda express",
-        prompt: "Cree un mini agenda oral (3 points max) pour une reunion internationale.",
-        local: "Agenda express: alignement objectif, points bloquants, decisions + prochaines actions.",
-      },
-    ],
-  },
-  {
-    id: "listening",
-    title: "Ecoute & reformulation",
-    description: "Comprendre vite sans malentendu.",
-    items: [
-      {
-        id: "active-listening",
-        title: "Ecoute active",
-        prompt: "Donne une methode d'ecoute active en 4 etapes utilisable en visio.",
-        local: "Ecoute active: laisser finir, valider, reformuler, confirmer la suite.",
-      },
-      {
-        id: "reformulate",
-        title: "Reformulation",
-        prompt: "Propose 5 formulations courtes pour verifier qu'on a bien compris.",
-        local:
-          "Si je comprends bien..., Vous attendez..., Le point critique est..., On valide que..., Je reformule pour confirmer...",
-      },
-      {
-        id: "misunderstanding",
-        title: "Eviter confusion",
-        prompt: "Donne une checklist de communication pour eviter les incomprehensions en reunion multilingue.",
-        local: "Phrase courte, une idee par phrase, termes cles verifies, action/responsable/delai confirmes.",
-      },
-    ],
-  },
-  {
-    id: "questions",
-    title: "Questions strategiques",
-    description: "Questions utiles pour faire avancer.",
-    items: [
-      {
-        id: "discovery",
-        title: "Decouverte",
-        prompt: "Genere 6 questions de decouverte pour comprendre le besoin reel d'un interlocuteur.",
-        local: "Objectif prioritaire, blocage actuel, impact, delai, contraintes, critere de succes.",
-      },
-      {
-        id: "clarification",
-        title: "Clarification",
-        prompt: "Donne des questions courtes pour clarifier une demande vague sans paraitre agressif.",
-        local: "Quel resultat exact visez-vous ? A quel horizon ? Quel est le prioritaire ?",
-      },
-      {
-        id: "decision",
-        title: "Decision",
-        prompt: "Propose des questions qui accelerent une prise de decision en fin de reunion.",
-        local: "Option retenue ? Responsable ? Date ? Risque principal ? Action immediate ?",
-      },
-    ],
-  },
-  {
-    id: "objections",
-    title: "Objections & nego",
-    description: "Reponses courtes orientees accord.",
-    items: [
-      {
-        id: "price",
-        title: "Objection prix",
-        prompt: "Genere 4 reponses courtes et elegantes a une objection sur le prix.",
-        local: "Valeur, cout d'inaction, etape pilote, question de validation.",
-      },
-      {
-        id: "timing",
-        title: "Objection timing",
-        prompt: "Donne des formulations pour traiter 'ce n'est pas le bon moment'.",
-        local: "Reconnaissance contrainte, petit pas concret, date de revue.",
-      },
-      {
-        id: "close",
-        title: "Clore un accord",
-        prompt: "Genere une formulation de cloture d'accord avec recapitulatif et next steps.",
-        local: "Resume accord, roles, delais, prochaine etape ecrite.",
-      },
-    ],
-  },
-  {
-    id: "followup",
-    title: "Cloture & suivi",
-    description: "Terminer proprement et lancer la suite.",
-    items: [
-      {
-        id: "close-meeting",
-        title: "Cloture orale",
-        prompt: "Genere une cloture orale de reunion en 5 lignes: synthese, decision, prochaine etape.",
-        local: "Recap points valides, decision, responsable, date de suivi.",
-      },
-      {
-        id: "followup-email",
-        title: "Email de suivi",
-        prompt: "Redige un email de suivi professionnel apres reunion, clair et concis.",
-        local: "Merci, resume, actions par personne, echeances, prochain point.",
-      },
-      {
-        id: "action-plan",
-        title: "Plan d'action",
-        prompt: "Transforme une conversation en plan d'action priorise (3 actions max).",
-        local: "3 actions max, proprietaire, delai, critere de validation.",
-      },
-    ],
-  },
-] as const;
-
-const COACH_TONES = ["professionnel", "neutre", "diplomatique", "direct"] as const;
-
 type LanguageCode = (typeof LANGUAGE_OPTIONS)[number]["code"];
 type RealtimeVoiceId = (typeof REALTIME_OUTPUT_VOICE_OPTIONS)[number];
 type StageBackgroundId = (typeof STAGE_BACKGROUND_PRESETS)[number]["id"];
 type CameraFacingMode = "user" | "environment";
 type AccordionPanelKey = "controls" | "translation";
-type CoachModeId = (typeof COACH_MODES)[number]["id"];
-type CoachTone = (typeof COACH_TONES)[number];
-type TalkieUiState = "idle" | "starting" | "recording" | "stopping";
-type CoachReplySuggestion = {
-  id: string;
-  targetText: string;
-  sourceText: string;
-  phoneticText: string;
+type TalkieUiState = "idle" | "starting" | "recording" | "stopping" | "review";
+type SubtitleDisplayMode = "dual" | "translationOnly";
+type ExpandedSubtitleKind = "source" | "target" | null;
+type PreviewCorner = "topLeft" | "topRight" | "bottomLeft" | "bottomRight";
+type TtsTrigger = "auto" | "replay";
+type TtsPlaybackMeta = {
+  sessionId: number;
+  trigger: TtsTrigger;
+  source: "server";
+  format: "wav" | "mp3";
+  language: string;
+  textChars: number;
+  fileBytes: number;
+  requestStartedAt: number;
+  playbackStartedAt?: number;
+};
+
+type CaptionPhoneticJob = {
+  text: string;
+  targetLanguage: LanguageCode;
 };
 
 type StoredCallPrefs = {
   sourceLanguage?: string;
   targetLanguage?: string;
+  subtitleDisplayMode?: SubtitleDisplayMode;
+  localPreviewCorner?: PreviewCorner;
   captionsEnabled?: boolean;
   ttsEnabled?: boolean;
   realtimeEnabled?: boolean;
@@ -313,10 +216,57 @@ const LANGUAGE_PROMPT_NAMES: Record<LanguageCode, string> = {
   de: "German",
   he: "Hebrew",
   it: "Italian",
+  id: "Indonesian",
   ja: "Japanese",
   ru: "Russian",
   fa: "Persian",
   la: "Latin",
+};
+
+let sharedCallAudioTransitionChain: Promise<void> = Promise.resolve();
+let sharedExpoAudioMode: "idle" | "playback" | "recording" = "idle";
+let sharedActiveCallAudioOwnerKey = "";
+
+const runSharedCallAudioTransition = async (task: () => Promise<void>) => {
+  const previous = sharedCallAudioTransitionChain.catch(() => {});
+  let resolveNext!: () => void;
+  sharedCallAudioTransitionChain = new Promise<void>((resolve) => {
+    resolveNext = resolve;
+  });
+  try {
+    await previous;
+    await task();
+  } finally {
+    resolveNext();
+  }
+};
+
+const formatTtsLogValue = (value: unknown) => {
+  if (typeof value === "string") {
+    return /\s/.test(value) ? JSON.stringify(value) : value;
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? String(value) : "NaN";
+  }
+  if (typeof value === "boolean") return value ? "true" : "false";
+  return JSON.stringify(value);
+};
+
+const logTtsEvent = (
+  event: string,
+  details: Record<string, unknown> = {},
+  level: "info" | "warn" = "info"
+) => {
+  const suffix = Object.entries(details)
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .map(([key, value]) => `${key}=${formatTtsLogValue(value)}`)
+    .join(" ");
+  const message = suffix ? `[BFZoom][TTS] ${event} ${suffix}` : `[BFZoom][TTS] ${event}`;
+  if (level === "warn") {
+    console.warn(message);
+    return;
+  }
+  console.info(message);
 };
 const RTL_LANGUAGE_CODES = new Set(["ar", "fa", "he"]);
 
@@ -324,6 +274,7 @@ type CaptionPayload = {
   id?: string;
   roomId?: string;
   from?: string;
+  speakerName?: string;
   text?: string;
   sourceText?: string;
   sourceLang?: string;
@@ -331,6 +282,15 @@ type CaptionPayload = {
   timestamp?: number;
   durationSeconds?: number;
 };
+
+const estimateCaptionUsageSeconds = (payload: CaptionPayload) => {
+  const source = String(payload.sourceText || payload.text || "").trim();
+  if (!source) return 1;
+  const wordCount = source.split(/\s+/).filter(Boolean).length;
+  return Math.max(1, Math.min(30, Math.ceil(wordCount / 3)));
+};
+
+type RoomParticipantRole = "host" | "guest" | "translator" | null;
 
 type TranslationAccessPayload = {
   roomId?: string;
@@ -353,14 +313,14 @@ type TranslationEntitlementState = {
 };
 
 const DEFAULT_TRANSLATION_ENTITLEMENT: TranslationEntitlementState = {
-  enabled: true,
+  enabled: false,
   lockReason: "",
   loading: true,
   isAdmin: false,
   isPremium: false,
-  freeSecondsRemaining: 180,
+  freeSecondsRemaining: 0,
   paidSecondsRemaining: 0,
-  totalSecondsRemaining: 180,
+  totalSecondsRemaining: 0,
 };
 
 type TalkieLockPayload = {
@@ -390,8 +350,39 @@ const isLanguageCode = (value: string): value is LanguageCode =>
 const isRealtimeVoiceId = (value: string): value is RealtimeVoiceId =>
   REALTIME_OUTPUT_VOICE_OPTIONS.some((voice) => voice === value);
 
+const isSubtitleDisplayMode = (value: string): value is SubtitleDisplayMode =>
+  value === "dual" || value === "translationOnly";
+
+const isPreviewCorner = (value: string): value is PreviewCorner =>
+  value === "topLeft" ||
+  value === "topRight" ||
+  value === "bottomLeft" ||
+  value === "bottomRight";
+
 const isTranslatorIdentity = (identity: string) =>
   identity.trim().toLowerCase().startsWith(TRANSLATOR_IDENTITY_PREFIX);
+
+const getParticipantRoleFromMetadata = (metadata?: string | null): RoomParticipantRole => {
+  const raw = String(metadata || "").trim();
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as { role?: string };
+    const role = String(parsed?.role || "").trim().toLowerCase();
+    if (role === "host" || role === "guest" || role === "translator") {
+      return role;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+};
+
+const getTranslatorTargetLanguageFromIdentity = (identity: string): LanguageCode | null => {
+  const normalized = identity.trim().toLowerCase();
+  if (!normalized.startsWith(TRANSLATOR_IDENTITY_PREFIX)) return null;
+  const lang = normalized.slice(TRANSLATOR_IDENTITY_PREFIX.length).split("-")[0]?.trim() || "";
+  return isLanguageCode(lang) ? lang : null;
+};
 
 const normalizeTranslationEntitlement = (
   payload: unknown
@@ -414,7 +405,7 @@ const normalizeTranslationEntitlement = (
   const lockReason = typeof raw.lockReason === "string" ? raw.lockReason.trim() : "";
   return {
     enabled,
-    lockReason: enabled ? "" : lockReason || TRANSLATION_UNLOCK_HINT,
+    lockReason: enabled ? "" : lockReason,
     loading: false,
     isAdmin: raw.isAdmin === true,
     isPremium: raw.isPremium === true,
@@ -437,6 +428,8 @@ const wait = (durationMs: number) =>
     setTimeout(resolve, durationMs);
   });
 
+const getTtsTempExtension = (format: "wav" | "mp3") => (format === "wav" ? "wav" : "mp3");
+
 const buildSegmentExtension = (uri: string) => {
   const clean = uri.split("?")[0] || uri;
   return (clean.match(/\.([a-z0-9]+)$/i)?.[1] || "m4a").toLowerCase();
@@ -452,20 +445,28 @@ const getAudioFileSize = async (uri: string) => {
   }
 };
 
-const toFriendlyAudioError = (error: unknown) => {
+const toFriendlyAudioError = (error: unknown, language: AppLanguage = "fr") => {
   const raw = error instanceof Error ? error.message : String(error || "Audio error");
   if (/source language mismatch|script mismatch/i.test(raw)) {
-    return "Je n'ai pas bien compris dans la langue choisie. Parle plus lentement ou verifie 'Langue que tu parles'.";
+    return language === "fr"
+      ? "Je n'ai pas bien compris dans la langue choisie. Parle plus lentement ou verifie 'Langue que tu parles'."
+      : "I didn't understand well in the selected language. Speak more slowly or check 'Language you speak'.";
   }
   if (/no speech detected/i.test(raw)) {
-    return "Aucune voix detectee. Maintiens 1-2 secondes, parle clairement, puis relache.";
+    return language === "fr"
+      ? "Aucune voix detectee. Maintiens 1-2 secondes, parle clairement, puis relache."
+      : "No speech detected. Hold for 1-2 seconds, speak clearly, then release.";
   }
   if (
     /recording not allowed/i.test(raw) ||
+    /osstatus error 50/i.test(raw) ||
+    /setting category/i.test(raw) ||
     /osstatus error 5610/i.test(raw) ||
     /audio mode/i.test(raw)
   ) {
-    return "Micro iOS indisponible temporairement. Coupe puis rallume 'Mic', puis reessaie dans 1-2 secondes.";
+    return language === "fr"
+      ? "Micro iOS indisponible temporairement. Coupe puis rallume 'Mic', puis reessaie dans 1-2 secondes."
+      : "iOS microphone is temporarily unavailable. Turn 'Mic' off and on, then try again in 1-2 seconds.";
   }
   return raw;
 };
@@ -474,6 +475,8 @@ const isRecoverableIosRecorderError = (error: unknown) => {
   const raw = error instanceof Error ? error.message : String(error || "");
   return (
     /recording not allowed/i.test(raw) ||
+    /osstatus error 50/i.test(raw) ||
+    /setting category/i.test(raw) ||
     /osstatus error 5610/i.test(raw) ||
     /audio mode/i.test(raw) ||
     /session/i.test(raw) ||
@@ -484,14 +487,25 @@ const isRecoverableIosRecorderError = (error: unknown) => {
 
 const readHttpError = async (response: Response) => {
   const raw = await response.text().catch(() => "");
+  const fallback = `${response.status} ${response.statusText}`.trim();
   if (!raw) {
-    return `${response.status} ${response.statusText}`.trim();
+    return fallback;
   }
+  const sanitize = (value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) return fallback;
+    const looksLikeHtml =
+      /^<!doctype html/i.test(trimmed) ||
+      /^<html/i.test(trimmed) ||
+      /<head[\s>]/i.test(trimmed) ||
+      /<body[\s>]/i.test(trimmed);
+    return looksLikeHtml ? fallback : trimmed;
+  };
   try {
     const parsed = JSON.parse(raw) as { error?: string };
-    return parsed.error || raw;
+    return sanitize(parsed.error || raw);
   } catch {
-    return raw;
+    return sanitize(raw);
   }
 };
 
@@ -512,89 +526,6 @@ const splitWords = (value: string) =>
     .trim()
     .split(/\s+/)
     .filter(Boolean);
-
-const parseCoachSuggestions = (value: string) => {
-  const cleanRaw = value
-    .replace(/```json\s*/gi, "")
-    .replace(/```/g, "")
-    .trim();
-
-  const extractSuggestionArray = (parsed: unknown): string[] => {
-    if (!parsed) return [];
-    if (Array.isArray(parsed)) {
-      return parsed
-        .map((item) => (typeof item === "string" ? item.trim() : ""))
-        .filter(Boolean)
-        .slice(0, 3);
-    }
-    if (typeof parsed !== "object") return [];
-
-    const candidate = parsed as {
-      suggestions?: unknown;
-      data?: { suggestions?: unknown };
-      result?: { suggestions?: unknown };
-      output?: { suggestions?: unknown };
-      choices?: { message?: { content?: string } }[];
-    };
-
-    const direct = [
-      candidate.suggestions,
-      candidate.data?.suggestions,
-      candidate.result?.suggestions,
-      candidate.output?.suggestions,
-    ];
-    for (const entry of direct) {
-      if (Array.isArray(entry)) {
-        const normalized = entry
-          .map((item) => (typeof item === "string" ? item.trim() : ""))
-          .filter(Boolean)
-          .slice(0, 3);
-        if (normalized.length > 0) return normalized;
-      }
-    }
-
-    const nestedContent = candidate.choices?.[0]?.message?.content;
-    if (typeof nestedContent === "string" && nestedContent.trim()) {
-      return parseCoachSuggestions(nestedContent);
-    }
-
-    return [];
-  };
-
-  const extractEmbeddedJson = (raw: string) => {
-    const start = raw.indexOf("{");
-    const end = raw.lastIndexOf("}");
-    if (start < 0 || end <= start) return null;
-    try {
-      return JSON.parse(raw.slice(start, end + 1)) as unknown;
-    } catch {
-      return null;
-    }
-  };
-
-  const parsedJson = (() => {
-    try {
-      return JSON.parse(cleanRaw) as unknown;
-    } catch {
-      return extractEmbeddedJson(cleanRaw);
-    }
-  })();
-  const fromJson = extractSuggestionArray(parsedJson);
-  if (fromJson.length > 0) return fromJson.slice(0, 3);
-
-  return cleanRaw
-    .split(/\r?\n/)
-    .map((line) => line.replace(/^[-*\d.)\s]+/, "").trim())
-    .filter(
-      (line) =>
-        Boolean(line) &&
-        !/[{}\[\]"]/.test(line) &&
-        !/^(id|object|created|model|usage|prompt_tokens|completion_tokens|total_tokens|message|role|choices?)\s*[:=]/i.test(
-          line
-        )
-    )
-    .slice(0, 3);
-};
 
 const normalizeNoiseGuardText = (value: string) =>
   value
@@ -701,127 +632,633 @@ const getVoicesForLanguage = (voices: Voice[], languageCode: LanguageCode, local
 };
 
 export function CallScreen({ session, onLeave }: CallScreenProps) {
+  const { language } = useI18n();
   const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
   const [sessionError, setSessionError] = useState("");
   const [connected, setConnected] = useState(false);
   const [immersiveMode, setImmersiveMode] = useState(false);
-  const isChatCall = session.originModule === "chat";
-  const isChatAudioCall = session.originModule === "chat" && (session.callMode || "video") === "audio";
+  const [leavePending, setLeavePending] = useState(false);
+  const [connectRevision, setConnectRevision] = useState(0);
+  const roomConnectStartedRef = useRef(false);
+  const leaveRequestedRef = useRef(false);
+  const expectedRoomDisconnectRef = useRef(false);
+  const roomEndForAllInFlightRef = useRef(false);
+  const roomRecoveryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const roomRecoveryAttemptRef = useRef(0);
+  const appStateRef = useRef(AppState.currentState);
+  const isAudioOnlyCall = (session.callMode || "video") === "audio";
   const isHostSession = session.role === "host";
-  const roleModeLabel = isHostSession ? "Mode HOTE" : "Mode INVITE";
+  const callAudioOwnerKey = useMemo(
+    () => `${session.roomId}:${session.identity}:${session.role}`,
+    [session.identity, session.role, session.roomId]
+  );
+  const ui = useMemo(
+    () =>
+      language === "fr"
+        ? {
+            hostMode: "Mode HOTE",
+            guestMode: "Mode INVITE",
+            shareTitle: "Salle BFZoom",
+            shareMessage: (url: string) =>
+              `Rejoins ma salle BFZoom en 1 clic : ${url}\n\nSi l'app BFZoom est installée, elle s'ouvre automatiquement. Sinon, la version web s'ouvre.`,
+            shareFailed: "Impossible de partager le lien de salle.",
+            shareInviteUnavailableTitle: "Partage indisponible",
+            shareInviteUnavailable:
+              "Le partage est temporairement indisponible. Reessaie dans un instant.",
+            audioSessionFailed: "Impossible de demarrer la session audio.",
+            share: "Partager",
+            leave: "Quitter",
+            endForAllCompact: "Terminer",
+            endForAll: "Terminer pour tous",
+            confirmEndRoomTitle: "Terminer l'appel ?",
+            confirmEndRoomMessage:
+              "Cela fermera l'appel pour tous les participants encore connectes.",
+            confirmEndRoomAction: "Terminer pour tous",
+            cancel: "Annuler",
+            endingRoom: "Fermeture...",
+            endRoomFailed:
+              "Impossible de terminer l'appel pour tous. Verifie ta connexion puis reessaie.",
+            liveKitError: "Erreur LiveKit",
+            roomReconnectInProgress:
+              "Connexion a la salle perdue. Reconnexion en cours...",
+            roomReconnectFailed:
+              "Connexion a la salle perdue. Quitte puis relance l'appel.",
+          }
+        : {
+            hostMode: "HOST MODE",
+            guestMode: "GUEST MODE",
+            shareTitle: "BFZoom room",
+            shareMessage: (url: string) =>
+              `Join my BFZoom room in one tap: ${url}\n\nIf the BFZoom app is installed, it opens automatically. Otherwise, the web version opens.`,
+            shareFailed: "Unable to share the room link.",
+            shareInviteUnavailableTitle: "Share unavailable",
+            shareInviteUnavailable:
+              "Sharing is temporarily unavailable. Please try again in a moment.",
+            audioSessionFailed: "Unable to start the audio session.",
+            share: "Share",
+            leave: "Leave",
+            endForAllCompact: "End",
+            endForAll: "End for all",
+            confirmEndRoomTitle: "End the call?",
+            confirmEndRoomMessage:
+              "This will end the call for every participant still connected.",
+            confirmEndRoomAction: "End for all",
+            cancel: "Cancel",
+            endingRoom: "Ending...",
+            endRoomFailed:
+              "Unable to end the call for everyone. Check your connection and try again.",
+            liveKitError: "LiveKit error",
+            roomReconnectInProgress:
+              "Room connection lost. Reconnecting...",
+            roomReconnectFailed:
+              "Room connection lost. Leave and start the call again.",
+          },
+    [language]
+  );
+  const liveKitErrorFallbackRef = useRef(
+    language === "fr" ? "Erreur LiveKit" : "LiveKit error"
+  );
+  const audioSessionErrorFallbackRef = useRef(
+    language === "fr"
+      ? "Impossible de demarrer la session audio."
+      : "Unable to start the audio session."
+  );
+  useEffect(() => {
+    liveKitErrorFallbackRef.current = language === "fr" ? "Erreur LiveKit" : "LiveKit error";
+    audioSessionErrorFallbackRef.current =
+      language === "fr"
+        ? "Impossible de demarrer la session audio."
+        : "Unable to start the audio session.";
+  }, [language]);
+  const roleModeLabel = isHostSession ? ui.hostMode : ui.guestMode;
   const isCompactPhone = viewportWidth <= 430;
   const isVeryCompactPhone = viewportWidth <= 380 || viewportHeight <= 760;
+  const useCenteredTabletTopBar = Platform.OS === "ios" && Boolean(Platform.isPad);
+  const preferSpeakerOnCallStart = Platform.OS === "ios";
+  const leaveButtonLabel = isHostSession
+    ? isCompactPhone
+      ? leavePending
+        ? ui.endingRoom
+        : ui.endForAllCompact
+      : leavePending
+        ? ui.endingRoom
+      : ui.endForAll
+    : ui.leave;
+  const liveKitRoomOptions = useMemo(
+    () => ({
+      adaptiveStream: { pixelDensity: "screen" as const },
+      dynacast: true,
+      audioCaptureDefaults: {
+        autoGainControl: true,
+        echoCancellation: true,
+        noiseSuppression: true,
+        voiceIsolation: true,
+      },
+      videoCaptureDefaults: {
+        resolution: IOS_VISIO_BALANCED_VIDEO_RESOLUTION,
+      },
+      publishDefaults: {
+        audioPreset: AudioPresets.speech,
+        dtx: true,
+        red: true,
+      },
+    }),
+    []
+  );
+  const liveKitRoom = useMemo(
+    () => new Room(liveKitRoomOptions),
+    [connectRevision, liveKitRoomOptions, session.livekitToken, session.livekitUrl, session.roomId]
+  );
+  const roomContextKey = useMemo(
+    () => `${session.roomId}:${connectRevision}`,
+    [connectRevision, session.roomId]
+  );
+  const clearRoomRecoveryTimer = useCallback(() => {
+    if (!roomRecoveryTimerRef.current) return;
+    clearTimeout(roomRecoveryTimerRef.current);
+    roomRecoveryTimerRef.current = null;
+  }, []);
+  const ensureCallAudioSession = useCallback(async () => {
+    await runSharedCallAudioTransition(async () => {
+      sharedActiveCallAudioOwnerKey = callAudioOwnerKey;
+      if (Platform.OS === "ios") {
+        await AudioSession.setAppleAudioConfiguration(
+          getDefaultAppleAudioConfigurationForMode("localAndRemote", preferSpeakerOnCallStart)
+        ).catch(() => {});
+      }
+      await AudioSession.startAudioSession();
+      await AudioSession.setDefaultRemoteAudioTrackVolume(1).catch(() => {});
+      if (Platform.OS === "ios") {
+        await AudioSession.selectAudioOutput(
+          preferSpeakerOnCallStart ? "force_speaker" : "default"
+        ).catch(() => {});
+      }
+    });
+  }, [callAudioOwnerKey, preferSpeakerOnCallStart]);
+  const scheduleRoomRecovery = useCallback(() => {
+    if (leaveRequestedRef.current) return;
+    if (roomEndForAllInFlightRef.current) return;
+    if (appStateRef.current !== "active") return;
+    if (roomRecoveryTimerRef.current || roomConnectStartedRef.current) return;
+    if (
+      liveKitRoom.state === ConnectionState.Connected ||
+      liveKitRoom.state === ConnectionState.Connecting ||
+      liveKitRoom.state === ConnectionState.Reconnecting
+    ) {
+      return;
+    }
+    const nextAttempt = Math.min(
+      roomRecoveryAttemptRef.current,
+      ROOM_RECOVERY_RETRY_DELAYS_MS.length - 1
+    );
+    roomRecoveryAttemptRef.current += 1;
+    setSessionError(ui.roomReconnectInProgress);
+    roomRecoveryTimerRef.current = setTimeout(() => {
+      roomRecoveryTimerRef.current = null;
+      void (async () => {
+        if (appStateRef.current !== "active" || leaveRequestedRef.current) return;
+        if (
+          liveKitRoom.state === ConnectionState.Connected ||
+          liveKitRoom.state === ConnectionState.Connecting ||
+          liveKitRoom.state === ConnectionState.Reconnecting
+        ) {
+          expectedRoomDisconnectRef.current = true;
+          await liveKitRoom.disconnect().catch(() => {});
+        }
+        roomConnectStartedRef.current = false;
+        setConnectRevision((current) => current + 1);
+      })();
+    }, ROOM_RECOVERY_RETRY_DELAYS_MS[nextAttempt]);
+  }, [liveKitRoom, ui.roomReconnectInProgress]);
+  const handleRoomErrorRef = useRef<((error: Error) => void) | null>(null);
+  const scheduleRoomRecoveryRef = useRef<(() => void) | null>(null);
+  const handleLeaveRequest = useCallback(
+    (reason?: string) => {
+      leaveRequestedRef.current = true;
+      expectedRoomDisconnectRef.current = true;
+      roomEndForAllInFlightRef.current = false;
+      clearRoomRecoveryTimer();
+      onLeave(reason);
+    },
+    [clearRoomRecoveryTimer, onLeave]
+  );
+  const performEndRoomForAll = useCallback(async () => {
+    if (!isHostSession) {
+      handleLeaveRequest("leave");
+      return;
+    }
+    if (leavePending) return;
+    setSessionError("");
+    setLeavePending(true);
+    roomEndForAllInFlightRef.current = true;
+    try {
+      const freshToken =
+        (auth?.currentUser ? await auth.currentUser.getIdToken().catch(() => "") : "") ||
+        session.bearerToken ||
+        "";
+      const bearerToken = freshToken.trim();
+      const apiBaseUrl = session.apiBaseUrl.trim().replace(/\/+$/, "");
+      const roomId = session.roomId.trim();
+      if (!bearerToken || !apiBaseUrl || !roomId) {
+        throw new Error(ui.endRoomFailed);
+      }
+      const response = await fetch(`${apiBaseUrl}/api/livekit/room/end`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${bearerToken}`,
+        },
+        body: JSON.stringify({ room: roomId }),
+      });
+      if (!response.ok) {
+        const raw = await response.text().catch(() => "");
+        throw new Error(raw || ui.endRoomFailed);
+      }
+      handleLeaveRequest("host_room_ended");
+    } catch (error) {
+      roomEndForAllInFlightRef.current = false;
+      const message = error instanceof Error && error.message.trim() ? error.message : ui.endRoomFailed;
+      setSessionError(message);
+    } finally {
+      setLeavePending(false);
+    }
+  }, [
+    handleLeaveRequest,
+    isHostSession,
+    leavePending,
+    session.apiBaseUrl,
+    session.bearerToken,
+    session.roomId,
+    ui.endRoomFailed,
+  ]);
+  const endRoomForAll = useCallback(() => {
+    if (!isHostSession) {
+      handleLeaveRequest("leave");
+      return;
+    }
+    Alert.alert(ui.confirmEndRoomTitle, ui.confirmEndRoomMessage, [
+      {
+        text: ui.cancel,
+        style: "cancel",
+      },
+      {
+        text: ui.confirmEndRoomAction,
+        style: "destructive",
+        onPress: () => {
+          void performEndRoomForAll();
+        },
+      },
+    ]);
+  }, [
+    handleLeaveRequest,
+    isHostSession,
+    performEndRoomForAll,
+    ui.cancel,
+    ui.confirmEndRoomAction,
+    ui.confirmEndRoomMessage,
+    ui.confirmEndRoomTitle,
+  ]);
+  const handleRoomConnected = useCallback(() => {
+    expectedRoomDisconnectRef.current = false;
+    roomEndForAllInFlightRef.current = false;
+    roomConnectStartedRef.current = false;
+    roomRecoveryAttemptRef.current = 0;
+    clearRoomRecoveryTimer();
+    setConnected(true);
+    setSessionError("");
+  }, [clearRoomRecoveryTimer]);
+  const handleRoomDisconnected = useCallback(() => {
+    roomConnectStartedRef.current = false;
+    setConnected(false);
+    if (roomEndForAllInFlightRef.current) {
+      roomEndForAllInFlightRef.current = false;
+      expectedRoomDisconnectRef.current = false;
+      return;
+    }
+    if (expectedRoomDisconnectRef.current) {
+      expectedRoomDisconnectRef.current = false;
+      return;
+    }
+    if (!leaveRequestedRef.current) {
+      scheduleRoomRecovery();
+    }
+  }, [scheduleRoomRecovery]);
+  const handleRoomError = useCallback((err: Error) => {
+    roomConnectStartedRef.current = false;
+    setSessionError(err.message?.trim() || liveKitErrorFallbackRef.current);
+  }, []);
+  useEffect(() => {
+    handleRoomErrorRef.current = handleRoomError;
+  }, [handleRoomError]);
+  useEffect(() => {
+    scheduleRoomRecoveryRef.current = scheduleRoomRecovery;
+  }, [scheduleRoomRecovery]);
 
-  const roomShareWebUrl = useMemo(() => {
+  useEffect(() => {
+    const onConnected = () => {
+      handleRoomConnected();
+    };
+    const onDisconnected = () => {
+      handleRoomDisconnected();
+    };
+    const onMediaDevicesError = (error: Error) => {
+      handleRoomError(error);
+    };
+
+    liveKitRoom.on(RoomEvent.Connected, onConnected);
+    liveKitRoom.on(RoomEvent.Disconnected, onDisconnected);
+    liveKitRoom.on(RoomEvent.MediaDevicesError, onMediaDevicesError);
+
+    return () => {
+      liveKitRoom.off(RoomEvent.Connected, onConnected);
+      liveKitRoom.off(RoomEvent.Disconnected, onDisconnected);
+      liveKitRoom.off(RoomEvent.MediaDevicesError, onMediaDevicesError);
+    };
+  }, [handleRoomConnected, handleRoomDisconnected, handleRoomError, liveKitRoom]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const connectRoom = async () => {
+      if (!session.livekitUrl || !session.livekitToken) {
+        handleRoomError(new Error(liveKitErrorFallbackRef.current));
+        return;
+      }
+      if (appStateRef.current !== "active") {
+        roomConnectStartedRef.current = false;
+        return;
+      }
+      if (
+        roomConnectStartedRef.current ||
+        liveKitRoom.state === ConnectionState.Connected ||
+        liveKitRoom.state === ConnectionState.Connecting ||
+        liveKitRoom.state === ConnectionState.Reconnecting
+      ) {
+        return;
+      }
+
+      try {
+        expectedRoomDisconnectRef.current = false;
+        roomConnectStartedRef.current = true;
+        await liveKitRoom.connect(session.livekitUrl, session.livekitToken);
+      } catch (error) {
+        roomConnectStartedRef.current = false;
+        if (cancelled) return;
+        const nextError =
+          error instanceof Error ? error : new Error(liveKitErrorFallbackRef.current);
+        if (handleRoomErrorRef.current) {
+          handleRoomErrorRef.current(nextError);
+        } else {
+          setSessionError(nextError.message?.trim() || liveKitErrorFallbackRef.current);
+        }
+        scheduleRoomRecoveryRef.current?.();
+      }
+    };
+
+    void connectRoom();
+
+    return () => {
+      cancelled = true;
+      roomConnectStartedRef.current = false;
+      if (
+        liveKitRoom.state === ConnectionState.Connected ||
+        liveKitRoom.state === ConnectionState.Connecting ||
+        liveKitRoom.state === ConnectionState.Reconnecting
+      ) {
+        expectedRoomDisconnectRef.current = true;
+        void liveKitRoom.disconnect().catch(() => {});
+      }
+    };
+  }, [
+    connectRevision,
+    liveKitRoom,
+    session.livekitToken,
+    session.livekitUrl,
+  ]);
+
+  const [shareInviteUrl, setShareInviteUrl] = useState("");
+
+  const publicJoinBaseUrl = useMemo(() => {
     const rawBase = session.apiBaseUrl.trim().replace(/\/+$/, "");
     if (!rawBase) {
-      return `https://www.bfzoom.fr/join/${encodeURIComponent(session.roomId)}`;
+      return "https://www.bfzoom.fr";
     }
     const looksLocal =
       /(^https?:\/\/localhost)|(^https?:\/\/127\.)|(^https?:\/\/0\.0\.0\.0)/i.test(rawBase);
-    const publicBase = looksLocal ? "https://www.bfzoom.fr" : rawBase;
-    return `${publicBase}/join/${encodeURIComponent(session.roomId)}`;
-  }, [session.apiBaseUrl, session.roomId]);
+    return looksLocal ? "https://www.bfzoom.fr" : rawBase;
+  }, [session.apiBaseUrl]);
 
   const shareRoomAccess = useCallback(async () => {
     try {
+      setSessionError("");
+      let nextShareUrl = shareInviteUrl.trim();
+      if (!nextShareUrl) {
+        const bearerToken =
+          (auth?.currentUser ? await auth.currentUser.getIdToken().catch(() => "") : "") ||
+          session.bearerToken ||
+          "";
+        if (!bearerToken.trim()) {
+          throw new Error(ui.shareFailed);
+        }
+        const invite = await createLiveKitInvite({
+          apiBaseUrl: session.apiBaseUrl,
+          room: session.roomId,
+          bearerToken,
+        });
+        nextShareUrl = `${publicJoinBaseUrl}/join/${encodeURIComponent(invite.inviteId)}`;
+        setShareInviteUrl(nextShareUrl);
+      }
       await Share.share({
-        title: "Salle BFZoom",
-        message: `Rejoins ma salle BFZoom en 1 clic : ${roomShareWebUrl}
-
-Si l'app BFZoom est installée, elle s'ouvre automatiquement. Sinon, la version web s'ouvre.`,
-        url: roomShareWebUrl,
+        title: ui.shareTitle,
+        message: ui.shareMessage(nextShareUrl),
+        url: nextShareUrl,
       });
     } catch (err) {
-      setSessionError(
-        err instanceof Error ? err.message : "Impossible de partager le lien de salle."
+      const rawMessage = err instanceof Error ? err.message : "";
+      const looksLikeHtml =
+        /^<!doctype html/i.test(rawMessage.trim()) ||
+        /^<html/i.test(rawMessage.trim()) ||
+        /<head[\s>]/i.test(rawMessage) ||
+        /<body[\s>]/i.test(rawMessage);
+      const looksLikeMissingRoute =
+        /\b404\b/i.test(rawMessage) ||
+        /not found/i.test(rawMessage) ||
+        /page introuvable/i.test(rawMessage);
+      const message =
+        looksLikeHtml || looksLikeMissingRoute || !rawMessage.trim()
+          ? ui.shareInviteUnavailable
+          : rawMessage;
+      Alert.alert(
+        ui.shareInviteUnavailableTitle,
+        message
       );
     }
-  }, [roomShareWebUrl]);
+  }, [publicJoinBaseUrl, session.apiBaseUrl, session.bearerToken, session.roomId, shareInviteUrl, ui]);
 
   useEffect(() => {
     let cancelled = false;
     const start = async () => {
       try {
-        await AudioSession.startAudioSession();
-        await AudioSession.setDefaultRemoteAudioTrackVolume(1).catch(() => {});
-        await AudioSession.selectAudioOutput("force_speaker").catch(() => {});
+        await ensureCallAudioSession();
       } catch (err) {
         if (cancelled) return;
-        setSessionError(err instanceof Error ? err.message : "Failed to start audio session.");
+        setSessionError(
+          err instanceof Error && err.message.trim()
+            ? err.message
+            : audioSessionErrorFallbackRef.current
+        );
       }
     };
     void start();
     return () => {
       cancelled = true;
+      clearRoomRecoveryTimer();
+      leaveRequestedRef.current = true;
       Speech.stop();
-      void AudioSession.stopAudioSession();
+      void runSharedCallAudioTransition(async () => {
+        if (Platform.OS === "ios" && sharedActiveCallAudioOwnerKey !== callAudioOwnerKey) {
+          return;
+        }
+        await setIsAudioActiveAsync(false).catch(() => {});
+        await AudioSession.stopAudioSession().catch(() => {});
+        if (Platform.OS === "ios") {
+          sharedExpoAudioMode = "idle";
+          sharedActiveCallAudioOwnerKey = "";
+        }
+      }).catch(() => {});
     };
-  }, []);
+  }, [
+    audioSessionErrorFallbackRef,
+    callAudioOwnerKey,
+    clearRoomRecoveryTimer,
+    ensureCallAudioSession,
+  ]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      const wasActive = appStateRef.current === "active";
+      const isActive = nextState === "active";
+      appStateRef.current = nextState;
+      if (!wasActive && isActive) {
+        if (roomRecoveryAttemptRef.current >= ROOM_RECOVERY_RETRY_DELAYS_MS.length) {
+          roomRecoveryAttemptRef.current = 0;
+        }
+        void ensureCallAudioSession().catch((error) => {
+          const message =
+            error instanceof Error && error.message.trim()
+              ? error.message
+              : audioSessionErrorFallbackRef.current;
+          setSessionError(message);
+        });
+        if (liveKitRoom.state === ConnectionState.Disconnected) {
+          scheduleRoomRecovery();
+        }
+        return;
+      }
+      if (wasActive && !isActive) {
+        clearRoomRecoveryTimer();
+      }
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [clearRoomRecoveryTimer, ensureCallAudioSession, liveKitRoom, scheduleRoomRecovery]);
 
   return (
     <View style={styles.screen}>
       {!immersiveMode ? (
-        <View style={[styles.topBar, isCompactPhone && styles.topBarCompact]}>
-          <View>
-            <Text style={[styles.topTitle, isCompactPhone && styles.topTitleCompact]}>
-              {isChatCall ? ((session.callMode || "video") === "video" ? "Appel vidéo" : "Appel audio") : session.roomId}
-            </Text>
-            <Text style={[styles.topSubtitle, isCompactPhone && styles.topSubtitleCompact]}>
-              {isChatCall
-                ? `CHAT · ${((session.callMode || "video") === "video" ? "Visio" : "Audio")} · ${session.displayName}`
-                : `${session.role.toUpperCase()} · ${session.displayName}`}
-            </Text>
-            <Text style={[styles.modeBadge, isCompactPhone && styles.modeBadgeCompact]}>
-              {roleModeLabel}
-            </Text>
-          </View>
-          <View style={[styles.topActions, isCompactPhone && styles.topActionsCompact]}>
-            {!isChatCall && isHostSession ? (
-              <Pressable onPress={shareRoomAccess} style={styles.shareButton}>
-                <Text style={styles.shareText}>Partager</Text>
+        <View style={styles.topBarShell}>
+          <View
+            style={[
+              styles.topBar,
+              isCompactPhone && styles.topBarCompact,
+              useCenteredTabletTopBar && styles.topBarTablet,
+            ]}
+          >
+            <View
+              style={[
+                styles.topIdentity,
+                isCompactPhone && styles.topIdentityCompact,
+                useCenteredTabletTopBar && styles.topIdentityTablet,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.topTitle,
+                  isCompactPhone && styles.topTitleCompact,
+                ]}
+              >
+                BFZoom
+              </Text>
+              <Text
+                style={[
+                  styles.topSubtitle,
+                  isCompactPhone && styles.topSubtitleCompact,
+                ]}
+                numberOfLines={1}
+                ellipsizeMode="tail"
+              >
+                {`${session.role.toUpperCase()} · ${session.displayName}`}
+              </Text>
+              <Text
+                style={[
+                  styles.modeBadge,
+                  isCompactPhone && styles.modeBadgeCompact,
+                ]}
+              >
+                {roleModeLabel}
+              </Text>
+            </View>
+            <View
+              style={[
+                styles.topActions,
+                isCompactPhone && styles.topActionsCompact,
+                useCenteredTabletTopBar && styles.topActionsTablet,
+              ]}
+            >
+              {isHostSession ? (
+                <Pressable
+                  onPress={shareRoomAccess}
+                  style={[styles.shareButton, useCenteredTabletTopBar && styles.topActionButtonTablet]}
+                >
+                  <Text style={styles.shareText}>{ui.share}</Text>
+                </Pressable>
+              ) : null}
+              <Pressable
+                onPress={endRoomForAll}
+                style={[
+                  styles.leaveButton,
+                  leavePending && styles.leaveButtonDisabled,
+                  useCenteredTabletTopBar && styles.topActionButtonTablet,
+                ]}
+                disabled={leavePending}
+              >
+                <Text style={styles.leaveText}>{leaveButtonLabel}</Text>
               </Pressable>
-            ) : null}
-            <Pressable onPress={() => onLeave()} style={styles.leaveButton}>
-              <Text style={styles.leaveText}>Quitter</Text>
-            </Pressable>
+            </View>
           </View>
         </View>
       ) : null}
 
-      {!immersiveMode && sessionError ? <Text style={styles.error}>{sessionError}</Text> : null}
+      {sessionError ? (
+        <Text style={styles.error} numberOfLines={3} ellipsizeMode="tail">
+          {sessionError}
+        </Text>
+      ) : null}
 
-      <LiveKitRoom
-        serverUrl={session.livekitUrl}
-        token={session.livekitToken}
-        connect
-        audio
-        video={!isChatAudioCall}
-        onConnected={() => {
-          setConnected(true);
-          setSessionError("");
-        }}
-        onDisconnected={() => {
-          setConnected(false);
-        }}
-        onError={(err) => {
-          setSessionError(err.message || "LiveKit error");
-        }}
-        options={{
-          adaptiveStream: { pixelDensity: "screen" },
-          dynacast: true,
-        }}
-      >
+      <RoomContext.Provider key={roomContextKey} value={liveKitRoom}>
         <RoomView
+          key={roomContextKey}
           session={session}
           connected={connected}
           immersiveMode={immersiveMode}
           setImmersiveMode={setImmersiveMode}
-          isChatCall={isChatCall}
-          isChatAudioCall={isChatAudioCall}
-          onLeave={onLeave}
+          isAudioOnlyCall={isAudioOnlyCall}
+          onLeave={handleLeaveRequest}
+          onEndForAll={endRoomForAll}
         />
-      </LiveKitRoom>
+      </RoomContext.Provider>
     </View>
   );
 }
@@ -831,42 +1268,311 @@ function RoomView({
   connected,
   immersiveMode,
   setImmersiveMode,
-  isChatCall,
-  isChatAudioCall,
+  isAudioOnlyCall,
   onLeave,
+  onEndForAll,
 }: {
   session: MobileCallSession;
   connected: boolean;
   immersiveMode: boolean;
   setImmersiveMode: (next: boolean | ((value: boolean) => boolean)) => void;
-  isChatCall: boolean;
-  isChatAudioCall: boolean;
+  isAudioOnlyCall: boolean;
   onLeave: (reason?: string) => void;
+  onEndForAll: () => void;
 }) {
-  useKeepAwake();
+  const { language } = useI18n();
+  const insets = useSafeAreaInsets();
   const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
   const isCompactPhone = viewportWidth <= 430;
   const isVeryCompactPhone = viewportWidth <= 380 || viewportHeight <= 760;
+  const immersiveControlsTopOffset = Math.max(insets.top, 0) + 10;
+  const immersiveSubtitleTopOffset = immersiveControlsTopOffset + 54;
+  const preferSpeakerForCall = Platform.OS === "ios";
   const room = useRoomContext();
-  const isCoachSession = session.originModule === "coach";
+  const canPublishRoomData = () => {
+    return (
+      connected &&
+      appStateRef.current === "active" &&
+      room.state === ConnectionState.Connected
+    );
+  };
   const isHostSession = session.role === "host";
+  const ui = useMemo(
+    () =>
+      language === "fr"
+        ? {
+            translationUnlockHint:
+              "Traduction indisponible: tes 3 minutes d'essai gratuit sont epuisees et tu n'as plus de minutes de traduction actives. La visio simple reste disponible.",
+            translationWaitHostHint:
+              "Traduction en attente: l'hote doit disposer de minutes offertes ou de minutes de traduction actives.",
+            creditsLoading: "Minutes...",
+            creditsUnlimited: "Minutes illimitees",
+            creditsPremium: "Premium",
+            minutesLeft: (minutes: number) => `${minutes} min restantes`,
+            topUpRequired: "Recharge requise",
+            creditsPageOpenFailed: "Impossible d'ouvrir la page de recharge pour le moment.",
+            reviewBeforeSend: "Verifie avant envoi",
+            translating: "Traduction...",
+            micInit: "Initialisation du micro...",
+            analyzing: "Analyse...",
+            speakNow: "Parle maintenant",
+            translationUnavailable: "Traduction indisponible",
+            otherParticipantSpeaking: (name: string) => `${name} parle en ce moment`,
+            pressAndRelease: "Appuie puis relache pour traduire",
+            correctFirst: "Corrige d'abord",
+            micShort: "Micro...",
+            sending: "Envoi...",
+            release: "Relache",
+            locked: "Verrouille",
+            busy: "Occupe",
+            holdToTalk: "Maintiens pour parler",
+            cancel: "Annuler",
+            leaveCall: "Quitter",
+            endForAll: "Terminer pour tous",
+            exitFullscreen: "Quitter plein ecran",
+            talkieBusyBy: (name: string) => `Talkie occupe par ${name}.`,
+            topUpNow: "Recharger maintenant",
+            addMinutes: "Ajouter des minutes",
+            topUpFromDashboard:
+              "Ajoute des minutes depuis le dashboard iOS apres cet appel.",
+            audioCallTitle: "Appel audio BFZoom",
+            connected: "Connecté",
+            connecting: "Connexion...",
+            participants: (count: number) => `Interlocuteur${count > 1 ? "s" : ""}: ${count}`,
+            audioChannelActive: "Canal audio actif. Tu peux parler normalement.",
+            waitingParticipant: "En attente du participant...",
+            noAnswerAutoLeave:
+              "Aucun participant n'a rejoint l'appel. Retour automatique en cours...",
+            participantLeftAutoLeave:
+              "Le participant a quitté l'appel. Retour automatique en cours...",
+            participantLeftWaiting:
+              "Le participant s'est déconnecté. En attente de reconnexion...",
+            micOn: "Mic on",
+            micOff: "Mic off",
+            noCameraTrack: "Aucune piste camera pour le moment.",
+            translationMenuHide: "Masquer traduction",
+            translationMenuShow: "Menu traduction",
+            translation: "Traduction",
+            languageYouSpeak: "Langue que tu parles",
+            receptionLanguage: "Langue de reception",
+            hostTranslationRemaining: (value: string) => `Temps traduction restant (hote): ${value}`,
+            stable: "Stable",
+            reconnecting: "Reconnexion...",
+            signal: "Signal...",
+            pinned: "Epingle",
+            autoSpeaker: "Auto speaker",
+            manual: "Manuel",
+            correctBeforeSendTitle: "Corriger avant envoi",
+            keyboard: "Clavier",
+            send: "Envoyer",
+            reviewTextThenSend: "Verifie ton texte, puis envoie la version corrigee.",
+            correctTextPlaceholder: "Corrige ton texte si besoin...",
+            fullScreen: "Plein ecran",
+            reload: "Recharger",
+            speaker: "Intervenant",
+            source: "Source",
+            close: "Fermer",
+            controls: "Controles",
+            subtitleLayout: "Texte source",
+            subtitleLayoutDual: "Afficher",
+            subtitleLayoutTranslationOnly: "Masquer",
+            translatedVoiceSetting: "Voix traduite sur cet iPhone",
+            translatedVoiceOn: "Lire",
+            translatedVoiceOff: "Couper",
+            fullTranslationSetting: "Traduction complete",
+            viewFullTranslation: "Voir tout",
+            tapSubtitleToExpand: "Touchez une bulle ou Voir tout pour agrandir",
+            translatedVoiceMutedBadge: "Voix traduite coupee",
+            translationTalkieMeta: (source: string, target: string) =>
+              `${source} → ${target} · Talkie`,
+            autoSpeakerToggle: (enabled: boolean) => `Auto speaker ${enabled ? "On" : "Off"}`,
+            unpinFocus: "Retirer le focus",
+            pinFocus: "Epingler le focus",
+            translationActive: "Talkie traduction actif",
+            holdSpeakRelease:
+              'Maintiens "Maintenir pour parler", parle, puis relache pour traduire.',
+            captionsShared: "Les sous-titres sont partages avec tous les participants.",
+            smallGroupRecommendation: "Optimise pour 2 a 4 participants sur iPhone.",
+            groupVoicePlaybackLimited:
+              "En groupe, la voix traduite auto est desactivee pour garder l'appel clair. Utilise Reecouter si besoin.",
+            groupSizeWarning: (count: number) =>
+              `Appel a ${count} participants: au-dela de 4, l'experience traduction iPhone peut se degrader.`,
+            checkingCredits: "Verification des minutes de traduction...",
+            translatedVoiceUnavailable: (languageLabel: string) =>
+              `Voix traduite: aucune voix ${languageLabel} installee sur cet iPhone. Installe-la dans Reglages > Accessibilite > Contenu enonce > Voix.`,
+            verifyTextBeforeSend: "Verifie ton texte avant envoi",
+            closeKeyboard: "Fermer clavier",
+            retranslateBusy: "Retraduction...",
+            retranslate: "Retraduire",
+            replayBusy: "Reecoute...",
+            replay: "Reecouter",
+            phoneticLoading: "Phonetique: generation...",
+            phonetic: (value: string) => `Phonetique: ${value}`,
+            translationUnavailableError: "Traduction indisponible.",
+            translationForbidden:
+              "Traduction refusee pour ce compte. Le texte source reste visible.",
+            translationFallback: (message: string) =>
+              `Traduction indisponible, fallback texte source: ${message}`,
+            speakAtLeastOneSecond:
+              "Parle au moins une seconde avant de lancer la traduction.",
+            audioNotFinalized: "Audio non finalise. Relache puis reessaie.",
+            audioTooShort: "Audio invalide ou trop court. Parle 1-2 secondes puis reessaie.",
+            meSuffix: " (moi)",
+            languageAlertTitle: "Langue",
+            frontCamera: "Camera avant",
+            backCamera: "Camera arriere",
+            cameraOn: "Cam on",
+            cameraOff: "Cam off",
+            camera: "Camera",
+            tracks: "Pistes",
+          }
+        : {
+            translationUnlockHint:
+              "Translation unavailable: your 3 free trial minutes are used up and you have no active translation minutes left. Basic video calls remain available.",
+            translationWaitHostHint:
+              "Translation pending: the host must have free minutes or active translation minutes.",
+            creditsLoading: "Minutes...",
+            creditsUnlimited: "Unlimited minutes",
+            creditsPremium: "Premium",
+            minutesLeft: (minutes: number) => `${minutes} min left`,
+            topUpRequired: "Top up required",
+            creditsPageOpenFailed: "Unable to open the top-up page right now.",
+            reviewBeforeSend: "Review before sending",
+            translating: "Translating...",
+            micInit: "Starting microphone...",
+            analyzing: "Analyzing...",
+            speakNow: "Speak now",
+            translationUnavailable: "Translation unavailable",
+            otherParticipantSpeaking: (name: string) => `${name} is speaking right now`,
+            pressAndRelease: "Press and release to translate",
+            correctFirst: "Correct first",
+            micShort: "Mic...",
+            sending: "Sending...",
+            release: "Release",
+            locked: "Locked",
+            busy: "Busy",
+            holdToTalk: "Hold to talk",
+            cancel: "Cancel",
+            leaveCall: "Leave",
+            endForAll: "End for all",
+            exitFullscreen: "Exit fullscreen",
+            talkieBusyBy: (name: string) => `Talkie is busy with ${name}.`,
+            topUpNow: "Top up now",
+            addMinutes: "Add minutes",
+            topUpFromDashboard: "Add minutes from the iOS dashboard after this call.",
+            audioCallTitle: "BFZoom audio call",
+            connected: "Connected",
+            connecting: "Connecting...",
+            participants: (count: number) => `Participant${count > 1 ? "s" : ""}: ${count}`,
+            audioChannelActive: "Audio channel is active. You can speak normally.",
+            waitingParticipant: "Waiting for participant...",
+            noAnswerAutoLeave:
+              "No participant joined the call. Returning automatically...",
+            participantLeftAutoLeave:
+              "The participant left the call. Returning automatically...",
+            participantLeftWaiting:
+              "The participant disconnected. Waiting for reconnection...",
+            micOn: "Mic on",
+            micOff: "Mic off",
+            noCameraTrack: "No camera track for now.",
+            translationMenuHide: "Hide translation",
+            translationMenuShow: "Translation menu",
+            translation: "Translation",
+            languageYouSpeak: "Language you speak",
+            receptionLanguage: "Reception language",
+            hostTranslationRemaining: (value: string) => `Host translation time left: ${value}`,
+            stable: "Stable",
+            reconnecting: "Reconnecting...",
+            signal: "Signal...",
+            pinned: "Pinned",
+            autoSpeaker: "Auto speaker",
+            manual: "Manual",
+            correctBeforeSendTitle: "Correct before sending",
+            keyboard: "Keyboard",
+            send: "Send",
+            reviewTextThenSend: "Review your text, then send the corrected version.",
+            correctTextPlaceholder: "Correct your text if needed...",
+            fullScreen: "Fullscreen",
+            reload: "Top up",
+            speaker: "Speaker",
+            source: "Source",
+            close: "Close",
+            controls: "Controls",
+            subtitleLayout: "Source text",
+            subtitleLayoutDual: "Show",
+            subtitleLayoutTranslationOnly: "Hide",
+            translatedVoiceSetting: "Translated voice on this iPhone",
+            translatedVoiceOn: "Play",
+            translatedVoiceOff: "Mute",
+            fullTranslationSetting: "Full translation",
+            viewFullTranslation: "View all",
+            tapSubtitleToExpand: "Tap a bubble or View all to expand",
+            translatedVoiceMutedBadge: "Translated voice muted",
+            translationTalkieMeta: (source: string, target: string) =>
+              `${source} → ${target} · Talkie`,
+            autoSpeakerToggle: (enabled: boolean) => `Auto speaker ${enabled ? "On" : "Off"}`,
+            unpinFocus: "Unpin focus",
+            pinFocus: "Pin focus",
+            translationActive: "Translation talkie is active",
+            holdSpeakRelease: 'Hold "Hold to talk", speak, then release to translate.',
+            captionsShared: "Captions are shared with all participants.",
+            smallGroupRecommendation: "Optimized for 2 to 4 participants on iPhone.",
+            groupVoicePlaybackLimited:
+              "In group calls, automatic translated voice is disabled to keep the call clear. Use Replay when needed.",
+            groupSizeWarning: (count: number) =>
+              `Call with ${count} participants: beyond 4, the iPhone translation experience may degrade.`,
+            checkingCredits: "Checking translation minutes...",
+            translatedVoiceUnavailable: (languageLabel: string) =>
+              `Translated voice: no ${languageLabel} voice is installed on this iPhone. Install it in Settings > Accessibility > Spoken Content > Voices.`,
+            verifyTextBeforeSend: "Review your text before sending",
+            closeKeyboard: "Hide keyboard",
+            retranslateBusy: "Retranslating...",
+            retranslate: "Retranslate",
+            replayBusy: "Replaying...",
+            replay: "Replay",
+            phoneticLoading: "Phonetic: generating...",
+            phonetic: (value: string) => `Phonetic: ${value}`,
+            translationUnavailableError: "Translation unavailable.",
+            translationForbidden:
+              "Translation is blocked for this account. The source text remains visible.",
+            translationFallback: (message: string) =>
+              `Translation unavailable, falling back to source text: ${message}`,
+            speakAtLeastOneSecond: "Speak for at least one second before translating.",
+            audioNotFinalized: "Audio is not finalized yet. Release and try again.",
+            audioTooShort: "Audio is invalid or too short. Speak for 1-2 seconds and try again.",
+            meSuffix: " (me)",
+            languageAlertTitle: "Language",
+            frontCamera: "Front camera",
+            backCamera: "Back camera",
+            cameraOn: "Cam on",
+            cameraOff: "Cam off",
+            camera: "Camera",
+            tracks: "Tracks",
+          },
+    [language]
+  );
   const [remoteParticipantCount, setRemoteParticipantCount] = useState(0);
-  const cameraTracks = useTracks([Track.Source.Camera]);
-  const remoteAudioTracks = useTracks(
-    [
+  const cameraTrackSources = useMemo(() => [Track.Source.Camera], []);
+  const remoteAudioTrackSources = useMemo(
+    () => [
       { source: Track.Source.ScreenShareAudio, withPlaceholder: false },
       { source: Track.Source.Microphone, withPlaceholder: false },
     ],
-    {
-      onlySubscribed: true,
-    }
+    []
   );
+  const remoteAudioTrackQuery = useMemo(
+    () => ({
+      onlySubscribed: true,
+    }),
+    []
+  );
+  const cameraTracks = useTracks(cameraTrackSources);
+  const remoteAudioTracks = useTracks(remoteAudioTrackSources, remoteAudioTrackQuery);
   const { localParticipant, isMicrophoneEnabled, isCameraEnabled } = useLocalParticipant();
   const [focusedTrackKey, setFocusedTrackKey] = useState<string | null>(null);
   const [videoFullscreen, setVideoFullscreen] = useState(true);
   const [controlsOpen, setControlsOpen] = useState(false);
   const [translationPanelOpen, setTranslationPanelOpen] = useState(false);
-  const [showTranslationInfo, setShowTranslationInfo] = useState(false);
   const [followActiveSpeaker, setFollowActiveSpeaker] = useState(true);
   const [pinnedTrackKey, setPinnedTrackKey] = useState<string | null>(null);
   const [activeSpeakerIdentity, setActiveSpeakerIdentity] = useState("");
@@ -878,40 +1584,37 @@ function RoomView({
 
   const [translationBusy, setTranslationBusy] = useState(false);
   const [translationError, setTranslationError] = useState("");
-  const [coachConversationEnabled, setCoachConversationEnabled] = useState(
-    session.originModule === "coach"
+  const [participantReconnectPending, setParticipantReconnectPending] = useState(false);
+  const [waitingForParticipant, setWaitingForParticipant] = useState(false);
+  const [roomLifecycleTick, setRoomLifecycleTick] = useState(0);
+  const [currentBearerToken, setCurrentBearerToken] = useState(() =>
+    (session.bearerToken || "").trim()
   );
-  const [coachPartnerLoading, setCoachPartnerLoading] = useState(false);
-  const [coachPartnerError, setCoachPartnerError] = useState("");
-  const [coachPartnerReply, setCoachPartnerReply] = useState("");
-  const [coachPartnerReplyTranslation, setCoachPartnerReplyTranslation] = useState("");
-  const [coachReplySuggestions, setCoachReplySuggestions] = useState<CoachReplySuggestion[]>([]);
-  const [coachReplySuggestionsLoading, setCoachReplySuggestionsLoading] = useState(false);
-  const [coachSuggestionSpeakingId, setCoachSuggestionSpeakingId] = useState("");
-  const [coachPartnerSpeakActive, setCoachPartnerSpeakActive] = useState(false);
   const appStateRef = useRef(AppState.currentState);
+  const callAudioOwnerKey = useMemo(
+    () => `${session.roomId}:${session.identity}:${session.role}`,
+    [session.identity, session.role, session.roomId]
+  );
   const appWasActiveRef = useRef(AppState.currentState === "active");
-  const [coachModeId, setCoachModeId] = useState<CoachModeId>(COACH_MODES[0].id);
-  const [coachPrompt, setCoachPrompt] = useState("");
-  const [coachLocalText, setCoachLocalText] = useState("");
-  const [coachResponse, setCoachResponse] = useState("");
-  const [coachLoading, setCoachLoading] = useState(false);
-  const [coachError, setCoachError] = useState("");
-  const [coachUseAi, setCoachUseAi] = useState(false);
-  const [coachOutputLanguage, setCoachOutputLanguage] = useState<LanguageCode>("fr");
-  const [coachTone, setCoachTone] = useState<CoachTone>("professionnel");
-  const [coachCultureEnabled, setCoachCultureEnabled] = useState(true);
-  const [coachCultureRegion, setCoachCultureRegion] = useState("");
+  const keepAwakeActiveRef = useRef(false);
   const [translationEntitlement, setTranslationEntitlement] =
     useState<TranslationEntitlementState>(DEFAULT_TRANSLATION_ENTITLEMENT);
-  const [roomTranslationEnabled, setRoomTranslationEnabled] = useState(true);
+  const [roomTranslationEnabled, setRoomTranslationEnabled] = useState(false);
   const [roomTranslationReason, setRoomTranslationReason] = useState("");
   const [roomTranslationRemainingSeconds, setRoomTranslationRemainingSeconds] =
     useState<number | null>(null);
   const [captionText, setCaptionText] = useState("");
   const [captionPhoneticText, setCaptionPhoneticText] = useState("");
   const [captionPhoneticBusy, setCaptionPhoneticBusy] = useState(false);
+  const [captionPhoneticTrigger, setCaptionPhoneticTrigger] = useState(0);
   const [sourceText, setSourceText] = useState("");
+  const [subtitleSpeakerLabel, setSubtitleSpeakerLabel] = useState("");
+  const [subtitleDisplayMode, setSubtitleDisplayMode] =
+    useState<SubtitleDisplayMode>("translationOnly");
+  const [localPreviewCorner, setLocalPreviewCorner] =
+    useState<PreviewCorner>(IOS_PREVIEW_DEFAULT_CORNER);
+  const [expandedSubtitleKind, setExpandedSubtitleKind] =
+    useState<ExpandedSubtitleKind>(null);
   const [manualDraftVisible, setManualDraftVisible] = useState(false);
   const [manualDraftText, setManualDraftText] = useState("");
   const [manualDraftDurationSeconds, setManualDraftDurationSeconds] = useState(1);
@@ -938,6 +1641,7 @@ function RoomView({
   const [voiceId, setVoiceId] = useState(AUTO_VOICE_ID);
   const [realtimeVoiceId, setRealtimeVoiceId] = useState<RealtimeVoiceId>("ash");
   const [cameraFacingMode, setCameraFacingMode] = useState<CameraFacingMode>("user");
+  const [videoCaptureProfile, setVideoCaptureProfile] = useState<"balanced" | "low">("balanced");
   const [backgroundMode, setBackgroundMode] = useState<StageBackgroundId>("none");
   const [aiPrompt, setAiPrompt] = useState("");
   const [aiBackgroundUrl, setAiBackgroundUrl] = useState("");
@@ -949,16 +1653,68 @@ function RoomView({
   const [talkieLockExpiresAt, setTalkieLockExpiresAt] = useState(0);
   const ttsLockRef = useRef(false);
   const ttsPlayerRef = useRef<ReturnType<typeof createAudioPlayer> | null>(null);
+  const audioTransitionChainRef = useRef<Promise<void>>(Promise.resolve());
+  const expoAudioModeRef = useRef<"idle" | "playback" | "recording">("idle");
+  const roomAudioInstanceActiveRef = useRef(true);
+
+  useEffect(() => {
+    roomAudioInstanceActiveRef.current = true;
+    return () => {
+      roomAudioInstanceActiveRef.current = false;
+    };
+  }, []);
+
+  const syncCallKeepAwake = useCallback(async (nextAppState: string) => {
+    const shouldKeepAwake = nextAppState === "active";
+    try {
+      if (shouldKeepAwake) {
+        await activateKeepAwakeAsync(CALL_KEEP_AWAKE_TAG);
+        keepAwakeActiveRef.current = true;
+        return;
+      }
+      if (!keepAwakeActiveRef.current) return;
+      await deactivateKeepAwake(CALL_KEEP_AWAKE_TAG);
+      keepAwakeActiveRef.current = false;
+    } catch {}
+  }, []);
+  const releaseExpoAudioActivity = useCallback(async () => {
+    if (!roomAudioInstanceActiveRef.current) return;
+    if (manualRecordingStartedAtRef.current > 0) return;
+    if (Platform.OS === "ios") {
+      if (
+        sharedActiveCallAudioOwnerKey &&
+        sharedActiveCallAudioOwnerKey !== callAudioOwnerKey
+      ) {
+        return;
+      }
+      sharedExpoAudioMode = "idle";
+      expoAudioModeRef.current = "idle";
+      return;
+    }
+    await setIsAudioActiveAsync(false).catch(() => {});
+    expoAudioModeRef.current = "idle";
+  }, [callAudioOwnerKey]);
+  const abortActiveTranscription = useCallback(() => {
+    const controller = activeTranscriptionAbortControllerRef.current;
+    if (!controller) return;
+    activeTranscriptionAbortControllerRef.current = null;
+    controller.abort();
+  }, []);
   const ttsPlayerMonitorRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const ttsPlaybackWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ttsTempFileRef = useRef("");
   const ttsRequestSeqRef = useRef(0);
   const ttsPlaybackSessionRef = useRef(0);
+  const ttsPlaybackMetaRef = useRef<TtsPlaybackMeta | null>(null);
+  const activeTranscriptionAbortControllerRef = useRef<AbortController | null>(null);
   const ttsRemoteAudioDuckedRef = useRef(false);
-  const translationConsumeInFlightRef = useRef(false);
+  const mediaRecoveryCooldownUntilRef = useRef(0);
+  const translationConsumeQueueRef = useRef<Promise<boolean>>(Promise.resolve(true));
   const sourceTextLanguageRef = useRef<LanguageCode>("fr");
   const incomingTranslationSeqRef = useRef(0);
   const captionPhoneticSeqRef = useRef(0);
+  const captionPhoneticQueueTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingCaptionPhoneticRef = useRef<CaptionPhoneticJob | null>(null);
   const realtimeLoopRef = useRef(false);
   const realtimeQueueRef = useRef<RealtimeSegment[]>([]);
   const realtimeSegmentIdRef = useRef(0);
@@ -975,7 +1731,9 @@ function RoomView({
   const realtimeVoiceLoadedRef = useRef(false);
   const ttsVoiceLoadedKeyRef = useRef("");
   const cameraAutoStartedRef = useRef(false);
+  const cameraAutoStartInFlightRef = useRef(false);
   const previousRemoteTrackCountRef = useRef(0);
+  const lastAppliedVideoCaptureProfileRef = useRef<"balanced" | "low">("balanced");
   const autoMicEnsuredRef = useRef(false);
   const manualRecordingStartedAtRef = useRef(0);
   const manualPushToTalkPressedRef = useRef(false);
@@ -984,17 +1742,23 @@ function RoomView({
   const recordingStartUriRef = useRef("");
   const lastProcessedRecordingUriRef = useRef("");
   const stopTranslateInFlightRef = useRef(false);
+  const manualStopRequestIdRef = useRef(0);
   const talkieLockHolderRef = useRef("");
   const talkieLockExpiresAtRef = useRef(0);
+  const talkieLockClaimedAtRef = useRef(0);
+  const talkieLockLastSettledAtRef = useRef(0);
+  const talkieLockCaptionConsumedRef = useRef(false);
   const talkieLockTimestampRef = useRef(0);
   const talkieLockExpiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const talkiePulseOpacityRef = useRef(new Animated.Value(1));
   const talkiePulseAnimationRef = useRef<Animated.CompositeAnimation | null>(null);
+  const manualStartRequestIdRef = useRef(0);
+  const manualStartAnimationFrameRef = useRef<number | null>(null);
+  const realtimeSessionIdRef = useRef(0);
   const replayButtonTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retranslateButtonTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const coachPartnerRequestSeqRef = useRef(0);
-  const coachPartnerLastPromptRef = useRef("");
-  const coachPartnerSpeakTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const translatorWorkerEnsureKeyRef = useRef("");
+  const translatorWorkerReleaseRoomRef = useRef("");
   const recorderPreset = useMemo(() => {
     if (Platform.OS !== "ios") return RecordingPresets.HIGH_QUALITY;
     // iOS voice-chat sessions are more stable with mono capture for short talkie segments.
@@ -1055,13 +1819,15 @@ function RoomView({
     () => STAGE_BACKGROUND_PRESETS.find((item) => item.id === backgroundMode) || STAGE_BACKGROUND_PRESETS[0],
     [backgroundMode]
   );
-  const currentCoachMode = useMemo(
-    () => COACH_MODES.find((mode) => mode.id === coachModeId) || COACH_MODES[0],
-    [coachModeId]
-  );
-  const coachOutputLanguageOption = useMemo(
-    () => LANGUAGE_OPTIONS.find((item) => item.code === coachOutputLanguage) || LANGUAGE_OPTIONS[0],
-    [coachOutputLanguage]
+  const desiredCameraCaptureOptions = useMemo(
+    () => ({
+      facingMode: cameraFacingMode,
+      resolution:
+        videoCaptureProfile === "low"
+          ? IOS_VISIO_LOW_SIGNAL_VIDEO_RESOLUTION
+          : IOS_VISIO_BALANCED_VIDEO_RESOLUTION,
+    }),
+    [cameraFacingMode, videoCaptureProfile]
   );
   const effectiveTranslationEnabled = isHostSession
     ? translationEntitlement.enabled
@@ -1069,201 +1835,214 @@ function RoomView({
   const effectiveTranslationLockMessage = effectiveTranslationEnabled
     ? ""
     : isHostSession
-      ? translationEntitlement.lockReason || TRANSLATION_UNLOCK_HINT
-      : roomTranslationReason || TRANSLATION_WAIT_HOST_HINT;
+      ? translationEntitlement.lockReason || ui.translationUnlockHint
+      : roomTranslationReason || ui.translationWaitHostHint;
   const effectiveTranslationRemainingSeconds = isHostSession
     ? translationEntitlement.totalSecondsRemaining
     : roomTranslationRemainingSeconds;
   const translationRemainingLabel = formatTranslationRemaining(
     effectiveTranslationRemainingSeconds
   );
+  const translationRemainingMinutes =
+    typeof effectiveTranslationRemainingSeconds === "number" &&
+    Number.isFinite(effectiveTranslationRemainingSeconds)
+      ? Math.max(0, Math.ceil(effectiveTranslationRemainingSeconds / 60))
+      : null;
+  const shouldShowInCallTopUp =
+    isHostSession &&
+    (!effectiveTranslationEnabled ||
+      (typeof effectiveTranslationRemainingSeconds === "number" &&
+        Number.isFinite(effectiveTranslationRemainingSeconds) &&
+        effectiveTranslationRemainingSeconds <= 5 * 60));
+  const translationCreditsBadgeLabel = translationEntitlement.loading
+    ? ui.creditsLoading
+    : translationEntitlement.isAdmin
+      ? ui.creditsUnlimited
+      : translationEntitlement.isPremium
+        ? ui.creditsPremium
+        : translationRemainingMinutes !== null
+          ? ui.minutesLeft(translationRemainingMinutes)
+          : ui.topUpRequired;
   const translationControlsDisabled = !effectiveTranslationEnabled;
+  const languagePairSummary = `${sourceLanguage.toUpperCase()} → ${targetLanguage.toUpperCase()}`;
+  const topStatusBadgeLabel = translationRemainingLabel
+    ? ui.hostTranslationRemaining(translationRemainingLabel)
+    : isHostSession
+      ? translationCreditsBadgeLabel
+      : "";
+
+  useEffect(() => {
+    setCurrentBearerToken((session.bearerToken || "").trim());
+  }, [session.bearerToken]);
+
+  const refreshBearerToken = useCallback(
+    async (forceRefresh = false) => {
+      const fallbackToken = (currentBearerToken || session.bearerToken || "").trim();
+      const currentUser = auth?.currentUser;
+      if (!currentUser) return fallbackToken;
+      try {
+        const nextToken = (await currentUser.getIdToken(forceRefresh)).trim();
+        if (nextToken && nextToken !== fallbackToken) {
+          setCurrentBearerToken(nextToken);
+        }
+        return nextToken || fallbackToken;
+      } catch {
+        return fallbackToken;
+      }
+    },
+    [currentBearerToken, session.bearerToken]
+  );
+
+  const isAuthRetryableError = useCallback((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error || "");
+    return /401|unauthorized|session expir/i.test(message);
+  }, []);
+
+  const withFreshBearerToken = useCallback(
+    async (request: (token: string) => Promise<any>) => {
+      const initialToken = await refreshBearerToken();
+      try {
+        return await request(initialToken);
+      } catch (error) {
+        if (!isAuthRetryableError(error)) throw error;
+        const refreshedToken = await refreshBearerToken(true);
+        if (!refreshedToken || refreshedToken === initialToken) {
+          throw error;
+        }
+        return request(refreshedToken);
+      }
+    },
+    [isAuthRetryableError, refreshBearerToken]
+  );
 
   const refreshTranslationEntitlement = useCallback(async () => {
     if (!isHostSession) {
       setTranslationEntitlement({
         ...DEFAULT_TRANSLATION_ENTITLEMENT,
+        lockReason: ui.translationWaitHostHint,
         loading: false,
       });
       return;
     }
-    const bearerToken = (session.bearerToken || "").trim();
+    const bearerToken = await refreshBearerToken();
     if (!bearerToken) {
       setTranslationEntitlement({
         ...DEFAULT_TRANSLATION_ENTITLEMENT,
-        enabled: false,
         loading: false,
-        lockReason: TRANSLATION_UNLOCK_HINT,
+        lockReason: ui.translationUnlockHint,
       });
       return;
     }
     setTranslationEntitlement((prev) => ({ ...prev, loading: true }));
     try {
-      const response = await fetch(`${publicApiBase}/api/translation/entitlement`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${bearerToken}`,
-        },
-        cache: "no-store",
+      const response = await withFreshBearerToken(async (activeBearerToken) => {
+        const nextResponse = await fetch(`${publicApiBase}/api/translation/entitlement`, {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${activeBearerToken}`,
+          },
+          cache: "no-store",
+        });
+        if (nextResponse.status === 401) {
+          throw new Error("Unauthorized");
+        }
+        return nextResponse;
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
-        setTranslationEntitlement((prev) => ({ ...prev, loading: false }));
+        setTranslationEntitlement({
+          ...DEFAULT_TRANSLATION_ENTITLEMENT,
+          loading: false,
+          lockReason: ui.translationUnlockHint,
+        });
         return;
       }
       setTranslationEntitlement(normalizeTranslationEntitlement(payload));
     } catch {
-      setTranslationEntitlement((prev) => ({ ...prev, loading: false }));
+      setTranslationEntitlement({
+        ...DEFAULT_TRANSLATION_ENTITLEMENT,
+        loading: false,
+        lockReason: ui.translationUnlockHint,
+      });
     }
-  }, [isHostSession, publicApiBase, session.bearerToken]);
+  }, [isHostSession, publicApiBase, refreshBearerToken, ui.translationUnlockHint, ui.translationWaitHostHint, withFreshBearerToken]);
 
   const consumeTranslationSeconds = useCallback(
     async (seconds: number, origin: "local" | "remote") => {
       if (!isHostSession) return true;
-      const bearerToken = (session.bearerToken || "").trim();
+      const bearerToken = await refreshBearerToken();
       if (!bearerToken) return false;
       if (translationEntitlement.isAdmin || translationEntitlement.isPremium) return true;
-      if (translationConsumeInFlightRef.current) return translationEntitlement.enabled;
       const safeSeconds = Math.max(1, Math.min(300, Math.floor(seconds || 1)));
 
-      translationConsumeInFlightRef.current = true;
-      try {
-        const response = await fetch(`${publicApiBase}/api/translation/consume`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${bearerToken}`,
-          },
-          body: JSON.stringify({
-            seconds: safeSeconds,
-            origin,
-            roomId: session.roomId,
-          }),
-        });
-        const payload = await response.json().catch(() => ({}));
-        const hasEntitlementShape =
-          payload &&
-          typeof payload === "object" &&
-          ("enabled" in (payload as Record<string, unknown>) ||
-            "freeSecondsRemaining" in (payload as Record<string, unknown>));
-        if (hasEntitlementShape) {
-          setTranslationEntitlement(normalizeTranslationEntitlement(payload));
+      const runConsume = async () => {
+        try {
+          const response = await withFreshBearerToken(async (activeBearerToken) => {
+            const nextResponse = await fetch(`${publicApiBase}/api/translation/consume`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${activeBearerToken}`,
+              },
+              body: JSON.stringify({
+                seconds: safeSeconds,
+                origin,
+                roomId: session.roomId,
+              }),
+            });
+            if (nextResponse.status === 401) {
+              throw new Error("Unauthorized");
+            }
+            return nextResponse;
+          });
+          const payload = await response.json().catch(() => ({}));
+          const hasEntitlementShape =
+            payload &&
+            typeof payload === "object" &&
+            ("enabled" in (payload as Record<string, unknown>) ||
+              "freeSecondsRemaining" in (payload as Record<string, unknown>));
+          if (hasEntitlementShape) {
+            setTranslationEntitlement(normalizeTranslationEntitlement(payload));
+          }
+          if (
+            response.status === 402 ||
+            response.status === 401 ||
+            response.status === 403 ||
+            response.status === 429
+          ) {
+            return false;
+          }
+          if (!response.ok) {
+            return false;
+          }
+          return true;
+        } catch {
+          return false;
         }
-        if (response.status === 402) return false;
-        if (!response.ok) return true;
-        return true;
-      } catch {
-        return true;
-      } finally {
-        translationConsumeInFlightRef.current = false;
-      }
+      };
+
+      const queued = translationConsumeQueueRef.current.catch(() => true).then(runConsume);
+      translationConsumeQueueRef.current = queued;
+      return queued;
     },
     [
       isHostSession,
       publicApiBase,
-      session.bearerToken,
+      refreshBearerToken,
       session.roomId,
-      translationEntitlement.enabled,
       translationEntitlement.isAdmin,
       translationEntitlement.isPremium,
+      withFreshBearerToken,
     ]
   );
 
-  const handleCoachGenerate = useCallback(async () => {
-    if (!coachPrompt.trim()) return;
-    setCoachLoading(true);
-    setCoachError("");
-    try {
-      if (!coachUseAi) {
-        const fallback = coachLocalText.trim() || coachPrompt.trim();
-        setCoachResponse(fallback || "Aucune reponse locale.");
-        return;
-      }
-
-      const bearerToken = (session.bearerToken || "").trim();
-      if (!bearerToken) {
-        throw new Error("Mode IA indisponible en invite. Connecte-toi avec un compte hote.");
-      }
-      const culturalInstruction = coachCultureEnabled
-        ? `Adapte le style, les formulations, la politesse et les usages professionnels a la langue ${coachOutputLanguageOption.label}${
-            coachCultureRegion.trim() ? ` dans le contexte ${coachCultureRegion.trim()}` : ""
-          }. Evite les stereotypes.`
-        : "Utilise un style international neutre sans adaptation culturelle locale.";
-
-      const response = await fetch(`${publicApiBase}/api/openai`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${bearerToken}`,
-        },
-        body: JSON.stringify({
-          intent: "coach_ai",
-          roomId: session.roomId,
-          messages: [
-            {
-              role: "system",
-              content:
-                "Tu es un coach en communication professionnelle. Tu produis uniquement du contenu actionnable (scripts, questions, objections, formulations). " +
-                "Tu ne corriges pas les echanges live de la visio. " +
-                "Reponds en 6-8 lignes max, clair, concret et utilisable tout de suite. " +
-                culturalInstruction,
-            },
-            {
-              role: "user",
-              content: `Mode: ${currentCoachMode.title}\nLangue de sortie: ${coachOutputLanguageOption.label}\nTon: ${coachTone}\nDemande: ${coachPrompt.trim()}\nReponse courte avec 3 astuces pratico-pratiques.`,
-            },
-          ],
-        }),
-      });
-
-      const raw = await response.text();
-      let payload: unknown = null;
-      try {
-        payload = raw ? JSON.parse(raw) : null;
-      } catch {
-        if (!response.ok) {
-          throw new Error(raw || `Erreur IA (${response.status})`);
-        }
-      }
-
-      if (!response.ok) {
-        const message = (payload as { error?: string } | null)?.error || raw || `Erreur IA (${response.status})`;
-        throw new Error(message);
-      }
-      const choice = (payload as { choices?: { message?: { content?: string }; finish_reason?: string }[] } | null)
-        ?.choices?.[0];
-      const text = (choice?.message?.content || "").trim();
-      if (!text) {
-        throw new Error("Aucune reponse IA.");
-      }
-      setCoachResponse(
-        choice?.finish_reason === "length" ? `${text}\n\n[Reponse tronquee]` : text
-      );
-    } catch (error) {
-      setCoachError(error instanceof Error ? error.message : "Erreur coach IA.");
-    } finally {
-      setCoachLoading(false);
-    }
-  }, [
-    coachCultureEnabled,
-    coachCultureRegion,
-    coachLocalText,
-    coachOutputLanguageOption,
-    coachPrompt,
-    coachTone,
-    coachUseAi,
-    currentCoachMode.title,
-    publicApiBase,
-    session.bearerToken,
-    session.roomId,
-  ]);
-
   const broadcastRoomTranslationAccess = useCallback(async () => {
     if (!isHostSession || !localParticipant) return;
+    if (!canPublishRoomData()) return;
     const payload: TranslationAccessPayload = {
       roomId: session.roomId,
       enabled: translationEntitlement.enabled,
-      reason: translationEntitlement.lockReason || TRANSLATION_UNLOCK_HINT,
+      reason: translationEntitlement.lockReason || ui.translationUnlockHint,
       remainingSeconds:
         typeof translationEntitlement.totalSecondsRemaining === "number" &&
         Number.isFinite(translationEntitlement.totalSecondsRemaining)
@@ -1279,8 +2058,10 @@ function RoomView({
       });
     } catch {}
   }, [
+    connected,
     isHostSession,
     localParticipant,
+    room,
     session.identity,
     session.roomId,
     translationEntitlement.enabled,
@@ -1309,23 +2090,117 @@ function RoomView({
     return talkieLockHolderIdentity !== session.identity;
   }, [session.identity, talkieLockExpiresAt, talkieLockHolderIdentity]);
   const talkieLooksRecording =
-    talkieUiState === "recording" || recordingActive || manualRecordingStartedAtRef.current > 0;
+    talkieUiState === "recording" || (recordingActive && manualPushToTalkPressedRef.current);
   const talkieBusyVisual =
-    translationBusy || talkieUiState === "starting" || talkieUiState === "stopping";
-  const talkiePulseEnabled =
-    talkieUiState === "recording" || talkieUiState === "stopping" || translationBusy;
+    translationBusy ||
+    manualDraftVisible ||
+    manualDraftSending ||
+    talkieUiState === "starting" ||
+    talkieUiState === "stopping";
+  const talkiePulseEnabled = talkieLooksRecording;
+  const talkieStatusTone =
+    talkieUiState === "review" || manualDraftVisible || manualDraftSending
+      ? "review"
+      : translationControlsDisabled || isTalkieLockedByOther
+        ? "warning"
+        : talkieUiState === "starting" || talkieUiState === "stopping" || translationBusy
+          ? "busy"
+          : talkieLooksRecording
+            ? "active"
+            : "idle";
+  const talkieStatusLabel =
+    talkieUiState === "review" || manualDraftVisible
+      ? ui.reviewBeforeSend
+      : manualDraftSending
+        ? ui.translating
+        : talkieUiState === "starting"
+          ? ui.micInit
+          : talkieUiState === "stopping" || translationBusy
+            ? ui.analyzing
+            : talkieLooksRecording
+              ? ui.speakNow
+              : translationControlsDisabled
+                ? ui.translationUnavailable
+                : isTalkieLockedByOther
+                  ? ui.otherParticipantSpeaking(talkieLockHolderName || "BFZoom")
+                  : ui.pressAndRelease;
   const talkieButtonLabel =
-    talkieUiState === "starting"
-      ? "Initialisation micro..."
+    talkieUiState === "review" || manualDraftVisible
+      ? ui.correctFirst
+      : talkieUiState === "starting"
+      ? ui.micShort
       : talkieUiState === "stopping" || translationBusy
-        ? "Traduction en cours..."
+        ? ui.analyzing
+        : manualDraftSending
+          ? ui.sending
         : talkieLooksRecording
-          ? "Parle..."
+          ? ui.release
           : translationControlsDisabled
-            ? "Traduction verrouillee"
+            ? ui.locked
             : isTalkieLockedByOther
-              ? "Interlocuteur parle..."
-              : "Presse ici pour parler";
+              ? ui.busy
+              : ui.holdToTalk;
+
+  const getRemoteParticipantByIdentity = useCallback(
+    (identity?: string | null) => {
+      const normalizedIdentity = String(identity || "").trim();
+      if (!normalizedIdentity) return null;
+      return room?.remoteParticipants.get(normalizedIdentity) || null;
+    },
+    [room]
+  );
+
+  const getParticipantRole = useCallback(
+    (identity?: string | null): RoomParticipantRole => {
+      const normalizedIdentity = String(identity || "").trim();
+      if (!normalizedIdentity) return null;
+      if (normalizedIdentity === session.identity) {
+        return isHostSession ? "host" : "guest";
+      }
+      const participant = getRemoteParticipantByIdentity(normalizedIdentity);
+      return getParticipantRoleFromMetadata(participant?.metadata);
+    },
+    [getRemoteParticipantByIdentity, isHostSession, session.identity]
+  );
+
+  const isTrustedHumanParticipantIdentity = useCallback(
+    (identity?: string | null) => {
+      const normalizedIdentity = String(identity || "").trim();
+      if (!normalizedIdentity) return false;
+      if (normalizedIdentity === session.identity) return true;
+      const participant = getRemoteParticipantByIdentity(normalizedIdentity);
+      if (!participant) return false;
+      return getParticipantRoleFromMetadata(participant.metadata) !== "translator";
+    },
+    [getRemoteParticipantByIdentity, session.identity]
+  );
+
+  const countHumanRemoteParticipants = useCallback(() => {
+    if (!room) return 0;
+    let count = 0;
+    room.remoteParticipants.forEach((participant) => {
+      if (isTranslatorIdentity(participant.identity || "")) return;
+      if (getParticipantRoleFromMetadata(participant.metadata) === "translator") return;
+      count += 1;
+    });
+    return count;
+  }, [room]);
+
+  const estimateVerifiedRemoteUsageSeconds = useCallback((senderIdentity: string) => {
+    const normalizedSenderIdentity = senderIdentity.trim();
+    if (!normalizedSenderIdentity) return null;
+    if (normalizedSenderIdentity !== talkieLockHolderRef.current) return null;
+    if (talkieLockExpiresAtRef.current <= Date.now()) return null;
+    if (talkieLockCaptionConsumedRef.current) return null;
+    const claimStartedAt = talkieLockClaimedAtRef.current || Date.now();
+    const settledAt = talkieLockLastSettledAtRef.current || claimStartedAt;
+    const now = Date.now();
+    const elapsedMs = Math.max(0, now - Math.max(claimStartedAt, settledAt));
+    talkieLockLastSettledAtRef.current = now;
+    const seconds = Math.max(1, Math.min(300, Math.ceil(elapsedMs / 1000) || 1));
+    talkieLockCaptionConsumedRef.current = true;
+    return seconds;
+  }, []);
 
   useEffect(() => {
     const animatedOpacity = talkiePulseOpacityRef.current;
@@ -1366,6 +2241,10 @@ function RoomView({
   const clearTalkieLock = useCallback(() => {
     talkieLockHolderRef.current = "";
     talkieLockExpiresAtRef.current = 0;
+    talkieLockClaimedAtRef.current = 0;
+    talkieLockLastSettledAtRef.current = 0;
+    talkieLockCaptionConsumedRef.current = false;
+    talkieLockTimestampRef.current = 0;
     setTalkieLockHolderIdentity("");
     setTalkieLockHolderName("");
     setTalkieLockExpiresAt(0);
@@ -1386,15 +2265,23 @@ function RoomView({
     }, delay + 40);
   }, [clearTalkieLock]);
   const applyTalkieLockPayload = useCallback(
-    (payload: TalkieLockPayload) => {
+    (payload: TalkieLockPayload, senderIdentity?: string | null) => {
       if (payload.roomId && payload.roomId !== session.roomId) return;
-      const nextTimestamp =
-        typeof payload.timestamp === "number" ? payload.timestamp : Date.now();
+      const normalizedSenderIdentity = String(senderIdentity || "").trim();
+      const nextTimestamp = normalizedSenderIdentity
+        ? Date.now()
+        : typeof payload.timestamp === "number"
+          ? payload.timestamp
+          : Date.now();
       if (nextTimestamp < talkieLockTimestampRef.current) return;
-      talkieLockTimestampRef.current = nextTimestamp;
 
       const holder = (payload.holder || "").trim();
       const action = payload.action || "claim";
+      if (normalizedSenderIdentity) {
+        if (!isTrustedHumanParticipantIdentity(normalizedSenderIdentity)) return;
+        if (!holder || holder !== normalizedSenderIdentity) return;
+      }
+      talkieLockTimestampRef.current = nextTimestamp;
       if (action === "release") {
         if (!holder || holder === talkieLockHolderRef.current) {
           clearTalkieLock();
@@ -1402,18 +2289,42 @@ function RoomView({
         return;
       }
       if (!holder) return;
-      const expiresAt =
-        typeof payload.expiresAt === "number"
+      const expiresAt = normalizedSenderIdentity
+        ? Date.now() + TALKIE_LOCK_TIMEOUT_MS
+        : typeof payload.expiresAt === "number"
           ? payload.expiresAt
           : Date.now() + TALKIE_LOCK_TIMEOUT_MS;
+      if (holder !== talkieLockHolderRef.current) {
+        talkieLockClaimedAtRef.current = nextTimestamp;
+        talkieLockLastSettledAtRef.current = nextTimestamp;
+        talkieLockCaptionConsumedRef.current = false;
+      } else if (!talkieLockClaimedAtRef.current) {
+        talkieLockClaimedAtRef.current = nextTimestamp;
+      }
       talkieLockHolderRef.current = holder;
       talkieLockExpiresAtRef.current = expiresAt;
+      const holderParticipant = normalizedSenderIdentity
+        ? getRemoteParticipantByIdentity(normalizedSenderIdentity)
+        : null;
       setTalkieLockHolderIdentity(holder);
-      setTalkieLockHolderName((payload.holderName || "").trim());
+      setTalkieLockHolderName(
+        (
+          holderParticipant?.name ||
+          holderParticipant?.identity ||
+          payload.holderName ||
+          holder
+        ).trim()
+      );
       setTalkieLockExpiresAt(expiresAt);
       armTalkieLockExpiry(expiresAt);
     },
-    [armTalkieLockExpiry, clearTalkieLock, session.roomId]
+    [
+      armTalkieLockExpiry,
+      clearTalkieLock,
+      getRemoteParticipantByIdentity,
+      isTrustedHumanParticipantIdentity,
+      session.roomId,
+    ]
   );
   const publishTalkieLock = useCallback(
     async (action: "claim" | "release" | "heartbeat") => {
@@ -1429,6 +2340,7 @@ function RoomView({
         timestamp: Date.now(),
       };
       applyTalkieLockPayload(payload);
+      if (!canPublishRoomData()) return;
       try {
         await localParticipant.publishData(new TextEncoder().encode(JSON.stringify(payload)), {
           reliable: true,
@@ -1438,7 +2350,9 @@ function RoomView({
     },
     [
       applyTalkieLockPayload,
+      connected,
       localParticipant,
+      room,
       session.displayName,
       session.identity,
       session.roomId,
@@ -1462,9 +2376,10 @@ function RoomView({
     if (recordingActive) return;
     if (manualStartInFlightRef.current) return;
     if (translationBusy) return;
+    if (manualDraftVisible || manualDraftSending) return;
     if (talkieUiState === "idle") return;
     setTalkieUiState("idle");
-  }, [recordingActive, talkieUiState, translationBusy]);
+  }, [manualDraftSending, manualDraftVisible, recordingActive, talkieUiState, translationBusy]);
   const activeAccordionPanel: AccordionPanelKey | null = controlsOpen
     ? "controls"
     : translationPanelOpen
@@ -1479,7 +2394,6 @@ function RoomView({
   const closeAllAccordionPanels = useCallback(() => {
     setControlsOpen(false);
     setTranslationPanelOpen(false);
-    setShowTranslationInfo(false);
   }, []);
   const toggleAccordionPanel = useCallback(
     (panelKey: AccordionPanelKey) => {
@@ -1491,9 +2405,6 @@ function RoomView({
       setVideoFullscreen(false);
       setControlsOpen(panelKey === "controls");
       setTranslationPanelOpen(panelKey === "translation");
-      if (panelKey !== "translation") {
-        setShowTranslationInfo(false);
-      }
     },
     [activeAccordionPanel, closeAllAccordionPanels]
   );
@@ -1506,18 +2417,9 @@ function RoomView({
   }, [manualDraftVisible]);
 
   useEffect(() => {
-    if (!isChatCall || isChatAudioCall) return;
-    setControlsOpen(false);
+    if (isAudioOnlyCall) return;
     setTranslationPanelOpen(true);
-  }, [isChatAudioCall, isChatCall]);
-
-  useEffect(() => {
-    if (!isCoachSession || !coachConversationEnabled || isChatCall) return;
-    setVideoFullscreen(false);
-    setControlsOpen(false);
-    setTranslationPanelOpen(true);
-    setShowTranslationInfo(false);
-  }, [coachConversationEnabled, isChatCall, isCoachSession]);
+  }, [isAudioOnlyCall]);
 
   const setIosRemoteAudioTrackVolume = useCallback(async (volume: number) => {
     if (Platform.OS !== "ios") return;
@@ -1548,56 +2450,162 @@ function RoomView({
     [setIosRemoteAudioTrackVolume]
   );
 
-  const ensureIosSpeakerOutput = useCallback(async () => {
+  const applyIosAudioOutputPreference = useCallback(async (forceSpeaker = false) => {
     if (Platform.OS !== "ios") return;
+    const shouldUseSpeaker = forceSpeaker || preferSpeakerForCall;
+    try {
+      await AudioSession.setAppleAudioConfiguration(
+        getDefaultAppleAudioConfigurationForMode("localAndRemote", shouldUseSpeaker)
+      );
+    } catch {}
     try {
       await AudioSession.startAudioSession();
     } catch {}
     await setIosRemoteAudioTrackVolume(IOS_REMOTE_AUDIO_VOLUME_NORMAL);
     try {
-      await AudioSession.selectAudioOutput("force_speaker");
+      await AudioSession.selectAudioOutput(shouldUseSpeaker ? "force_speaker" : "default");
     } catch {}
-  }, [setIosRemoteAudioTrackVolume]);
+  }, [preferSpeakerForCall, setIosRemoteAudioTrackVolume]);
+
+  const runSerializedAudioTransition = useCallback(
+    async (
+      task: () => Promise<void>,
+      nextMode?: "idle" | "playback" | "recording",
+      force = false
+    ) => {
+      if (Platform.OS === "ios") {
+        await runSharedCallAudioTransition(async () => {
+          if (!roomAudioInstanceActiveRef.current) {
+            return;
+          }
+          if (
+            sharedActiveCallAudioOwnerKey &&
+            sharedActiveCallAudioOwnerKey !== callAudioOwnerKey
+          ) {
+            return;
+          }
+          if (nextMode && !force && sharedExpoAudioMode === nextMode) {
+            expoAudioModeRef.current = nextMode;
+            return;
+          }
+          await task();
+          if (!roomAudioInstanceActiveRef.current) {
+            return;
+          }
+          if (nextMode) {
+            sharedExpoAudioMode = nextMode;
+            expoAudioModeRef.current = nextMode;
+          }
+        });
+        return;
+      }
+      const previous = audioTransitionChainRef.current.catch(() => {});
+      let resolveNext!: () => void;
+      audioTransitionChainRef.current = new Promise<void>((resolve) => {
+        resolveNext = resolve;
+      });
+      try {
+        await previous;
+        if (nextMode && !force && expoAudioModeRef.current === nextMode) {
+          return;
+        }
+        await task();
+        if (nextMode) {
+          expoAudioModeRef.current = nextMode;
+        }
+      } finally {
+        resolveNext();
+      }
+    },
+    [callAudioOwnerKey]
+  );
 
   const setPlaybackAudioMode = useCallback(async () => {
-    await setAudioModeAsync({
-      allowsRecording: Platform.OS === "ios",
-      playsInSilentMode: true,
-      interruptionMode: Platform.OS === "ios" ? "doNotMix" : "duckOthers",
-      shouldPlayInBackground: false,
-      shouldRouteThroughEarpiece: false,
-    });
     if (Platform.OS === "ios") {
-      await ensureIosSpeakerOutput();
-      await wait(80);
+      await runSerializedAudioTransition(
+        async () => {
+          await setIsAudioActiveAsync(true).catch(() => {});
+          await applyIosAudioOutputPreference(false);
+          await wait(80);
+        },
+        "playback"
+      );
+      return;
     }
-  }, [ensureIosSpeakerOutput]);
+    await runSerializedAudioTransition(
+      async () => {
+        await setAudioModeAsync({
+          // Playback/TTS must not request a recording category on iOS.
+          allowsRecording: false,
+          playsInSilentMode: true,
+          interruptionMode: Platform.OS === "ios" ? "doNotMix" : "duckOthers",
+          shouldPlayInBackground: false,
+          shouldRouteThroughEarpiece: false,
+        });
+        if (Platform.OS === "ios") {
+          await applyIosAudioOutputPreference(false);
+          await wait(80);
+        }
+      },
+      "playback"
+    );
+  }, [applyIosAudioOutputPreference, runSerializedAudioTransition]);
 
   const setRecordingAudioMode = useCallback(async () => {
-    await setAudioModeAsync({
-      allowsRecording: true,
-      playsInSilentMode: true,
-      interruptionMode: Platform.OS === "ios" ? "doNotMix" : "duckOthers",
-      shouldPlayInBackground: false,
-      shouldRouteThroughEarpiece: false,
-    });
     if (Platform.OS === "ios") {
-      await ensureIosSpeakerOutput();
-      await wait(120);
+      await runSerializedAudioTransition(
+        async () => {
+          await setAudioModeAsync({
+            allowsRecording: true,
+            playsInSilentMode: true,
+            interruptionMode: "doNotMix",
+            shouldPlayInBackground: false,
+            shouldRouteThroughEarpiece: false,
+          });
+          await setIsAudioActiveAsync(true).catch(() => {});
+          await wait(120);
+        },
+        "recording"
+      );
+      return;
     }
-  }, [ensureIosSpeakerOutput]);
+    await runSerializedAudioTransition(
+      async () => {
+        await setAudioModeAsync({
+          allowsRecording: true,
+          playsInSilentMode: true,
+          interruptionMode: Platform.OS === "ios" ? "doNotMix" : "duckOthers",
+          shouldPlayInBackground: false,
+          shouldRouteThroughEarpiece: false,
+        });
+        if (Platform.OS === "ios") {
+          // Keep Expo in charge during recorder startup; reapplying the LiveKit
+          // room audio config here can trigger invalid iOS category transitions.
+          await wait(120);
+        }
+      },
+      "recording"
+    );
+  }, [runSerializedAudioTransition]);
 
   const resetIosAudioSession = useCallback(async () => {
     if (Platform.OS !== "ios") return;
-    try {
-      await AudioSession.stopAudioSession();
-    } catch {}
-    await wait(160);
-    try {
-      await AudioSession.startAudioSession();
-    } catch {}
-    await wait(220);
-  }, []);
+    await runSerializedAudioTransition(
+      async () => {
+        try {
+          await AudioSession.stopAudioSession();
+        } catch {}
+        await wait(160);
+        try {
+          await AudioSession.startAudioSession();
+        } catch {}
+        await wait(220);
+        await applyIosAudioOutputPreference(false);
+      },
+      undefined,
+      true
+    );
+  }, [applyIosAudioOutputPreference, runSerializedAudioTransition]);
 
   useEffect(() => {
     recorderUrlRef.current = recorderState.url || "";
@@ -1616,8 +2624,8 @@ function RoomView({
         setRecordingError("Micro iOS indisponible. Autorise le micro puis relance la room.");
       });
     }
-    void ensureIosSpeakerOutput();
-  }, [connected, ensureIosSpeakerOutput, isMicrophoneEnabled, localParticipant]);
+    void applyIosAudioOutputPreference(false);
+  }, [applyIosAudioOutputPreference, connected, isMicrophoneEnabled, localParticipant]);
 
   useEffect(() => {
     micEnabledRef.current = isMicrophoneEnabled;
@@ -1682,11 +2690,49 @@ function RoomView({
     ttsPlaybackWatchdogRef.current = null;
   }, []);
 
+  const clearCaptionPhoneticQueueTimer = useCallback(() => {
+    if (!captionPhoneticQueueTimerRef.current) return;
+    clearTimeout(captionPhoneticQueueTimerRef.current);
+    captionPhoneticQueueTimerRef.current = null;
+  }, []);
+
+  const queueCaptionPhoneticFlush = useCallback(
+    (delayMs: number) => {
+      clearCaptionPhoneticQueueTimer();
+      captionPhoneticQueueTimerRef.current = setTimeout(() => {
+        captionPhoneticQueueTimerRef.current = null;
+        setCaptionPhoneticTrigger((current) => current + 1);
+      }, Math.max(0, delayMs));
+    },
+    [clearCaptionPhoneticQueueTimer]
+  );
+
   const stopTtsPlayer = useCallback(
-    (options?: { preserveDucking?: boolean }) => {
+    (options?: { preserveDucking?: boolean; reason?: string; level?: "info" | "warn" }) => {
       clearTtsPlaybackWatchdog();
       clearTtsPlayerMonitor();
       const player = ttsPlayerRef.current;
+      const meta = ttsPlaybackMetaRef.current;
+      const currentTime = player?.currentTime ?? 0;
+      const duration = player?.duration ?? 0;
+      if (player || meta) {
+        logTtsEvent(
+          "stop",
+          {
+            sessionId: meta?.sessionId ?? ttsPlaybackSessionRef.current,
+            trigger: meta?.trigger,
+            source: meta?.source,
+            format: meta?.format,
+            reason: options?.reason || "unknown",
+            currentTimeMs: Math.round(currentTime * 1000),
+            durationMs: Math.round(duration * 1000),
+            elapsedMs: meta?.playbackStartedAt ? Date.now() - meta.playbackStartedAt : undefined,
+            requestAgeMs: meta?.requestStartedAt ? Date.now() - meta.requestStartedAt : undefined,
+            fileBytes: meta?.fileBytes,
+          },
+          options?.level || "info"
+        );
+      }
       if (player) {
         try {
           player.pause();
@@ -1696,24 +2742,35 @@ function RoomView({
         } catch {}
       }
       ttsPlayerRef.current = null;
+      ttsPlaybackMetaRef.current = null;
       const tempUri = ttsTempFileRef.current;
       ttsTempFileRef.current = "";
       if (tempUri) {
         void FileSystemLegacy.deleteAsync(tempUri, { idempotent: true }).catch(() => {});
       }
       ttsLockRef.current = false;
+      if (pendingCaptionPhoneticRef.current) {
+        queueCaptionPhoneticFlush(120);
+      }
       if (!options?.preserveDucking) {
         void restoreRemoteAudioAfterTts();
+        void releaseExpoAudioActivity();
       }
     },
-    [clearTtsPlaybackWatchdog, clearTtsPlayerMonitor, restoreRemoteAudioAfterTts]
+    [
+      clearTtsPlaybackWatchdog,
+      clearTtsPlayerMonitor,
+      queueCaptionPhoneticFlush,
+      releaseExpoAudioActivity,
+      restoreRemoteAudioAfterTts,
+    ]
   );
 
   const prepareTtsPlayback = useCallback(async () => {
     await setPlaybackAudioMode();
-    await setIsAudioActiveAsync(true).catch(() => {});
-    if (Platform.OS === "ios") {
-      await AudioSession.startAudioSession().catch(() => {});
+    if (Platform.OS !== "ios") {
+      await setIsAudioActiveAsync(true).catch(() => {});
+    } else {
       await wait(60);
     }
   }, [setPlaybackAudioMode]);
@@ -1734,8 +2791,8 @@ function RoomView({
   }, []);
 
   const playTtsUri = useCallback(
-    (uri: string) => {
-      stopTtsPlayer({ preserveDucking: true });
+    (uri: string, meta: TtsPlaybackMeta) => {
+      stopTtsPlayer({ preserveDucking: true, reason: "prepare_new_player" });
       const player = createAudioPlayer(
         { uri },
         {
@@ -1744,6 +2801,7 @@ function RoomView({
         }
       );
       ttsPlayerRef.current = player;
+      ttsPlaybackMetaRef.current = meta;
       ttsTempFileRef.current = uri;
       ttsLockRef.current = true;
       try {
@@ -1762,18 +2820,49 @@ function RoomView({
           activePlayer.duration > 0 &&
           activePlayer.currentTime >= activePlayer.duration - 0.15;
         if (ended) {
-          stopTtsPlayer();
+          stopTtsPlayer({ reason: "monitor_ended" });
         }
       }, 220);
     },
     [clearTtsPlayerMonitor, stopTtsPlayer]
   );
 
+  const waitForTtsPlaybackStart = useCallback(async (sessionId: number, timeoutMs: number) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (sessionId !== ttsPlaybackSessionRef.current) return false;
+      const player = ttsPlayerRef.current;
+      if (
+        player &&
+        (player.playing || player.currentTime > 0.02 || player.duration > 0.1)
+      ) {
+        return true;
+      }
+      await wait(80);
+    }
+    const player = ttsPlayerRef.current;
+    return Boolean(player && (player.playing || player.currentTime > 0.02 || player.duration > 0.1));
+  }, []);
+
   useEffect(() => {
-    void setPlaybackAudioMode().catch(() => {});
+    if (Platform.OS !== "ios") {
+      void setPlaybackAudioMode().catch(() => {});
+    }
     return () => {
+      manualStartRequestIdRef.current += 1;
+      if (manualStartAnimationFrameRef.current !== null) {
+        cancelAnimationFrame(manualStartAnimationFrameRef.current);
+        manualStartAnimationFrameRef.current = null;
+      }
+      manualStopRequestIdRef.current += 1;
+      realtimeSessionIdRef.current += 1;
+      abortActiveTranscription();
+      void publishTalkieLock("release");
+      void recorder.stop().catch(() => {});
+      void restoreRoomMicAfterRecorder();
       void Speech.stop();
-      stopTtsPlayer();
+      stopTtsPlayer({ reason: "component_unmount" });
+      clearCaptionPhoneticQueueTimer();
       if (replayButtonTimerRef.current) {
         clearTimeout(replayButtonTimerRef.current);
         replayButtonTimerRef.current = null;
@@ -1782,45 +2871,16 @@ function RoomView({
         clearTimeout(retranslateButtonTimerRef.current);
         retranslateButtonTimerRef.current = null;
       }
-      if (coachPartnerSpeakTimerRef.current) {
-        clearTimeout(coachPartnerSpeakTimerRef.current);
-        coachPartnerSpeakTimerRef.current = null;
-      }
       void configureNativeVirtualBackground({ enabled: false, imageUrl: "" }).catch(() => {});
       if (talkieLockExpiryTimerRef.current) {
         clearTimeout(talkieLockExpiryTimerRef.current);
         talkieLockExpiryTimerRef.current = null;
       }
     };
-  }, [setPlaybackAudioMode, stopTtsPlayer]);
-
-  useEffect(() => {
-    const subscription = AppState.addEventListener("change", (nextState) => {
-      const wasActive = appWasActiveRef.current;
-      const isActive = nextState === "active";
-      appStateRef.current = nextState;
-      appWasActiveRef.current = isActive;
-      if (!wasActive || isActive) return;
-
-      // iOS can terminate the app for sustained background CPU usage.
-      manualPushToTalkPressedRef.current = false;
-      manualStartInFlightRef.current = false;
-      pendingStopAfterStartRef.current = false;
-      setTalkieUiState("idle");
-      if (realtimeEnabled) {
-        setRealtimeEnabled(false);
-      }
-      stopTtsPlayer();
-      void recorder.stop().catch(() => {});
-      void setPlaybackAudioMode().catch(() => {});
-      void restoreRoomMicAfterRecorder();
-    });
-
-    return () => {
-      subscription.remove();
-    };
   }, [
-    realtimeEnabled,
+    abortActiveTranscription,
+    clearCaptionPhoneticQueueTimer,
+    publishTalkieLock,
     recorder,
     restoreRoomMicAfterRecorder,
     setPlaybackAudioMode,
@@ -1828,33 +2888,78 @@ function RoomView({
   ]);
 
   useEffect(() => {
-    if (coachConversationEnabled) return;
-    coachPartnerRequestSeqRef.current += 1;
-    coachPartnerLastPromptRef.current = "";
-    setCoachPartnerLoading(false);
-    setCoachPartnerError("");
-    setCoachPartnerReply("");
-    setCoachPartnerReplyTranslation("");
-    setCoachReplySuggestions([]);
-    setCoachReplySuggestionsLoading(false);
-    setCoachPartnerSpeakActive(false);
-    if (coachPartnerSpeakTimerRef.current) {
-      clearTimeout(coachPartnerSpeakTimerRef.current);
-      coachPartnerSpeakTimerRef.current = null;
-    }
-  }, [coachConversationEnabled]);
+    void syncCallKeepAwake(appStateRef.current);
+    return () => {
+      if (!keepAwakeActiveRef.current) return;
+      void deactivateKeepAwake(CALL_KEEP_AWAKE_TAG).catch(() => {});
+      keepAwakeActiveRef.current = false;
+    };
+  }, [syncCallKeepAwake]);
 
   useEffect(() => {
-    if (!coachConversationEnabled) return;
-    if (isChatCall) return;
-    if (!localParticipant || !isCameraEnabled) return;
-    void localParticipant.setCameraEnabled(false).catch(() => {});
-  }, [coachConversationEnabled, isCameraEnabled, isChatCall, localParticipant]);
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      const wasActive = appWasActiveRef.current;
+      const isActive = nextState === "active";
+      appStateRef.current = nextState;
+      appWasActiveRef.current = isActive;
+      setRoomLifecycleTick((current) => current + 1);
+      void syncCallKeepAwake(nextState);
+      if (!wasActive && isActive) {
+        void refreshTranslationEntitlement();
+        return;
+      }
+      if (!wasActive || isActive) return;
+
+      // iOS can terminate the app for sustained background CPU usage.
+      manualStartRequestIdRef.current += 1;
+      if (manualStartAnimationFrameRef.current !== null) {
+        cancelAnimationFrame(manualStartAnimationFrameRef.current);
+        manualStartAnimationFrameRef.current = null;
+      }
+      manualPushToTalkPressedRef.current = false;
+      manualStartInFlightRef.current = false;
+      manualStopRequestIdRef.current += 1;
+      pendingStopAfterStartRef.current = false;
+      realtimeSessionIdRef.current += 1;
+      abortActiveTranscription();
+      manualRecordingStartedAtRef.current = 0;
+      setTalkieUiState("idle");
+      void publishTalkieLock("release");
+      if (realtimeEnabled) {
+        setRealtimeEnabled(false);
+      }
+      void Speech.stop();
+      stopTtsPlayer({ reason: "app_background" });
+      void recorder.stop().catch(() => {});
+      void releaseExpoAudioActivity().catch(() => {});
+      void restoreRoomMicAfterRecorder();
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [
+    abortActiveTranscription,
+    publishTalkieLock,
+    realtimeEnabled,
+    realtimeSessionIdRef,
+    refreshTranslationEntitlement,
+    releaseExpoAudioActivity,
+    manualStopRequestIdRef,
+    recorder,
+    restoreRoomMicAfterRecorder,
+    setRoomLifecycleTick,
+    syncCallKeepAwake,
+    stopTtsPlayer,
+  ]);
 
   const startRecorderSafely = useCallback(async () => {
     let lastError: unknown;
     const maxAttempts = Platform.OS === "ios" ? IOS_RECORDER_START_RETRY_DELAYS_MS.length : 2;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      if (appStateRef.current !== "active") {
+        throw new Error(language === "fr" ? "Enregistrement annule." : "Recording cancelled.");
+      }
       try {
         await Speech.stop();
         try {
@@ -1868,10 +2973,14 @@ function RoomView({
         await wait(settleDelay);
         await recorder.prepareToRecordAsync(recorderPreset);
         await wait(Platform.OS === "ios" ? 90 : 40);
+        if (appStateRef.current !== "active") {
+          throw new Error(language === "fr" ? "Enregistrement annule." : "Recording cancelled.");
+        }
         await recorder.record();
         return;
       } catch (err) {
         if (Platform.OS === "ios") {
+          mediaRecoveryCooldownUntilRef.current = Date.now() + MEDIA_ERROR_AUTO_LEAVE_GRACE_MS;
           console.warn("[Talkie][iOS] recorder start failed", {
             attempt: attempt + 1,
             maxAttempts,
@@ -1994,12 +3103,26 @@ function RoomView({
 
         const storedSourceLanguage = parsed.sourceLanguage;
         const storedTargetLanguage = parsed.targetLanguage;
+        const storedSubtitleDisplayMode = parsed.subtitleDisplayMode;
+        const storedLocalPreviewCorner = parsed.localPreviewCorner;
 
         if (storedSourceLanguage && isLanguageCode(storedSourceLanguage)) {
           setSourceLanguage(storedSourceLanguage);
         }
         if (storedTargetLanguage && isLanguageCode(storedTargetLanguage)) {
           setTargetLanguage(storedTargetLanguage);
+        }
+        if (
+          typeof storedSubtitleDisplayMode === "string" &&
+          isSubtitleDisplayMode(storedSubtitleDisplayMode)
+        ) {
+          setSubtitleDisplayMode(storedSubtitleDisplayMode);
+        }
+        if (
+          typeof storedLocalPreviewCorner === "string" &&
+          isPreviewCorner(storedLocalPreviewCorner)
+        ) {
+          setLocalPreviewCorner(storedLocalPreviewCorner);
         }
         if (!CAPTIONS_ALWAYS_ON && typeof parsed.captionsEnabled === "boolean") {
           setCaptionsEnabled(parsed.captionsEnabled);
@@ -2028,6 +3151,8 @@ function RoomView({
     const payload: StoredCallPrefs = {
       sourceLanguage,
       targetLanguage,
+      subtitleDisplayMode,
+      localPreviewCorner,
       captionsEnabled: CAPTIONS_ALWAYS_ON ? true : captionsEnabled,
       ttsEnabled: VOICE_TRANSLATION_ENABLED ? ttsEnabled : false,
       realtimeEnabled: REALTIME_TRANSLATION_ENABLED ? realtimeEnabled : false,
@@ -2036,8 +3161,10 @@ function RoomView({
   }, [
     callPrefsStorageKey,
     captionsEnabled,
+    localPreviewCorner,
     realtimeEnabled,
     sourceLanguage,
+    subtitleDisplayMode,
     targetLanguage,
     ttsEnabled,
   ]);
@@ -2208,6 +3335,185 @@ function RoomView({
     () => renderedTracks.find((track) => track.participant.isLocal) || null,
     [renderedTracks]
   );
+  const allowMovablePreview = Platform.OS === "ios" && !Boolean(Platform.isPad);
+  const previewCardSize = useMemo(
+    () => ({
+      width: isVeryCompactPhone ? IOS_PREVIEW_CARD_WIDTH_COMPACT : IOS_PREVIEW_CARD_WIDTH,
+      height: isVeryCompactPhone ? IOS_PREVIEW_CARD_HEIGHT_COMPACT : IOS_PREVIEW_CARD_HEIGHT,
+    }),
+    [isVeryCompactPhone]
+  );
+  const [focusedVideoLayout, setFocusedVideoLayout] = useState({ width: 0, height: 0 });
+  const previewPositionReady = focusedVideoLayout.width > 0 && focusedVideoLayout.height > 0;
+  const previewPosition = useRef(new Animated.ValueXY({ x: IOS_PREVIEW_CARD_MARGIN, y: IOS_PREVIEW_CARD_MARGIN }))
+    .current;
+  const previewPositionRef = useRef({ x: IOS_PREVIEW_CARD_MARGIN, y: IOS_PREVIEW_CARD_MARGIN });
+  const previewDragOriginRef = useRef({ x: IOS_PREVIEW_CARD_MARGIN, y: IOS_PREVIEW_CARD_MARGIN });
+  const previewTapTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const previewPositionInitializedRef = useRef(false);
+
+  const clearPendingPreviewTap = useCallback(() => {
+    if (!previewTapTimeoutRef.current) return;
+    clearTimeout(previewTapTimeoutRef.current);
+    previewTapTimeoutRef.current = null;
+  }, []);
+
+  useEffect(
+    () => () => {
+      clearPendingPreviewTap();
+    },
+    [clearPendingPreviewTap]
+  );
+
+  const previewBounds = useMemo(() => {
+    const maxX = Math.max(
+      IOS_PREVIEW_CARD_MARGIN,
+      focusedVideoLayout.width - previewCardSize.width - IOS_PREVIEW_CARD_MARGIN
+    );
+    const maxY = Math.max(
+      IOS_PREVIEW_CARD_MARGIN,
+      focusedVideoLayout.height - previewCardSize.height - IOS_PREVIEW_CARD_MARGIN
+    );
+    return {
+      minX: IOS_PREVIEW_CARD_MARGIN,
+      minY: IOS_PREVIEW_CARD_MARGIN,
+      maxX,
+      maxY,
+    };
+  }, [focusedVideoLayout.height, focusedVideoLayout.width, previewCardSize.height, previewCardSize.width]);
+
+  const clampPreviewPosition = useCallback(
+    (candidate: { x: number; y: number }) => {
+      return {
+        x: Math.min(previewBounds.maxX, Math.max(previewBounds.minX, candidate.x)),
+        y: Math.min(previewBounds.maxY, Math.max(previewBounds.minY, candidate.y)),
+      };
+    },
+    [previewBounds.maxX, previewBounds.maxY, previewBounds.minX, previewBounds.minY]
+  );
+
+  const getPreviewCornerPosition = useCallback(
+    (corner: PreviewCorner) => {
+      switch (corner) {
+        case "topLeft":
+          return { x: previewBounds.minX, y: previewBounds.minY };
+        case "bottomLeft":
+          return { x: previewBounds.minX, y: previewBounds.maxY };
+        case "bottomRight":
+          return { x: previewBounds.maxX, y: previewBounds.maxY };
+        case "topRight":
+        default:
+          return { x: previewBounds.maxX, y: previewBounds.minY };
+      }
+    },
+    [previewBounds.maxX, previewBounds.maxY, previewBounds.minX, previewBounds.minY]
+  );
+
+  const movePreviewToCorner = useCallback(
+    (corner: PreviewCorner, animated = true) => {
+      const nextPosition = getPreviewCornerPosition(corner);
+      previewPositionRef.current = nextPosition;
+      previewPositionInitializedRef.current = true;
+      setLocalPreviewCorner((current) => (current === corner ? current : corner));
+      if (animated) {
+        Animated.spring(previewPosition, {
+          toValue: nextPosition,
+          useNativeDriver: false,
+          bounciness: 0,
+          speed: 20,
+        }).start();
+        return;
+      }
+      previewPosition.setValue(nextPosition);
+    },
+    [getPreviewCornerPosition, previewPosition]
+  );
+
+  const resolveNearestPreviewCorner = useCallback(
+    (candidate: { x: number; y: number }): PreviewCorner => {
+      const corners: PreviewCorner[] = ["topLeft", "topRight", "bottomLeft", "bottomRight"];
+      let bestCorner: PreviewCorner = IOS_PREVIEW_DEFAULT_CORNER;
+      let bestDistance = Number.POSITIVE_INFINITY;
+      corners.forEach((corner) => {
+        const position = getPreviewCornerPosition(corner);
+        const distance = Math.hypot(position.x - candidate.x, position.y - candidate.y);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestCorner = corner;
+        }
+      });
+      return bestCorner;
+    },
+    [getPreviewCornerPosition]
+  );
+
+  const snapPreviewToNearestCorner = useCallback(
+    (animated = true) => {
+      movePreviewToCorner(resolveNearestPreviewCorner(previewPositionRef.current), animated);
+    },
+    [movePreviewToCorner, resolveNearestPreviewCorner]
+  );
+
+  const resetPreviewPosition = useCallback(() => {
+    clearPendingPreviewTap();
+    movePreviewToCorner(IOS_PREVIEW_DEFAULT_CORNER);
+  }, [clearPendingPreviewTap, movePreviewToCorner]);
+
+  useEffect(() => {
+    if (!focusedVideoLayout.width || !focusedVideoLayout.height) {
+      previewPositionInitializedRef.current = false;
+      return;
+    }
+    movePreviewToCorner(localPreviewCorner, false);
+  }, [
+    focusedVideoLayout.height,
+    focusedVideoLayout.width,
+    localPreviewCorner,
+    movePreviewToCorner,
+    previewCardSize.height,
+    previewCardSize.width,
+  ]);
+
+  const previewPanResponder = useMemo(() => {
+    if (!allowMovablePreview) return null;
+    return PanResponder.create({
+      onMoveShouldSetPanResponder: (_evt, gestureState) =>
+        Math.abs(gestureState.dx) > 4 || Math.abs(gestureState.dy) > 4,
+      onMoveShouldSetPanResponderCapture: (_evt, gestureState) =>
+        Math.abs(gestureState.dx) > 4 || Math.abs(gestureState.dy) > 4,
+      onPanResponderGrant: () => {
+        clearPendingPreviewTap();
+        previewDragOriginRef.current = previewPositionRef.current;
+      },
+      onPanResponderMove: (_evt, gestureState) => {
+        const nextPosition = clampPreviewPosition({
+          x: previewDragOriginRef.current.x + gestureState.dx,
+          y: previewDragOriginRef.current.y + gestureState.dy,
+        });
+        previewPositionRef.current = nextPosition;
+        previewPosition.setValue(nextPosition);
+      },
+      onPanResponderRelease: () => {
+        snapPreviewToNearestCorner();
+      },
+      onPanResponderTerminate: () => {
+        snapPreviewToNearestCorner();
+      },
+      onPanResponderTerminationRequest: () => false,
+    });
+  }, [
+    allowMovablePreview,
+    clampPreviewPosition,
+    clearPendingPreviewTap,
+    previewPosition,
+    snapPreviewToNearestCorner,
+  ]);
+
+  const handleFocusedVideoLayout = useCallback((width: number, height: number) => {
+    setFocusedVideoLayout((current) =>
+      current.width === width && current.height === height ? current : { width, height }
+    );
+  }, []);
 
   useEffect(() => {
     if (!videoFullscreen) return;
@@ -2251,6 +3557,44 @@ function RoomView({
     if (!focusedTrackKey) return renderedTracks[0] || null;
     return renderedTracks.find((track) => trackKey(track) === focusedTrackKey) || renderedTracks[0];
   }, [focusedTrackKey, renderedTracks, trackKey]);
+
+  const focusTrackManually = useCallback(
+    (track: TrackReference) => {
+      const nextKey = trackKey(track);
+      setFollowActiveSpeaker(false);
+      setFocusedTrackKey(nextKey);
+      setPinnedTrackKey((current) => (current === nextKey ? current : null));
+    },
+    [trackKey]
+  );
+
+  const handlePreviewTap = useCallback(
+    (track: TrackReference) => {
+      if (
+        !allowMovablePreview ||
+        !previewPositionReady ||
+        localPreviewCorner === IOS_PREVIEW_DEFAULT_CORNER
+      ) {
+        focusTrackManually(track);
+        return;
+      }
+      if (previewTapTimeoutRef.current) {
+        resetPreviewPosition();
+        return;
+      }
+      previewTapTimeoutRef.current = setTimeout(() => {
+        previewTapTimeoutRef.current = null;
+        focusTrackManually(track);
+      }, IOS_PREVIEW_DOUBLE_TAP_DELAY_MS);
+    },
+    [
+      allowMovablePreview,
+      focusTrackManually,
+      localPreviewCorner,
+      previewPositionReady,
+      resetPreviewPosition,
+    ]
+  );
 
   useEffect(() => {
     const remoteTracks = renderedTracks.filter((track) => !track.participant.isLocal);
@@ -2300,51 +3644,32 @@ function RoomView({
     () => renderedTracks.filter((track) => !track.participant.isLocal),
     [renderedTracks]
   );
+  const totalParticipantCount = remoteParticipantCount + 1;
+  const groupVoicePlaybackLimited = totalParticipantCount > 2;
+  const exceedsRecommendedParticipantCount = totalParticipantCount > 4;
   const hadRemoteParticipantRef = useRef(false);
-  const noAnswerTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const remoteHangupTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const autoLeavingRef = useRef(false);
-
-  const clearNoAnswerTimeout = useCallback(() => {
-    if (!noAnswerTimeoutRef.current) return;
-    clearTimeout(noAnswerTimeoutRef.current);
-    noAnswerTimeoutRef.current = null;
-  }, []);
-
-  const clearRemoteHangupTimeout = useCallback(() => {
-    if (!remoteHangupTimeoutRef.current) return;
-    clearTimeout(remoteHangupTimeoutRef.current);
-    remoteHangupTimeoutRef.current = null;
-  }, []);
-
-  const triggerAutoLeave = useCallback(
-    (message: string, reason: string) => {
-      if (autoLeavingRef.current) return;
-      autoLeavingRef.current = true;
-      setTranslationError(message);
-      setTimeout(() => {
-        onLeave(reason);
-      }, 260);
-    },
-    [onLeave]
-  );
-
   useEffect(() => {
     if (!room) {
       setRemoteParticipantCount(0);
       return;
     }
     const sync = () => {
-      setRemoteParticipantCount(room.remoteParticipants.size);
+      setRemoteParticipantCount(countHumanRemoteParticipants());
     };
     sync();
     room.on(RoomEvent.ParticipantConnected, sync);
     room.on(RoomEvent.ParticipantDisconnected, sync);
+    room.on(RoomEvent.ParticipantMetadataChanged, sync);
+    room.on(RoomEvent.TrackPublished, sync);
+    room.on(RoomEvent.TrackUnpublished, sync);
     return () => {
       room.off(RoomEvent.ParticipantConnected, sync);
       room.off(RoomEvent.ParticipantDisconnected, sync);
+      room.off(RoomEvent.ParticipantMetadataChanged, sync);
+      room.off(RoomEvent.TrackPublished, sync);
+      room.off(RoomEvent.TrackUnpublished, sync);
     };
-  }, [room]);
+  }, [countHumanRemoteParticipants, room]);
 
   useEffect(() => {
     if (remoteParticipantCount > 0) return;
@@ -2352,72 +3677,107 @@ function RoomView({
   }, [remoteParticipantCount]);
 
   useEffect(() => {
-    if (!isChatCall || !connected) {
-      clearNoAnswerTimeout();
+    hadRemoteParticipantRef.current = false;
+    setParticipantReconnectPending(false);
+    setWaitingForParticipant(false);
+  }, [session.roomId]);
+
+  useEffect(() => {
+    if (
+      appStateRef.current !== "active" ||
+      !connected ||
+      connectionPhase !== "connected" ||
+      Date.now() < mediaRecoveryCooldownUntilRef.current
+    ) {
+      setWaitingForParticipant(false);
       return;
     }
     if (remoteParticipantCount > 0) {
       hadRemoteParticipantRef.current = true;
-      clearNoAnswerTimeout();
+      setWaitingForParticipant(false);
       return;
     }
     if (hadRemoteParticipantRef.current) {
-      clearNoAnswerTimeout();
+      setWaitingForParticipant(false);
       return;
     }
-
-    clearNoAnswerTimeout();
-    noAnswerTimeoutRef.current = setTimeout(() => {
-      triggerAutoLeave("Le correspondant est occupe ou ne repond pas.", "no_answer");
-    }, 30000);
-
-    return () => {
-      clearNoAnswerTimeout();
-    };
+    setWaitingForParticipant(true);
   }, [
-    clearNoAnswerTimeout,
     connected,
-    isChatCall,
+    connectionPhase,
     remoteParticipantCount,
-    triggerAutoLeave,
+    roomLifecycleTick,
   ]);
 
   useEffect(() => {
-    if (!isChatCall || !connected) {
-      clearRemoteHangupTimeout();
-      return;
-    }
-    if (!hadRemoteParticipantRef.current) {
-      clearRemoteHangupTimeout();
+    if (
+      appStateRef.current !== "active" ||
+      !connected ||
+      connectionPhase !== "connected" ||
+      Date.now() < mediaRecoveryCooldownUntilRef.current
+    ) {
+      setParticipantReconnectPending(false);
       return;
     }
     if (remoteParticipantCount > 0) {
-      clearRemoteHangupTimeout();
+      hadRemoteParticipantRef.current = true;
+      setParticipantReconnectPending(false);
       return;
     }
-
-    clearRemoteHangupTimeout();
-    remoteHangupTimeoutRef.current = setTimeout(() => {
-      triggerAutoLeave("Le correspondant a raccroche.", "ended_by_remote");
-    }, 2200);
-
-    return () => {
-      clearRemoteHangupTimeout();
-    };
+    if (!hadRemoteParticipantRef.current) {
+      setParticipantReconnectPending(false);
+      return;
+    }
+    setParticipantReconnectPending(true);
   }, [
-    clearRemoteHangupTimeout,
     connected,
-    isChatCall,
+    connectionPhase,
     remoteParticipantCount,
-    triggerAutoLeave,
+    roomLifecycleTick,
   ]);
 
   useEffect(() => {
-    return () => {
-      clearNoAnswerTimeout();
-      clearRemoteHangupTimeout();
+    if (participantReconnectPending) {
+      setTranslationError(ui.participantLeftWaiting);
+      return;
+    }
+    if (waitingForParticipant) {
+      setTranslationError(ui.waitingParticipant);
+      return;
+    }
+    setTranslationError((current) =>
+      current === ui.participantLeftWaiting || current === ui.waitingParticipant ? "" : current
+    );
+  }, [participantReconnectPending, ui.participantLeftWaiting, ui.waitingParticipant, waitingForParticipant]);
+
+  useEffect(() => {
+    if (!room) return;
+
+    const applyTalkieRemoteAudioSuppression = () => {
+      room.remoteParticipants.forEach((participant) => {
+        const shouldSuppress =
+          Boolean(talkieLockHolderIdentity) && participant.identity === talkieLockHolderIdentity;
+        participant.setVolume(
+          shouldSuppress ? TALKIE_REMOTE_AUDIO_MUTED_VOLUME : IOS_REMOTE_AUDIO_VOLUME_NORMAL,
+          Track.Source.Microphone
+        );
+      });
     };
-  }, [clearNoAnswerTimeout, clearRemoteHangupTimeout]);
+
+    applyTalkieRemoteAudioSuppression();
+    room.on(RoomEvent.ParticipantConnected, applyTalkieRemoteAudioSuppression);
+    room.on(RoomEvent.ParticipantDisconnected, applyTalkieRemoteAudioSuppression);
+    room.on(RoomEvent.TrackSubscribed, applyTalkieRemoteAudioSuppression);
+
+    return () => {
+      room.off(RoomEvent.ParticipantConnected, applyTalkieRemoteAudioSuppression);
+      room.off(RoomEvent.ParticipantDisconnected, applyTalkieRemoteAudioSuppression);
+      room.off(RoomEvent.TrackSubscribed, applyTalkieRemoteAudioSuppression);
+      room.remoteParticipants.forEach((participant) => {
+        participant.setVolume(IOS_REMOTE_AUDIO_VOLUME_NORMAL, Track.Source.Microphone);
+      });
+    };
+  }, [room, talkieLockHolderIdentity]);
 
   useEffect(() => {
     if (!room) return;
@@ -2430,7 +3790,13 @@ function RoomView({
       }
     };
     const onMediaDeviceError = (error: Error) => {
-      setTranslationError(error?.message || "LiveKit media device error.");
+      mediaRecoveryCooldownUntilRef.current = Date.now() + MEDIA_ERROR_AUTO_LEAVE_GRACE_MS;
+      setParticipantReconnectPending(false);
+      setWaitingForParticipant(false);
+      setTranslationError(
+        error?.message ||
+          (language === "fr" ? "Erreur peripherique media LiveKit." : "LiveKit media device error.")
+      );
     };
 
     room.on(RoomEvent.Reconnecting, onReconnecting);
@@ -2446,7 +3812,24 @@ function RoomView({
       room.off(RoomEvent.ConnectionQualityChanged, onQualityChanged);
       room.off(RoomEvent.MediaDevicesError, onMediaDeviceError);
     };
-  }, [room]);
+  }, [language, room]);
+
+  useEffect(() => {
+    if (isAudioOnlyCall || !startWithCamera) {
+      setVideoCaptureProfile("balanced");
+      return;
+    }
+    const shouldUseLowProfile =
+      localConnectionQuality === ConnectionQuality.Poor ||
+      localConnectionQuality === ConnectionQuality.Lost;
+    setVideoCaptureProfile((current) =>
+      current === (shouldUseLowProfile ? "low" : "balanced")
+        ? current
+        : shouldUseLowProfile
+          ? "low"
+          : "balanced"
+    );
+  }, [isAudioOnlyCall, localConnectionQuality, startWithCamera]);
 
   useEffect(() => {
     if (!room) return;
@@ -2473,11 +3856,32 @@ function RoomView({
   }, [followActiveSpeaker, pinnedTrackKey, renderedTracks, room, trackKey]);
 
   const getLabel = useCallback((track: TrackReference) => {
-    return `${track.participant.identity}${track.participant.isLocal ? " (me)" : ""}`;
-  }, []);
+    return `${track.participant.identity}${track.participant.isLocal ? ui.meSuffix : ""}`;
+  }, [ui.meSuffix]);
+
+  const getParticipantLabelByIdentity = useCallback(
+    (identity?: string) => {
+      const normalizedIdentity = (identity || "").trim();
+      if (!normalizedIdentity) return "BFZoom";
+      if (normalizedIdentity === session.identity) {
+        return `${session.displayName || session.identity || "BFZoom"}${ui.meSuffix}`;
+      }
+
+      const remoteParticipant = room?.remoteParticipants.get(normalizedIdentity);
+      if (remoteParticipant) {
+        return (remoteParticipant.name || remoteParticipant.identity || normalizedIdentity).trim();
+      }
+
+      return normalizedIdentity;
+    },
+    [room, session.displayName, session.identity, ui.meSuffix]
+  );
 
   const getLanguageLabel = useCallback(
-    (code: LanguageCode) => LANGUAGE_PROMPT_NAMES[code] || "English",
+    (code: LanguageCode) =>
+      LANGUAGE_OPTIONS.find((option) => option.code === code)?.label ||
+      LANGUAGE_PROMPT_NAMES[code] ||
+      "English",
     []
   );
   const getLanguageChipLabel = useCallback(
@@ -2486,18 +3890,24 @@ function RoomView({
   );
   const showLanguageInfo = useCallback(
     (lang: (typeof LANGUAGE_OPTIONS)[number]) => {
-      Alert.alert("Language", `${getLanguageLabel(lang.code)} (${lang.code})`);
+      Alert.alert(ui.languageAlertTitle, `${getLanguageLabel(lang.code)} (${lang.code})`);
     },
-    [getLanguageLabel]
+    [getLanguageLabel, ui.languageAlertTitle]
   );
   const sourceLanguageLabel = getLanguageLabel(sourceLanguage);
   const targetLanguageLabel = getLanguageLabel(targetLanguage);
   const sourceLanguageIsRtl = isRtlLanguageCode(sourceLanguage);
   const targetLanguageIsRtl = isRtlLanguageCode(targetLanguage);
-  const coachPartnerReplyLanguageIsRtl = isRtlLanguageCode(targetLanguage);
-  const coachPartnerTranslationLanguageIsRtl = isRtlLanguageCode(sourceLanguage);
-  const canUseCoachConversation =
-    isCoachSession && Boolean((session.bearerToken || "").trim());
+  const hasPreferredTranslatorAudioTrack = useMemo(
+    () =>
+      remoteAudioTracks.some((track) => {
+        const identity = track.participant.identity || "";
+        if (!isTranslatorIdentity(identity)) return false;
+        const translatorTargetLanguage = getTranslatorTargetLanguageFromIdentity(identity);
+        return !translatorTargetLanguage || translatorTargetLanguage === targetLanguage;
+      }),
+    [remoteAudioTracks, targetLanguage]
+  );
 
   const getPromptLanguageName = useCallback(
     (code: LanguageCode) => LANGUAGE_PROMPT_NAMES[code] || "English",
@@ -2506,25 +3916,46 @@ function RoomView({
 
   useEffect(() => {
     const input = captionText.trim();
+    clearCaptionPhoneticQueueTimer();
+    pendingCaptionPhoneticRef.current = null;
+    captionPhoneticSeqRef.current += 1;
     if (!input) {
       setCaptionPhoneticBusy(false);
       setCaptionPhoneticText("");
       return;
     }
+    pendingCaptionPhoneticRef.current = {
+      text: input,
+      targetLanguage,
+    };
+    setCaptionPhoneticBusy(false);
+    setCaptionPhoneticText("");
+    if (!ttsEnabled || !ttsLockRef.current) {
+      queueCaptionPhoneticFlush(CAPTION_PHONETIC_IDLE_DELAY_MS);
+    }
+  }, [captionText, clearCaptionPhoneticQueueTimer, queueCaptionPhoneticFlush, targetLanguage, ttsEnabled]);
+
+  useEffect(() => {
+    const pendingJob = pendingCaptionPhoneticRef.current;
+    if (!pendingJob) return;
+    if (ttsLockRef.current) return;
+    pendingCaptionPhoneticRef.current = null;
     const requestId = ++captionPhoneticSeqRef.current;
     setCaptionPhoneticBusy(true);
     void (async () => {
       try {
-        const generated = await phoneticText({
-          apiBaseUrl: publicApiBase,
-          bearerToken: session.bearerToken,
-          guestTtsToken: session.guestTtsToken,
-          text: input,
-          languageName: getPromptLanguageName(targetLanguage),
-        });
+        const generated = await withFreshBearerToken((activeBearerToken) =>
+          phoneticText({
+            apiBaseUrl: publicApiBase,
+            bearerToken: activeBearerToken,
+            guestTtsToken: session.guestTtsToken,
+            text: pendingJob.text,
+            languageName: getPromptLanguageName(pendingJob.targetLanguage),
+          })
+        );
         if (requestId !== captionPhoneticSeqRef.current) return;
         const cleaned = generated.trim();
-        const sourceNormalized = input.replace(/\s+/g, " ").trim().toLowerCase();
+        const sourceNormalized = pendingJob.text.replace(/\s+/g, " ").trim().toLowerCase();
         const phoneticNormalized = cleaned.replace(/\s+/g, " ").trim().toLowerCase();
         const finalPhonetic =
           cleaned && phoneticNormalized !== sourceNormalized ? cleaned : "";
@@ -2539,12 +3970,11 @@ function RoomView({
       }
     })();
   }, [
-    captionText,
+    captionPhoneticTrigger,
     getPromptLanguageName,
     publicApiBase,
-    session.bearerToken,
     session.guestTtsToken,
-    targetLanguage,
+    withFreshBearerToken,
   ]);
 
   const stopNativeRealtimeSession = useCallback(async () => {
@@ -2600,16 +4030,90 @@ function RoomView({
   useEffect(() => {
     if (!connected) {
       cameraAutoStartedRef.current = false;
+      cameraAutoStartInFlightRef.current = false;
       return;
     }
     if (!startWithCamera) return;
-    if (!localParticipant || cameraAutoStartedRef.current) return;
-    cameraAutoStartedRef.current = true;
+    if (!localParticipant || cameraAutoStartedRef.current || cameraAutoStartInFlightRef.current) return;
     if (isCameraEnabled) return;
-    void localParticipant.setCameraEnabled(true, { facingMode: cameraFacingMode }).catch((err) => {
-      setTranslationError(err instanceof Error ? err.message : "Camera startup failed.");
+    cameraAutoStartInFlightRef.current = true;
+
+    let cancelled = false;
+    const startCamera = async () => {
+      let lastError: unknown = null;
+      for (const retryDelayMs of [0, 260, 620]) {
+        if (cancelled) return;
+        if (retryDelayMs > 0) {
+          await wait(retryDelayMs);
+          if (cancelled) return;
+        }
+        try {
+          lastAppliedVideoCaptureProfileRef.current = videoCaptureProfile;
+          await localParticipant.setCameraEnabled(true, desiredCameraCaptureOptions);
+          if (cancelled) return;
+          cameraAutoStartedRef.current = true;
+          setTranslationError((current) => (/camera/i.test(current) ? "" : current));
+          return;
+        } catch (err) {
+          lastError = err;
+          cameraAutoStartedRef.current = false;
+        }
+      }
+
+      if (!cancelled) {
+        setTranslationError(
+          lastError instanceof Error
+            ? lastError.message
+            : language === "fr"
+              ? "Echec demarrage camera."
+              : "Camera startup failed."
+        );
+      }
+    };
+
+    void startCamera().finally(() => {
+      if (!cancelled) {
+        cameraAutoStartInFlightRef.current = false;
+      }
     });
-  }, [cameraFacingMode, connected, isCameraEnabled, localParticipant, startWithCamera]);
+
+    return () => {
+      cancelled = true;
+      cameraAutoStartInFlightRef.current = false;
+    };
+  }, [connected, desiredCameraCaptureOptions, isCameraEnabled, language, localParticipant, startWithCamera, videoCaptureProfile]);
+
+  useEffect(() => {
+    if (!connected || isAudioOnlyCall) return;
+    if (!localParticipant || !isCameraEnabled) return;
+    if (lastAppliedVideoCaptureProfileRef.current === videoCaptureProfile) return;
+
+    const publication = localParticipant.getTrackPublication(Track.Source.Camera);
+    const videoTrack = publication?.videoTrack;
+    if (!videoTrack) {
+      lastAppliedVideoCaptureProfileRef.current = videoCaptureProfile;
+      return;
+    }
+
+    lastAppliedVideoCaptureProfileRef.current = videoCaptureProfile;
+    void videoTrack.restartTrack(desiredCameraCaptureOptions).catch((err) => {
+      setTranslationError(
+        err instanceof Error
+          ? err.message
+          : language === "fr"
+            ? "Impossible d'ajuster la qualite video."
+            : "Unable to adjust video quality."
+      );
+    });
+  }, [
+    connected,
+    desiredCameraCaptureOptions,
+    isAudioOnlyCall,
+    isCameraEnabled,
+    language,
+    localParticipant,
+    videoCaptureProfile,
+  ]);
 
   const startRecording = useCallback(async () => {
     if (realtimeEnabled) {
@@ -2621,15 +4125,9 @@ function RoomView({
     try {
       const permission = await requestRecordingPermissionsAsync();
       if (!permission.granted) {
-        throw new Error("Microphone permission denied.");
+        throw new Error(language === "fr" ? "Autorisation micro refusee." : "Microphone permission denied.");
       }
       await setIsAudioActiveAsync(true).catch(() => {});
-      if (Platform.OS === "ios") {
-        await ensureIosSpeakerOutput();
-      }
-      if (Platform.OS === "ios") {
-        await resetIosAudioSession();
-      }
       recordingStartUriRef.current = (recorder.uri || recorderUrlRef.current || "").trim();
 
       let lastError: unknown = null;
@@ -2643,6 +4141,16 @@ function RoomView({
               : 120 + attempt * 120;
           await wait(startupDelay);
           await startRecorderSafely();
+          if (appStateRef.current !== "active") {
+            try {
+              await recorder.stop();
+            } catch {}
+            manualRecordingStartedAtRef.current = 0;
+            recordingStartUriRef.current = "";
+            await restoreRoomMicAfterRecorder();
+            await releaseExpoAudioActivity();
+            return false;
+          }
           manualRecordingStartedAtRef.current = Date.now();
           return true;
         } catch (error) {
@@ -2679,17 +4187,19 @@ function RoomView({
         ? lastError
         : new Error("Unable to start recorder on this device.");
     } catch (err) {
-      setRecordingError(toFriendlyAudioError(err));
+      setRecordingError(toFriendlyAudioError(err, language));
       manualRecordingStartedAtRef.current = 0;
       recordingStartUriRef.current = "";
       try {
         await setPlaybackAudioMode();
       } catch {}
       await restoreRoomMicAfterRecorder();
+      await releaseExpoAudioActivity();
       return false;
     }
   }, [
-    ensureIosSpeakerOutput,
+    releaseExpoAudioActivity,
+    appStateRef,
     pauseRoomMicForRecorder,
     realtimeEnabled,
     recordingActive,
@@ -2701,11 +4211,15 @@ function RoomView({
   ]);
 
   const speakText = useCallback(
-    async (text: string, languageOverride?: LanguageCode) => {
+    async (text: string, languageOverride?: LanguageCode, trigger: TtsTrigger = "auto") => {
       if (!ttsEnabled || !text.trim()) return;
       if (realtimeEnabled) return;
       if (recordingActive && !realtimeEnabled) {
-        setTranslationError("Stop recording before voice playback.");
+        setTranslationError(
+          language === "fr"
+            ? "Arrete l'enregistrement avant la lecture vocale."
+            : "Stop recording before voice playback."
+        );
         return;
       }
 
@@ -2721,6 +4235,9 @@ function RoomView({
         if (sessionId !== ttsPlaybackSessionRef.current) return;
         clearTtsPlaybackWatchdog();
         ttsLockRef.current = false;
+        if (pendingCaptionPhoneticRef.current) {
+          queueCaptionPhoneticFlush(120);
+        }
         void restoreRemoteAudioAfterTts(sessionId);
       };
       const speakWithDeviceVoice = (fallback: boolean) => {
@@ -2734,6 +4251,15 @@ function RoomView({
             : voiceId === AUTO_VOICE_ID
             ? undefined
             : voiceId;
+        const startedAt = Date.now();
+        logTtsEvent("device_start", {
+          sessionId: ttsSessionId,
+          trigger,
+          locale,
+          fallback,
+          selectedVoice: selectedVoice || "auto",
+          textChars: textToSpeak.length,
+        });
 
         try {
           Speech.speak(textToSpeak, {
@@ -2743,12 +4269,39 @@ function RoomView({
             voice: selectedVoice,
             useApplicationAudioSession: Platform.OS === "ios",
             onDone: () => {
+              logTtsEvent("device_end", {
+                sessionId: ttsSessionId,
+                trigger,
+                reason: "done",
+                fallback,
+                elapsedMs: Date.now() - startedAt,
+                textChars: textToSpeak.length,
+              });
               finalizeTtsSession(ttsSessionId);
             },
             onStopped: () => {
+              logTtsEvent("device_end", {
+                sessionId: ttsSessionId,
+                trigger,
+                reason: "stopped",
+                fallback,
+                elapsedMs: Date.now() - startedAt,
+                textChars: textToSpeak.length,
+              });
               finalizeTtsSession(ttsSessionId);
             },
             onError: (error) => {
+              logTtsEvent(
+                "device_error",
+                {
+                  sessionId: ttsSessionId,
+                  trigger,
+                  fallback,
+                  elapsedMs: Date.now() - startedAt,
+                  message: error?.message || "voice playback failed",
+                },
+                "warn"
+              );
               if (!fallback) {
                 speakWithDeviceVoice(true);
                 return;
@@ -2756,95 +4309,232 @@ function RoomView({
               finalizeTtsSession(ttsSessionId);
               if (!realtimeEnabled) {
                 setTranslationError(
-                  toFriendlyAudioError(error?.message || "Voice playback failed.")
+                  toFriendlyAudioError(error?.message || "Voice playback failed.", language)
                 );
               }
             },
           });
         } catch (error) {
+          logTtsEvent(
+            "device_exception",
+            {
+              sessionId: ttsSessionId,
+              trigger,
+              fallback,
+              elapsedMs: Date.now() - startedAt,
+              message: error instanceof Error ? error.message : String(error),
+            },
+            "warn"
+          );
           if (!fallback) {
             speakWithDeviceVoice(true);
             return;
           }
           finalizeTtsSession(ttsSessionId);
           if (!realtimeEnabled) {
-            setTranslationError(toFriendlyAudioError(error));
+            setTranslationError(toFriendlyAudioError(error, language));
           }
         }
       };
 
       try {
+        const playbackSessionPrepStartedAt = Date.now();
         await prepareTtsPlayback();
         await duckRemoteAudioForTts(ttsSessionId);
+        const playbackSessionPrepMs = Date.now() - playbackSessionPrepStartedAt;
+        logTtsEvent("playback_session_ready", {
+          sessionId: ttsSessionId,
+          trigger,
+          prepMs: playbackSessionPrepMs,
+          textChars: textToSpeak.length,
+        });
         if (ttsLockRef.current) {
           await Speech.stop();
-          stopTtsPlayer({ preserveDucking: true });
+          stopTtsPlayer({ preserveDucking: true, reason: "session_replaced" });
         }
         ttsLockRef.current = true;
         setTranslationError("");
         if (AI_TTS_ENABLED && publicApiBase) {
           const requestSeq = ++ttsRequestSeqRef.current;
           try {
-            const response = await fetch(`${publicApiBase}/api/tts`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                ...(session.bearerToken?.trim()
-                  ? { Authorization: `Bearer ${session.bearerToken.trim()}` }
-                  : {}),
-                ...(session.guestTtsToken?.trim()
-                  ? { "x-bfzoom-guest-tts-token": session.guestTtsToken.trim() }
-                  : {}),
-              },
-              body: JSON.stringify({
-                text: textToSpeak,
-                voice: AI_TTS_DEFAULT_VOICE,
-                format: "mp3",
-              }),
-            });
-            if (!response.ok) {
-              throw new Error(await readHttpError(response));
-            }
-            const audioBlob = await response.blob();
-            const audioBase64 = await blobToBase64(audioBlob);
             const cacheBase = FileSystemLegacy.cacheDirectory || FileSystemLegacy.documentDirectory;
             if (!cacheBase) {
               throw new Error("Audio cache unavailable on this device.");
             }
-            const tempUri = `${cacheBase}bfzoom-tts-${Date.now()}-${Math.random()
-              .toString(36)
-              .slice(2, 8)}.mp3`;
-            await FileSystemLegacy.writeAsStringAsync(tempUri, audioBase64, {
-              encoding: "base64" as never,
-            });
-            if (requestSeq !== ttsRequestSeqRef.current) {
-              void FileSystemLegacy.deleteAsync(tempUri, { idempotent: true }).catch(() => {});
-              finalizeTtsSession(ttsSessionId);
-              return;
-            }
-            playTtsUri(tempUri);
-            if (Platform.OS === "ios") {
-              clearTtsPlaybackWatchdog();
-              ttsPlaybackWatchdogRef.current = setTimeout(() => {
-                const activePlayer = ttsPlayerRef.current;
-                if (!activePlayer) return;
-                const likelyStalled =
-                  !activePlayer.playing &&
-                  (activePlayer.duration <= 0 || activePlayer.currentTime <= 0.02);
-                if (!likelyStalled) return;
-                stopTtsPlayer({ preserveDucking: true });
-                if (!realtimeEnabled) {
-                  setTranslationError(
-                    "Lecture voix IA instable sur iOS. Fallback voix appareil."
-                  );
+            const activeBearerToken = await refreshBearerToken();
+            const preferredFormats =
+              Platform.OS === "ios" ? IOS_AI_TTS_FORMAT_PREFERENCE : [DEFAULT_AI_TTS_FORMAT];
+            let lastTtsError = "";
+
+            for (const format of preferredFormats) {
+              const requestStartedAt = Date.now();
+              logTtsEvent("request", {
+                sessionId: ttsSessionId,
+                trigger,
+                format,
+                playbackPrepMs: playbackSessionPrepMs,
+                textChars: textToSpeak.length,
+                language: effectiveLanguage,
+                guestTts: Boolean(session.guestTtsToken?.trim()),
+              });
+              try {
+                const response = await fetch(`${publicApiBase}/api/tts`, {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    ...(activeBearerToken
+                      ? { Authorization: `Bearer ${activeBearerToken}` }
+                      : {}),
+                    ...(session.guestTtsToken?.trim()
+                      ? { "x-bfzoom-guest-tts-token": session.guestTtsToken.trim() }
+                      : {}),
+                  },
+                  body: JSON.stringify({
+                    text: textToSpeak,
+                    voice: AI_TTS_DEFAULT_VOICE,
+                    format,
+                  }),
+                });
+                const responseReceivedAt = Date.now();
+                if (!response.ok) {
+                  throw new Error(await readHttpError(response));
                 }
-                speakWithDeviceVoice(false);
-              }, 900);
+                const audioBlob = await response.blob();
+                const blobReadyAt = Date.now();
+                const audioBase64 = await blobToBase64(audioBlob);
+                const base64ReadyAt = Date.now();
+                const tempUri = `${cacheBase}bfzoom-tts-${Date.now()}-${Math.random()
+                  .toString(36)
+                  .slice(2, 8)}.${getTtsTempExtension(format)}`;
+                await FileSystemLegacy.writeAsStringAsync(tempUri, audioBase64, {
+                  encoding: "base64" as never,
+                });
+                const fileReadyAt = Date.now();
+                if (requestSeq !== ttsRequestSeqRef.current) {
+                  void FileSystemLegacy.deleteAsync(tempUri, { idempotent: true }).catch(() => {});
+                  finalizeTtsSession(ttsSessionId);
+                  return;
+                }
+                logTtsEvent("response", {
+                  sessionId: ttsSessionId,
+                  trigger,
+                  format,
+                  requestMs: fileReadyAt - requestStartedAt,
+                  networkMs: responseReceivedAt - requestStartedAt,
+                  blobMs: blobReadyAt - responseReceivedAt,
+                  base64Ms: base64ReadyAt - blobReadyAt,
+                  fileWriteMs: fileReadyAt - base64ReadyAt,
+                  localPrepMs: fileReadyAt - responseReceivedAt,
+                  playbackPrepMs: playbackSessionPrepMs,
+                  fileBytes: audioBlob.size,
+                  textChars: textToSpeak.length,
+                });
+                playTtsUri(tempUri, {
+                  sessionId: ttsSessionId,
+                  trigger,
+                  source: "server",
+                  format,
+                  language: effectiveLanguage,
+                  textChars: textToSpeak.length,
+                  fileBytes: audioBlob.size,
+                  requestStartedAt,
+                });
+                let playbackWaitMs: number | undefined;
+
+                if (Platform.OS === "ios") {
+                  clearTtsPlaybackWatchdog();
+                  const playbackWaitStartedAt = Date.now();
+                  const playbackStarted = await waitForTtsPlaybackStart(
+                    ttsSessionId,
+                    IOS_AI_TTS_PLAYBACK_START_TIMEOUT_MS
+                  );
+                  playbackWaitMs = Date.now() - playbackWaitStartedAt;
+                  if (!playbackStarted) {
+                    lastTtsError = `iOS playback stall (${format})`;
+                    logTtsEvent(
+                      "play_stall",
+                      {
+                        sessionId: ttsSessionId,
+                        trigger,
+                        format,
+                        requestMs: Date.now() - requestStartedAt,
+                        networkMs: responseReceivedAt - requestStartedAt,
+                        localPrepMs: fileReadyAt - responseReceivedAt,
+                        playbackWaitMs,
+                        fileBytes: audioBlob.size,
+                      },
+                      "warn"
+                    );
+                    stopTtsPlayer({
+                      preserveDucking: true,
+                      reason: "playback_stall",
+                      level: "warn",
+                    });
+                    continue;
+                  }
+                }
+
+                ttsPlaybackMetaRef.current = {
+                  sessionId: ttsSessionId,
+                  trigger,
+                  source: "server",
+                  format,
+                  language: effectiveLanguage,
+                  textChars: textToSpeak.length,
+                  fileBytes: audioBlob.size,
+                  requestStartedAt,
+                  playbackStartedAt: Date.now(),
+                };
+                logTtsEvent("play_start", {
+                  sessionId: ttsSessionId,
+                  trigger,
+                  source: "server",
+                  format,
+                  requestMs: Date.now() - requestStartedAt,
+                  networkMs: responseReceivedAt - requestStartedAt,
+                  blobMs: blobReadyAt - responseReceivedAt,
+                  base64Ms: base64ReadyAt - blobReadyAt,
+                  fileWriteMs: fileReadyAt - base64ReadyAt,
+                  localPrepMs: fileReadyAt - responseReceivedAt,
+                  playbackPrepMs: playbackSessionPrepMs,
+                  playbackWaitMs,
+                  totalToPlayMs: Date.now() - requestStartedAt,
+                  fileBytes: audioBlob.size,
+                  textChars: textToSpeak.length,
+                });
+                return;
+              } catch (formatError) {
+                lastTtsError =
+                  formatError instanceof Error
+                    ? formatError.message.trim() || `TTS failed (${format})`
+                    : String(formatError || `TTS failed (${format})`).trim();
+                logTtsEvent(
+                  "request_failed",
+                  {
+                    sessionId: ttsSessionId,
+                    trigger,
+                    format,
+                    requestMs: Date.now() - requestStartedAt,
+                    message: lastTtsError,
+                  },
+                  "warn"
+                );
+              }
             }
-            return;
+
+            throw new Error(lastTtsError || "Voix IA indisponible temporairement.");
           } catch (ttsError) {
             const ttsReason =
               ttsError instanceof Error ? ttsError.message.trim() : String(ttsError || "").trim();
+            logTtsEvent(
+              "fallback_device",
+              {
+                sessionId: ttsSessionId,
+                trigger,
+                message: ttsReason || "unknown",
+              },
+              "warn"
+            );
             if (!realtimeEnabled) {
               setTranslationError(
                 ttsReason
@@ -2857,8 +4547,17 @@ function RoomView({
         speakWithDeviceVoice(false);
       } catch (err) {
         finalizeTtsSession(ttsSessionId);
+        logTtsEvent(
+          "fatal",
+          {
+            sessionId: ttsSessionId,
+            trigger,
+            message: err instanceof Error ? err.message : String(err),
+          },
+          "warn"
+        );
         if (!realtimeEnabled) {
-          setTranslationError(toFriendlyAudioError(err));
+          setTranslationError(toFriendlyAudioError(err, language));
         }
       }
     },
@@ -2869,7 +4568,7 @@ function RoomView({
       publicApiBase,
       realtimeEnabled,
       restoreRemoteAudioAfterTts,
-      session.bearerToken,
+      refreshBearerToken,
       session.guestTtsToken,
       prepareTtsPlayback,
       duckRemoteAudioForTts,
@@ -2877,10 +4576,21 @@ function RoomView({
       targetLanguage,
       targetSpeechLocale,
       ttsEnabled,
-      setCoachSuggestionSpeakingId,
       voiceId,
       clearTtsPlaybackWatchdog,
+      queueCaptionPhoneticFlush,
+      waitForTtsPlaybackStart,
     ]
+  );
+
+  const autoSpeakTranslatedText = useCallback(
+    (text: string, languageOverride?: LanguageCode) => {
+      if (!ttsEnabled) return;
+      if (hasPreferredTranslatorAudioTrack) return;
+      if (groupVoicePlaybackLimited) return;
+      void speakText(text, languageOverride, "auto");
+    },
+    [groupVoicePlaybackLimited, hasPreferredTranslatorAudioTrack, speakText, ttsEnabled]
   );
 
   const replayCaption = useCallback(() => {
@@ -2895,257 +4605,14 @@ function RoomView({
       setReplayButtonActive(false);
       replayButtonTimerRef.current = null;
     }, 900);
-    void speakText(text);
+    void speakText(text, undefined, "replay");
   }, [captionText, speakText]);
-
-  const playCoachPartnerReply = useCallback(() => {
-    const text = coachPartnerReply.trim();
-    if (!text) return;
-    if (coachPartnerSpeakTimerRef.current) {
-      clearTimeout(coachPartnerSpeakTimerRef.current);
-      coachPartnerSpeakTimerRef.current = null;
-    }
-    setCoachPartnerSpeakActive(true);
-    coachPartnerSpeakTimerRef.current = setTimeout(() => {
-      setCoachPartnerSpeakActive(false);
-      coachPartnerSpeakTimerRef.current = null;
-    }, 1100);
-    void speakText(text);
-  }, [coachPartnerReply, speakText]);
-
-  const playCoachSuggestion = useCallback(
-    (entry: CoachReplySuggestion) => {
-      const text = entry.targetText.trim();
-      if (!text) return;
-      setCoachSuggestionSpeakingId(entry.id);
-      if (coachPartnerSpeakTimerRef.current) {
-        clearTimeout(coachPartnerSpeakTimerRef.current);
-        coachPartnerSpeakTimerRef.current = null;
-      }
-      coachPartnerSpeakTimerRef.current = setTimeout(() => {
-        setCoachSuggestionSpeakingId((current) => (current === entry.id ? "" : current));
-        coachPartnerSpeakTimerRef.current = null;
-      }, 1100);
-      void speakText(text, targetLanguage).finally(() => {
-        setCoachSuggestionSpeakingId((current) => (current === entry.id ? "" : current));
-      });
-    },
-    [speakText, targetLanguage]
-  );
-
-  const requestCoachPartnerReply = useCallback(
-    async (userMessage: string, userLang: LanguageCode) => {
-      if (!coachConversationEnabled) return;
-      const prompt = userMessage.trim();
-      if (!prompt) return;
-      const dedupKey = `${userLang}:${prompt}`;
-      if (coachPartnerLastPromptRef.current === dedupKey && coachPartnerReply.trim()) return;
-
-      const bearerToken = (session.bearerToken || "").trim();
-      if (!bearerToken) {
-        setCoachPartnerError(
-          "Coach conversation IA indisponible en invite. Connecte-toi en hote."
-        );
-        return;
-      }
-
-      const requestId = ++coachPartnerRequestSeqRef.current;
-      setCoachPartnerLoading(true);
-      setCoachPartnerError("");
-      try {
-        const response = await fetch(`${publicApiBase}/api/openai`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${bearerToken}`,
-          },
-          body: JSON.stringify({
-            intent: "coach_conversation_mobile",
-            roomId: session.roomId,
-            messages: [
-              {
-                role: "system",
-                content:
-                  `Tu es un partenaire de conversation de langue. Tu reponds uniquement en ${getPromptLanguageName(
-                    targetLanguage
-                  )}. ` +
-                  "Reponse courte (1 a 2 phrases), naturelle, puis une question simple pour relancer l'echange. " +
-                  "Ton bienveillant, sans meta-commentaire.",
-              },
-              {
-                role: "user",
-                content: prompt,
-              },
-            ],
-          }),
-        });
-
-        const raw = await response.text();
-        let payload: unknown = null;
-        try {
-          payload = raw ? JSON.parse(raw) : null;
-        } catch {
-          if (!response.ok) throw new Error(raw || `Erreur IA (${response.status})`);
-        }
-
-        if (!response.ok) {
-          const message =
-            (payload as { error?: string } | null)?.error || raw || `Erreur IA (${response.status})`;
-          throw new Error(message);
-        }
-
-        const choice = (
-          payload as { choices?: { message?: { content?: string }; finish_reason?: string }[] } | null
-        )?.choices?.[0];
-        const text = (choice?.message?.content || "").trim();
-        if (!text) throw new Error("Aucune reponse IA.");
-        if (requestId !== coachPartnerRequestSeqRef.current) return;
-
-        setCoachReplySuggestions([]);
-        setCoachReplySuggestionsLoading(true);
-        setCoachPartnerReply(
-          choice?.finish_reason === "length" ? `${text}\n\n[Reponse tronquee]` : text
-        );
-        coachPartnerLastPromptRef.current = dedupKey;
-        setCoachPartnerReplyTranslation("");
-
-        if (userLang !== targetLanguage) {
-          try {
-            const translated = await translateText({
-              apiBaseUrl: publicApiBase,
-              bearerToken: session.bearerToken,
-              guestTtsToken: session.guestTtsToken,
-              text,
-              fromLanguage: getPromptLanguageName(targetLanguage),
-              toLanguage: getPromptLanguageName(userLang),
-            });
-            if (requestId !== coachPartnerRequestSeqRef.current) return;
-            const cleanTranslated = translated.trim();
-            if (cleanTranslated) {
-              setCoachPartnerReplyTranslation(cleanTranslated);
-            }
-          } catch {
-            if (requestId !== coachPartnerRequestSeqRef.current) return;
-          }
-        }
-
-        try {
-            const suggestionsResponse = await fetch(`${publicApiBase}/api/openai`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${bearerToken}`,
-              },
-              body: JSON.stringify({
-                intent: "coach_conversation_suggestions_mobile",
-                roomId: session.roomId,
-                messages: [
-                  {
-                    role: "system",
-                    content:
-                      `Tu proposes 3 reponses courtes que l'utilisateur peut dire ensuite. ` +
-                      `Ecris UNIQUEMENT en ${getPromptLanguageName(targetLanguage)}. ` +
-                      'Retourne strictement du JSON: {"suggestions":["...","...","..."]}.',
-                  },
-                  {
-                    role: "user",
-                    content: `Message du partenaire IA: ${text}`,
-                  },
-                ],
-              }),
-            });
-
-            const suggestionsRaw = await suggestionsResponse.text();
-            if (!suggestionsResponse.ok) {
-              throw new Error(suggestionsRaw || `Erreur suggestions (${suggestionsResponse.status})`);
-            }
-            if (requestId !== coachPartnerRequestSeqRef.current) return;
-
-            const suggestionTargets = parseCoachSuggestions(suggestionsRaw).slice(0, 3);
-            if (suggestionTargets.length === 0) {
-              setCoachReplySuggestions([]);
-              return;
-            }
-
-            const translatedSuggestions = await Promise.all(
-              suggestionTargets.map(async (entry, index) => {
-                const phonetic = await phoneticText({
-                  apiBaseUrl: publicApiBase,
-                  bearerToken: session.bearerToken,
-                  guestTtsToken: session.guestTtsToken,
-                  text: entry,
-                  languageName: getPromptLanguageName(targetLanguage),
-                }).catch(() => "");
-                const normalizedSuggestion = entry.replace(/\s+/g, " ").trim().toLowerCase();
-                const normalizedPhonetic = phonetic.replace(/\s+/g, " ").trim().toLowerCase();
-                const finalPhonetic =
-                  normalizedPhonetic && normalizedPhonetic !== normalizedSuggestion
-                    ? phonetic.trim()
-                    : "";
-
-                if (userLang === targetLanguage) {
-                  return {
-                    id: `${requestId}-${index}`,
-                    targetText: entry,
-                    sourceText: entry,
-                    phoneticText: finalPhonetic,
-                  };
-                }
-                const translated = await translateText({
-                  apiBaseUrl: publicApiBase,
-                  bearerToken: session.bearerToken,
-                  guestTtsToken: session.guestTtsToken,
-                  text: entry,
-                  fromLanguage: getPromptLanguageName(targetLanguage),
-                  toLanguage: getPromptLanguageName(userLang),
-                }).catch(() => "");
-                return {
-                  id: `${requestId}-${index}`,
-                  targetText: entry,
-                  sourceText: translated.trim() || entry,
-                  phoneticText: finalPhonetic,
-                };
-              })
-            );
-            if (requestId !== coachPartnerRequestSeqRef.current) return;
-            setCoachReplySuggestions(translatedSuggestions);
-          } catch {
-            if (requestId !== coachPartnerRequestSeqRef.current) return;
-            setCoachReplySuggestions([]);
-        }
-      } catch (error) {
-        if (requestId !== coachPartnerRequestSeqRef.current) return;
-        const rawMessage = error instanceof Error ? error.message : "Erreur coach conversation IA.";
-        if (/unauthorized|401|forbidden|403/i.test(rawMessage)) {
-          setCoachPartnerError("Coach conversation IA indisponible pour ce profil.");
-        } else {
-          setCoachPartnerError(rawMessage);
-        }
-        setCoachReplySuggestions([]);
-      } finally {
-        if (requestId === coachPartnerRequestSeqRef.current) {
-          setCoachPartnerLoading(false);
-          setCoachReplySuggestionsLoading(false);
-        }
-      }
-    },
-    [
-      coachPartnerReply,
-      coachConversationEnabled,
-      getPromptLanguageName,
-      publicApiBase,
-      session.bearerToken,
-      session.guestTtsToken,
-      session.roomId,
-      targetLanguage,
-    ]
-  );
 
   const retranslateCurrentSource = useCallback(async () => {
     const cleanSource = sourceText.trim();
     if (!cleanSource || translationBusy) return;
     if (translationControlsDisabled) {
-      setTranslationError(effectiveTranslationLockMessage || TRANSLATION_UNLOCK_HINT);
+      setTranslationError(effectiveTranslationLockMessage || ui.translationUnlockHint);
       return;
     }
 
@@ -3155,7 +4622,7 @@ function RoomView({
       if (isHostSession) {
         const consumed = await consumeTranslationSeconds(1, "local");
         if (!consumed) {
-          setTranslationError(effectiveTranslationLockMessage || TRANSLATION_UNLOCK_HINT);
+          setTranslationError(effectiveTranslationLockMessage || ui.translationUnlockHint);
           return;
         }
       }
@@ -3163,33 +4630,33 @@ function RoomView({
       const sourceLang = sourceTextLanguageRef.current || sourceLanguage;
       let translated = "";
       try {
-        translated = await translateText({
-          apiBaseUrl: publicApiBase,
-          bearerToken: session.bearerToken,
-          guestTtsToken: session.guestTtsToken,
-          text: cleanSource,
-          fromLanguage: getPromptLanguageName(sourceLang),
-          toLanguage: getPromptLanguageName(targetLanguage),
-        });
+        translated = await withFreshBearerToken((activeBearerToken) =>
+          translateText({
+            apiBaseUrl: publicApiBase,
+            bearerToken: activeBearerToken,
+            guestTtsToken: session.guestTtsToken,
+            text: cleanSource,
+            fromLanguage: getPromptLanguageName(sourceLang),
+            toLanguage: getPromptLanguageName(targetLanguage),
+          })
+        );
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Traduction indisponible.";
+        const message = error instanceof Error ? error.message : ui.translationUnavailableError;
         setTranslationError(
           /forbidden|403|acces refuse|accès refusé/i.test(message)
-            ? "Traduction refusée pour ce compte. Le texte source reste visible."
-            : `Traduction indisponible, fallback texte source: ${message}`
+            ? ui.translationForbidden
+            : ui.translationFallback(message)
         );
       }
 
       const finalCaption = translated.trim() || cleanSource;
       if (!finalCaption) {
-        throw new Error("Empty translation.");
+        throw new Error(language === "fr" ? "Traduction vide." : "Empty translation.");
       }
       setCaptionText(finalCaption);
-      if (ttsEnabled) {
-        void speakText(finalCaption);
-      }
+      autoSpeakTranslatedText(finalCaption);
     } catch (error) {
-      setTranslationError(toFriendlyAudioError(error));
+      setTranslationError(toFriendlyAudioError(error, language));
     } finally {
       setTranslationBusy(false);
     }
@@ -3197,18 +4664,21 @@ function RoomView({
     consumeTranslationSeconds,
     effectiveTranslationLockMessage,
     getPromptLanguageName,
-    isHostSession,
-    publicApiBase,
-    session.bearerToken,
-    session.guestTtsToken,
-    sourceLanguage,
-    sourceText,
-    speakText,
+      isHostSession,
+      language,
+      publicApiBase,
+      session.guestTtsToken,
+      sourceLanguage,
+      sourceText,
+    autoSpeakTranslatedText,
     targetLanguage,
-    translationBusy,
-    translationControlsDisabled,
-    ttsEnabled,
-  ]);
+      translationBusy,
+      translationControlsDisabled,
+      ui.translationFallback,
+      ui.translationForbidden,
+      ui.translationUnavailableError,
+      withFreshBearerToken,
+    ]);
 
   const triggerRetranslate = useCallback(() => {
     if (translationBusy || !sourceText.trim()) return;
@@ -3225,120 +4695,141 @@ function RoomView({
   }, [retranslateCurrentSource, sourceText, translationBusy]);
 
   const handleIncomingCaption = useCallback(
-    (payload: CaptionPayload) => {
+    (payload: CaptionPayload, senderIdentity?: string | null) => {
+      const normalizedSenderIdentity = String(senderIdentity || "").trim();
+      if (!normalizedSenderIdentity) return;
+      if (!isTrustedHumanParticipantIdentity(normalizedSenderIdentity)) return;
       if (!payload.text && !payload.sourceText) return;
       if (payload.roomId && payload.roomId !== session.roomId) return;
+      if (payload.from && payload.from.trim() && payload.from.trim() !== normalizedSenderIdentity) {
+        return;
+      }
+      const resolvedFrom = normalizedSenderIdentity;
       const fallbackSource = (payload.sourceText || payload.text || "").trim();
       const fallbackCaption = (payload.text || fallbackSource).trim();
       if (!fallbackCaption) return;
+      const speakerLabel = getParticipantLabelByIdentity(resolvedFrom);
+
+      const isLocalCaption = resolvedFrom === session.identity;
+      const remoteUsageSeconds = isLocalCaption
+        ? null
+        : estimateVerifiedRemoteUsageSeconds(resolvedFrom);
+      if (!isLocalCaption && remoteUsageSeconds === null) {
+        return;
+      }
+      const verifiedRemoteUsageSeconds = remoteUsageSeconds ?? 1;
 
       sourceTextLanguageRef.current =
         payload.sourceLang && isLanguageCode(payload.sourceLang)
           ? payload.sourceLang
           : sourceLanguage;
       setSourceText(fallbackSource);
+      setSubtitleSpeakerLabel(speakerLabel);
 
-      if (payload.from === session.identity) {
+      if (isLocalCaption) {
         setCaptionText(fallbackCaption);
         return;
       }
 
-      const remoteDurationSeconds =
-        typeof payload.durationSeconds === "number" && Number.isFinite(payload.durationSeconds)
-          ? Math.max(1, Math.min(300, Math.floor(payload.durationSeconds)))
-          : 1;
-
       void (async () => {
         if (isHostSession) {
-          const consumed = await consumeTranslationSeconds(remoteDurationSeconds, "remote");
+          const consumed = await consumeTranslationSeconds(verifiedRemoteUsageSeconds, "remote");
           if (!consumed) {
-            setTranslationError(effectiveTranslationLockMessage || TRANSLATION_UNLOCK_HINT);
+            setTranslationError(effectiveTranslationLockMessage || ui.translationUnlockHint);
             return;
           }
         }
+
         if (!payload.sourceText || !payload.sourceLang || payload.targetLang === targetLanguage) {
           setCaptionText(fallbackCaption);
-          if (ttsEnabled) {
-            void speakText(fallbackCaption);
-          }
+          setTranslationError("");
+          autoSpeakTranslatedText(fallbackCaption);
           return;
         }
 
         const sourceLangCode = payload.sourceLang;
         if (!isLanguageCode(sourceLangCode)) {
           setCaptionText(fallbackCaption);
-          if (ttsEnabled) {
-            void speakText(fallbackCaption);
-          }
+          setTranslationError("");
+          autoSpeakTranslatedText(fallbackCaption);
           return;
         }
 
         const sequence = ++incomingTranslationSeqRef.current;
         try {
-          const personalized = await translateText({
-            apiBaseUrl: publicApiBase,
-            bearerToken: session.bearerToken,
-            guestTtsToken: session.guestTtsToken,
-            text: payload.sourceText || "",
-            fromLanguage: getPromptLanguageName(sourceLangCode),
-            toLanguage: getPromptLanguageName(targetLanguage),
-          });
+          const personalized = await withFreshBearerToken((activeBearerToken) =>
+            translateText({
+              apiBaseUrl: publicApiBase,
+              bearerToken: activeBearerToken,
+              guestTtsToken: session.guestTtsToken,
+              text: payload.sourceText || "",
+              fromLanguage: getPromptLanguageName(sourceLangCode),
+              toLanguage: getPromptLanguageName(targetLanguage),
+            })
+          );
           if (sequence !== incomingTranslationSeqRef.current) return;
           const caption = personalized.trim() || fallbackCaption;
           setCaptionText(caption);
           setTranslationError("");
-          if (ttsEnabled) {
-            void speakText(caption);
-          }
+          autoSpeakTranslatedText(caption);
         } catch {
           if (sequence !== incomingTranslationSeqRef.current) return;
           setCaptionText(fallbackCaption);
-          if (ttsEnabled) {
-            void speakText(fallbackCaption);
-          }
+          autoSpeakTranslatedText(fallbackCaption);
         }
       })();
     },
     [
       consumeTranslationSeconds,
       effectiveTranslationLockMessage,
+      estimateVerifiedRemoteUsageSeconds,
+      getParticipantLabelByIdentity,
       getPromptLanguageName,
       isHostSession,
-      session.bearerToken,
+      isTrustedHumanParticipantIdentity,
       session.guestTtsToken,
       session.identity,
       session.roomId,
       publicApiBase,
       sourceLanguage,
-      speakText,
+      autoSpeakTranslatedText,
       targetLanguage,
-      ttsEnabled,
+      withFreshBearerToken,
     ]
   );
 
   useEffect(() => {
     if (!room) return;
-    const onData = (data: Uint8Array, _participant?: unknown, _kind?: unknown, topic?: string) => {
+    const onData = (
+      data: Uint8Array,
+      participant?: Participant,
+      _kind?: unknown,
+      topic?: string
+    ) => {
       if (!topic) return;
       try {
         const raw = new TextDecoder().decode(data);
         if (topic === "bfzoom-captions") {
           const parsed = JSON.parse(raw) as CaptionPayload;
-          handleIncomingCaption(parsed);
+          handleIncomingCaption(parsed, participant?.identity);
           return;
         }
         if (topic === TALKIE_LOCK_TOPIC) {
           const parsed = JSON.parse(raw) as TalkieLockPayload;
-          applyTalkieLockPayload(parsed);
+          applyTalkieLockPayload(parsed, participant?.identity);
           return;
         }
         if (topic === TRANSLATION_ACCESS_TOPIC) {
           if (isHostSession) return;
+          const senderIdentity = String(participant?.identity || "").trim();
+          if (!senderIdentity) return;
           const parsed = JSON.parse(raw) as TranslationAccessPayload;
+          if (parsed.from && parsed.from.trim() && parsed.from.trim() !== senderIdentity) return;
+          if (getParticipantRole(senderIdentity) !== "host") return;
           if (parsed.roomId && parsed.roomId !== session.roomId) return;
           setRoomTranslationEnabled(Boolean(parsed.enabled));
           const normalizedReason = String(parsed.reason || "").trim();
-          setRoomTranslationReason(normalizedReason || TRANSLATION_UNLOCK_HINT);
+          setRoomTranslationReason(normalizedReason || ui.translationUnlockHint);
           if (
             typeof parsed.remainingSeconds === "number" &&
             Number.isFinite(parsed.remainingSeconds)
@@ -3354,18 +4845,27 @@ function RoomView({
     return () => {
       room.off(RoomEvent.DataReceived, onData);
     };
-  }, [applyTalkieLockPayload, handleIncomingCaption, isHostSession, room, session.roomId]);
+  }, [
+    applyTalkieLockPayload,
+    getParticipantRole,
+    handleIncomingCaption,
+    isHostSession,
+    room,
+    session.roomId,
+    ui.translationUnlockHint,
+  ]);
 
   const publishCaption = useCallback(
     async (payload: CaptionPayload) => {
       if (!localParticipant) return;
+      if (!canPublishRoomData()) return;
       const text = JSON.stringify(payload);
       await localParticipant.publishData(new TextEncoder().encode(text), {
         reliable: true,
         topic: "bfzoom-captions",
       });
     },
-    [localParticipant]
+    [connected, localParticipant, room]
   );
 
   const flushNativeRealtimeOutput = useCallback(async () => {
@@ -3374,10 +4874,12 @@ function RoomView({
     if (!text) return;
 
     setCaptionText(text);
+    setSubtitleSpeakerLabel(`${session.displayName || session.identity || "BFZoom"}${ui.meSuffix}`);
     if (!captionsEnabled) return;
     await publishCaption({
       roomId: session.roomId,
       from: session.identity,
+      speakerName: session.displayName,
       text,
       sourceText: realtimeInputTranscriptRef.current || undefined,
       sourceLang: sourceLanguage,
@@ -3387,14 +4889,16 @@ function RoomView({
   }, [
     captionsEnabled,
     publishCaption,
+    session.displayName,
     session.identity,
     session.roomId,
     sourceLanguage,
     targetLanguage,
+    ui.meSuffix,
   ]);
 
   const runNativeRealtimeSession = useCallback(
-    async (isCancelled: () => boolean) => {
+    async (isCancelled: () => boolean, sessionId: number) => {
       const realtimeUrl = env.realtimeUrl.trim();
       if (!realtimeUrl) {
         throw new Error("EXPO_PUBLIC_REALTIME_URL is missing.");
@@ -3409,6 +4913,7 @@ function RoomView({
 
       const bridge = createRealtimePcmBridge({
         onChunk: (chunk) => {
+          if (sessionId !== realtimeSessionIdRef.current || isCancelled()) return;
           const ws = realtimeWsRef.current;
           if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
@@ -3429,6 +4934,7 @@ function RoomView({
           setRealtimeQueueDepth(Math.max(0, Math.ceil(ws.bufferedAmount / 8192)));
         },
         onError: (message) => {
+          if (sessionId !== realtimeSessionIdRef.current || isCancelled()) return;
           setTranslationError(message);
           setRealtimeStatus("error");
         },
@@ -3458,6 +4964,11 @@ function RoomView({
         };
 
         ws.onopen = () => {
+          if (sessionId !== realtimeSessionIdRef.current) {
+            ws.close();
+            completeResolve();
+            return;
+          }
           opened = true;
           if (isCancelled()) {
             ws.close();
@@ -3472,7 +4983,7 @@ function RoomView({
         };
 
         ws.onmessage = (event) => {
-          if (isCancelled()) return;
+          if (isCancelled() || sessionId !== realtimeSessionIdRef.current) return;
           const raw = typeof event.data === "string" ? event.data : "";
           if (!raw) return;
 
@@ -3532,6 +5043,7 @@ function RoomView({
             realtimeInputTranscriptRef.current = transcript;
             sourceTextLanguageRef.current = sourceLanguage;
             setSourceText(transcript);
+            setSubtitleSpeakerLabel(`${session.displayName || session.identity || "BFZoom"}${ui.meSuffix}`);
             return;
           }
 
@@ -3559,7 +5071,7 @@ function RoomView({
         };
 
         ws.onerror = () => {
-          if (isCancelled()) return;
+          if (isCancelled() || sessionId !== realtimeSessionIdRef.current) return;
           setTranslationError("Realtime WS connection failed.");
           setRealtimeStatus("error");
           setForceSegmentedRealtime(true);
@@ -3570,7 +5082,7 @@ function RoomView({
         };
 
         ws.onclose = (event) => {
-          if (isCancelled()) return;
+          if (isCancelled() || sessionId !== realtimeSessionIdRef.current) return;
           setRealtimeQueueDepth(0);
           if (event.code !== 1000) {
             setRealtimeStatus("error");
@@ -3593,6 +5105,7 @@ function RoomView({
     [
       buildNativeRealtimeSessionUpdate,
       flushNativeRealtimeOutput,
+      realtimeSessionIdRef,
       stopNativeRealtimeSession,
     ]
   );
@@ -3614,75 +5127,88 @@ function RoomView({
       if (!clean) return;
       sourceTextLanguageRef.current = sourceLang;
       setSourceText(clean);
+      setSubtitleSpeakerLabel(`${session.displayName || session.identity || "BFZoom"}${ui.meSuffix}`);
       setTranslationError("");
 
       let translated = "";
       try {
-        translated = await translateText({
-          apiBaseUrl: publicApiBase,
-          bearerToken: session.bearerToken,
-          guestTtsToken: session.guestTtsToken,
-          text: clean,
-          fromLanguage: getPromptLanguageName(sourceLang),
-          toLanguage: getPromptLanguageName(targetLanguage),
-        });
+        translated = await withFreshBearerToken((activeBearerToken) =>
+          translateText({
+            apiBaseUrl: publicApiBase,
+            bearerToken: activeBearerToken,
+            guestTtsToken: session.guestTtsToken,
+            text: clean,
+            fromLanguage: getPromptLanguageName(sourceLang),
+            toLanguage: getPromptLanguageName(targetLanguage),
+          })
+        );
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Traduction indisponible.";
+        const message = error instanceof Error ? error.message : ui.translationUnavailableError;
         setTranslationError(
           /forbidden|403|acces refuse|accès refusé/i.test(message)
-            ? "Traduction refusée pour ce compte. Le texte source reste visible."
-            : `Traduction indisponible, fallback texte source: ${message}`
+            ? ui.translationForbidden
+            : ui.translationFallback(message)
         );
       }
       const finalCaption = translated.trim() || clean;
       if (!finalCaption) {
-        throw new Error("Empty translation.");
+        throw new Error(language === "fr" ? "Traduction vide." : "Empty translation.");
       }
 
       setCaptionText(finalCaption);
       setTranslationError("");
-      if (ttsEnabled) {
-        void speakText(finalCaption);
-      }
+      autoSpeakTranslatedText(finalCaption);
       if (captionsEnabled) {
-        await publishCaption({
+        void publishCaption({
           id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           roomId: session.roomId,
           from: session.identity,
+          speakerName: session.displayName,
           text: finalCaption,
           sourceText: clean,
           sourceLang,
           targetLang: targetLanguage,
           durationSeconds: Math.max(1, Math.min(300, Math.floor(durationSeconds || 1))),
           timestamp: Date.now(),
-        });
-      }
-      if (coachConversationEnabled) {
-        void requestCoachPartnerReply(clean, sourceLang);
+        }).catch(() => {});
       }
     },
     [
       captionsEnabled,
-      coachConversationEnabled,
       getPromptLanguageName,
       publishCaption,
-      requestCoachPartnerReply,
-      session.bearerToken,
+      session.displayName,
       session.guestTtsToken,
       session.identity,
       session.roomId,
       publicApiBase,
       isHostSession,
       sourceLanguage,
-      speakText,
+      autoSpeakTranslatedText,
       targetLanguage,
-      ttsEnabled,
+      ui.meSuffix,
+      withFreshBearerToken,
     ]
   );
 
   const transcribeWithFallbackLanguage = useCallback(
-    async (audioUri: string, sourceLang?: LanguageCode) => {
+    async (
+      audioUri: string,
+      sourceLang?: LanguageCode,
+      clientMetrics?: {
+        recordingMs?: number;
+        recorderStopMs?: number;
+        postStopSettleMs?: number;
+        resolveUriMs?: number;
+        stabilizeMs?: number;
+        preUploadMs?: number;
+      },
+      requestControl?: {
+        signal?: AbortSignal;
+      }
+    ) => {
       let sawScriptMismatch = false;
+      let shouldRetryWithoutHint = false;
       const normalize = (candidate: string) => {
         const trimmed = candidate.trim();
         if (!trimmed) return "";
@@ -3695,23 +5221,39 @@ function RoomView({
         return trimmed;
       };
 
-      const firstPass = await transcribeAudio({
-        apiBaseUrl: publicApiBase,
-        bearerToken: session.bearerToken,
-        guestTtsToken: session.guestTtsToken,
-        audioUri,
-        language: sourceLang,
-      });
+      const firstPass = await withFreshBearerToken((activeBearerToken) =>
+        transcribeAudio({
+          apiBaseUrl: publicApiBase,
+          bearerToken: activeBearerToken,
+          guestTtsToken: session.guestTtsToken,
+          audioUri,
+          language: sourceLang,
+          clientMetrics,
+          signal: requestControl?.signal,
+        })
+      );
+      const trimmedFirstPass = firstPass.trim();
       const normalizedFirstPass = normalize(firstPass);
+      shouldRetryWithoutHint = !trimmedFirstPass || sawScriptMismatch;
       if (normalizedFirstPass) return normalizedFirstPass;
+      if (!shouldRetryWithoutHint) {
+        if (sawScriptMismatch) {
+          throw new Error("Source language mismatch.");
+        }
+        return "";
+      }
 
       // Fallback sans hint langue pour éviter les faux "No speech detected" sur iOS.
-      const secondPass = await transcribeAudio({
-        apiBaseUrl: publicApiBase,
-        bearerToken: session.bearerToken,
-        guestTtsToken: session.guestTtsToken,
-        audioUri,
-      });
+      const secondPass = await withFreshBearerToken((activeBearerToken) =>
+        transcribeAudio({
+          apiBaseUrl: publicApiBase,
+          bearerToken: activeBearerToken,
+          guestTtsToken: session.guestTtsToken,
+          audioUri,
+          clientMetrics,
+          signal: requestControl?.signal,
+        })
+      );
       const normalizedSecondPass = normalize(secondPass);
       if (normalizedSecondPass) return normalizedSecondPass;
       if (sawScriptMismatch) {
@@ -3719,12 +5261,22 @@ function RoomView({
       }
       return "";
     },
-    [publicApiBase, session.bearerToken, session.guestTtsToken]
+    [publicApiBase, session.guestTtsToken, withFreshBearerToken]
   );
 
   const stopRecordingAndTranslate = useCallback(async () => {
     if (stopTranslateInFlightRef.current) return;
     stopTranslateInFlightRef.current = true;
+    manualStopRequestIdRef.current += 1;
+    const stopRequestId = manualStopRequestIdRef.current;
+    const abortController = typeof AbortController === "undefined" ? null : new AbortController();
+    activeTranscriptionAbortControllerRef.current?.abort();
+    activeTranscriptionAbortControllerRef.current = abortController;
+    const isStopRequestActive = () =>
+      stopRequestId === manualStopRequestIdRef.current
+      && appStateRef.current === "active"
+      && !(abortController?.signal.aborted);
+    let reviewOpened = false;
     try {
       if (realtimeEnabled) {
         await publishTalkieLock("release");
@@ -3738,7 +5290,7 @@ function RoomView({
       }
       setTalkieUiState("stopping");
       if (translationControlsDisabled) {
-        setTranslationError(effectiveTranslationLockMessage || TRANSLATION_UNLOCK_HINT);
+        setTranslationError(effectiveTranslationLockMessage || ui.translationUnlockHint);
         await publishTalkieLock("release");
         return;
       }
@@ -3749,31 +5301,61 @@ function RoomView({
         : 0;
       const durationMs = Math.max(recorderState.durationMillis || 0, elapsedMs);
       if (durationMs > 0 && durationMs < MANUAL_MIN_RECORDING_MS) {
-        throw new Error("Parle au moins une seconde avant de lancer la traduction.");
+        throw new Error(ui.speakAtLeastOneSecond);
       }
       const baselineUri =
         recordingStartUriRef.current || recorder.uri || recorderUrlRef.current || "";
+      const preUploadStartedAt = Date.now();
+      const recorderStopStartedAt = Date.now();
       try {
         await recorder.stop();
       } catch {}
-      await wait(280);
+      const recorderStopMs = Date.now() - recorderStopStartedAt;
+      const postStopSettleStartedAt = Date.now();
+      await wait(MANUAL_POST_STOP_SETTLE_MS);
+      const postStopSettleMs = Date.now() - postStopSettleStartedAt;
+      if (!isStopRequestActive()) {
+        return;
+      }
+      const resolveUriStartedAt = Date.now();
       const uri = await resolveFreshRecordingUri(baselineUri);
-      await setPlaybackAudioMode();
+      const resolveUriMs = Date.now() - resolveUriStartedAt;
+      if (!isStopRequestActive()) {
+        return;
+      }
       if (!uri) {
-        throw new Error("Recording URI missing.");
+        throw new Error(
+          language === "fr" ? "URI d'enregistrement introuvable." : "Recording URI missing."
+        );
       }
       if (baselineUri && uri === baselineUri) {
-        throw new Error("Audio non finalise. Relache puis reessaie.");
+        throw new Error(ui.audioNotFinalized);
       }
       lastProcessedRecordingUriRef.current = uri;
+      const stabilizeStartedAt = Date.now();
       const stable = await stabilizeRecordedAudioUri(uri, MANUAL_MIN_SEGMENT_BYTES);
+      const stabilizeMs = Date.now() - stabilizeStartedAt;
+      if (!isStopRequestActive()) {
+        return;
+      }
       if (stable.size < MANUAL_MIN_SEGMENT_BYTES) {
-        throw new Error("Audio invalide ou trop court. Parle 1-2 secondes puis réessaie.");
+        throw new Error(ui.audioTooShort);
       }
 
       const transcribed = await transcribeWithFallbackLanguage(
         stable.uri,
-        sourceLanguage
+        sourceLanguage,
+        {
+          recordingMs: durationMs,
+          recorderStopMs,
+          postStopSettleMs,
+          resolveUriMs,
+          stabilizeMs,
+          preUploadMs: Date.now() - preUploadStartedAt,
+        },
+        {
+          signal: abortController?.signal,
+        }
       );
       if (!transcribed || isLikelyLowSignalTranscript(transcribed, sourceLanguage)) {
         throw new Error("No speech detected.");
@@ -3783,28 +5365,41 @@ function RoomView({
       if (!draft || isKnownBadTranscript(draft)) {
         throw new Error("No speech detected.");
       }
+      if (!isStopRequestActive()) {
+        return;
+      }
       setSourceText(draft);
+      setSubtitleSpeakerLabel(`${session.displayName || session.identity || "BFZoom"}${ui.meSuffix}`);
       sourceTextLanguageRef.current = sourceLanguage;
       setManualDraftText(draft);
       setManualDraftDurationSeconds(usageSeconds);
       setManualDraftSourceLanguage(sourceLanguage);
+      setTalkieUiState("review");
+      reviewOpened = true;
       setManualDraftVisible(true);
       setTranslationPanelOpen(true);
       setTranslationError("");
     } catch (err) {
+      if (!isStopRequestActive() && appStateRef.current !== "active") {
+        return;
+      }
       const raw = err instanceof Error ? err.message : String(err || "");
       if (/no speech detected/i.test(raw)) {
         setSourceText("");
         sourceTextLanguageRef.current = sourceLanguage;
         setCaptionText("");
+        setSubtitleSpeakerLabel("");
         setManualDraftVisible(false);
         setManualDraftText("");
         setManualDraftDurationSeconds(1);
         setManualDraftSourceLanguage(sourceLanguage);
         setManualDraftSending(false);
       }
-      setTranslationError(toFriendlyAudioError(err));
+      setTranslationError(toFriendlyAudioError(err, language));
     } finally {
+      if (activeTranscriptionAbortControllerRef.current === abortController) {
+        activeTranscriptionAbortControllerRef.current = null;
+      }
       manualRecordingStartedAtRef.current = 0;
       manualStartInFlightRef.current = false;
       pendingStopAfterStartRef.current = false;
@@ -3812,19 +5407,28 @@ function RoomView({
       try {
         await setPlaybackAudioMode();
       } catch {}
-      await restoreRoomMicAfterRecorder();
+      if (!reviewOpened) {
+        await restoreRoomMicAfterRecorder();
+      }
+      await releaseExpoAudioActivity();
       await publishTalkieLock("release");
       setTranslationBusy(false);
-      setTalkieUiState("idle");
+      if (!reviewOpened || !isStopRequestActive()) {
+        setTalkieUiState("idle");
+      }
       stopTranslateInFlightRef.current = false;
     }
   }, [
     publishTalkieLock,
     effectiveTranslationLockMessage,
+    language,
     recorder,
     resolveFreshRecordingUri,
     realtimeEnabled,
+    releaseExpoAudioActivity,
     recordingActive,
+    session.displayName,
+    session.identity,
     restoreRoomMicAfterRecorder,
     recorderState.durationMillis,
     setPlaybackAudioMode,
@@ -3832,6 +5436,10 @@ function RoomView({
     stabilizeRecordedAudioUri,
     translationControlsDisabled,
     transcribeWithFallbackLanguage,
+    ui.audioNotFinalized,
+    ui.audioTooShort,
+    ui.meSuffix,
+    ui.speakAtLeastOneSecond,
   ]);
 
   const cancelManualDraft = useCallback(() => {
@@ -3840,13 +5448,15 @@ function RoomView({
     setManualDraftDurationSeconds(1);
     setManualDraftSourceLanguage(sourceLanguage);
     setManualDraftSending(false);
-  }, [sourceLanguage]);
+    setTalkieUiState("idle");
+    void restoreRoomMicAfterRecorder();
+  }, [restoreRoomMicAfterRecorder, sourceLanguage]);
 
   const confirmManualDraftSend = useCallback(async () => {
     const draft = manualDraftText.trim();
     if (!draft || manualDraftSending) return;
     if (translationControlsDisabled) {
-      setTranslationError(effectiveTranslationLockMessage || TRANSLATION_UNLOCK_HINT);
+      setTranslationError(effectiveTranslationLockMessage || ui.translationUnlockHint);
       return;
     }
     const usageSeconds = Math.max(1, Math.min(300, Math.floor(manualDraftDurationSeconds || 1)));
@@ -3854,47 +5464,97 @@ function RoomView({
     setManualDraftSending(true);
     setTranslationBusy(true);
     setTranslationError("");
+    let shouldRestoreRoomMic = false;
+    let talkieLockClaimed = false;
     try {
       const consumed = await consumeTranslationSeconds(usageSeconds, "local");
       if (!consumed) {
-        setTranslationError(effectiveTranslationLockMessage || TRANSLATION_UNLOCK_HINT);
+        setTranslationError(effectiveTranslationLockMessage || ui.translationUnlockHint);
         return;
       }
-      await processTranscript(draft, manualDraftSourceLanguage, usageSeconds);
+      setSourceText(draft);
+      setSubtitleSpeakerLabel(`${session.displayName || session.identity || "BFZoom"}${ui.meSuffix}`);
+      sourceTextLanguageRef.current = manualDraftSourceLanguage;
       setManualDraftVisible(false);
       setManualDraftText("");
       setManualDraftDurationSeconds(1);
       setManualDraftSourceLanguage(sourceLanguage);
+      setTalkieUiState("idle");
+      shouldRestoreRoomMic = true;
+      await publishTalkieLock("claim");
+      talkieLockClaimed = true;
+      await processTranscript(draft, manualDraftSourceLanguage, usageSeconds);
     } catch (err) {
-      setTranslationError(toFriendlyAudioError(err));
+      setTranslationError(toFriendlyAudioError(err, language));
     } finally {
+      if (talkieLockClaimed) {
+        await publishTalkieLock("release");
+      }
+      if (shouldRestoreRoomMic) {
+        await restoreRoomMicAfterRecorder();
+      }
       setManualDraftSending(false);
       setTranslationBusy(false);
     }
   }, [
     consumeTranslationSeconds,
     effectiveTranslationLockMessage,
+    language,
     manualDraftDurationSeconds,
     manualDraftSending,
     manualDraftSourceLanguage,
     manualDraftText,
     processTranscript,
+    publishTalkieLock,
+    restoreRoomMicAfterRecorder,
+    session.displayName,
+    session.identity,
     sourceLanguage,
     translationControlsDisabled,
+    ui.meSuffix,
+    ui.translationUnlockHint,
   ]);
+
+  const triggerTalkieHaptic = useCallback((kind: "start" | "stop") => {
+    if (Platform.OS !== "ios") return;
+    const fallbackDuration = kind === "start" ? 12 : 18;
+    try {
+      void Haptics.impactAsync(
+        kind === "start"
+          ? Haptics.ImpactFeedbackStyle.Light
+          : Haptics.ImpactFeedbackStyle.Medium
+      ).catch(() => {
+        try {
+          Vibration.cancel();
+          Vibration.vibrate(fallbackDuration);
+        } catch {}
+      });
+    } catch {
+      try {
+        Vibration.cancel();
+        Vibration.vibrate(fallbackDuration);
+      } catch {}
+    }
+  }, []);
 
   const handleManualPushToTalkPressIn = useCallback(() => {
     if (realtimeEnabled || translationBusy) return;
     if (talkieUiState !== "idle") return;
+    if (appStateRef.current !== "active") return;
     if (translationControlsDisabled) {
-      setRecordingError(effectiveTranslationLockMessage || TRANSLATION_UNLOCK_HINT);
+      setRecordingError(effectiveTranslationLockMessage || ui.translationUnlockHint);
       return;
     }
     if (isTalkieLockedByOther) {
       const holder = talkieLockHolderName || "un interlocuteur";
-      setRecordingError(`Talkie occupé: ${holder} parle en ce moment.`);
+      setRecordingError(
+        language === "fr"
+          ? `Talkie occupe: ${holder} parle en ce moment.`
+          : `Talkie busy: ${holder} is speaking right now.`
+      );
       return;
     }
+    triggerTalkieHaptic("start");
     setManualDraftVisible(false);
     setManualDraftText("");
     setManualDraftDurationSeconds(1);
@@ -3904,49 +5564,95 @@ function RoomView({
     pendingStopAfterStartRef.current = false;
     manualStartInFlightRef.current = true;
     setTalkieUiState("starting");
-    void (async () => {
-      await publishTalkieLock("claim");
-      const started = await startRecording();
-      manualStartInFlightRef.current = false;
-      if (!started) {
-        manualPushToTalkPressedRef.current = false;
-        pendingStopAfterStartRef.current = false;
-        setTalkieUiState("idle");
-        await publishTalkieLock("release");
-        return;
-      }
-      setTalkieUiState("recording");
-      if (!manualPushToTalkPressedRef.current || pendingStopAfterStartRef.current) {
-        pendingStopAfterStartRef.current = false;
-        await stopRecordingAndTranslate();
-      }
-    })();
+    manualStartRequestIdRef.current += 1;
+    const requestId = manualStartRequestIdRef.current;
+    if (manualStartAnimationFrameRef.current !== null) {
+      cancelAnimationFrame(manualStartAnimationFrameRef.current);
+      manualStartAnimationFrameRef.current = null;
+    }
+    manualStartAnimationFrameRef.current = requestAnimationFrame(() => {
+      manualStartAnimationFrameRef.current = null;
+      void (async () => {
+        if (requestId !== manualStartRequestIdRef.current || appStateRef.current !== "active") {
+          manualStartInFlightRef.current = false;
+          return;
+        }
+        await publishTalkieLock("claim");
+        if (requestId !== manualStartRequestIdRef.current || appStateRef.current !== "active") {
+          manualPushToTalkPressedRef.current = false;
+          pendingStopAfterStartRef.current = false;
+          manualStartInFlightRef.current = false;
+          await publishTalkieLock("release");
+          return;
+        }
+        const started = await startRecording();
+        manualStartInFlightRef.current = false;
+        if (!started || requestId !== manualStartRequestIdRef.current || appStateRef.current !== "active") {
+          if (started) {
+            manualRecordingStartedAtRef.current = 0;
+            recordingStartUriRef.current = "";
+            try {
+              await recorder.stop();
+            } catch {}
+            try {
+              await setPlaybackAudioMode();
+            } catch {}
+            await restoreRoomMicAfterRecorder();
+            await releaseExpoAudioActivity();
+          }
+          manualPushToTalkPressedRef.current = false;
+          pendingStopAfterStartRef.current = false;
+          setTalkieUiState("idle");
+          await publishTalkieLock("release");
+          return;
+        }
+        setTalkieUiState("recording");
+        if (!manualPushToTalkPressedRef.current || pendingStopAfterStartRef.current) {
+          pendingStopAfterStartRef.current = false;
+          await stopRecordingAndTranslate();
+        }
+      })();
+    });
   }, [
+    appStateRef,
     effectiveTranslationLockMessage,
     isTalkieLockedByOther,
+    language,
     publishTalkieLock,
     realtimeEnabled,
+    recorder,
+    releaseExpoAudioActivity,
+    restoreRoomMicAfterRecorder,
+    setPlaybackAudioMode,
     startRecording,
     stopRecordingAndTranslate,
     talkieLockHolderName,
     talkieUiState,
     sourceLanguage,
+    triggerTalkieHaptic,
     translationControlsDisabled,
     translationBusy,
+    ui.translationUnlockHint,
   ]);
 
   const toggleRealtimeMode = useCallback(() => {
     if (translationControlsDisabled) {
-      setTranslationError(effectiveTranslationLockMessage || TRANSLATION_UNLOCK_HINT);
+      setTranslationError(effectiveTranslationLockMessage || ui.translationUnlockHint);
       return;
     }
     if (!REALTIME_TRANSLATION_ENABLED) {
-      setTranslationError("Mode voix naturelle desactive dans cette version.");
+      setTranslationError(
+        language === "fr"
+          ? "Mode voix naturelle desactive dans cette version."
+          : "Natural voice mode is disabled in this version."
+      );
       return;
     }
     if (!realtimeEnabled && !realtimeConfigured) {
       setTranslationError(
-        "Voix naturelle indisponible: configure EXPO_PUBLIC_REALTIME_URL."
+        language === "fr"
+          ? "Voix naturelle indisponible: configure EXPO_PUBLIC_REALTIME_URL."
+          : "Natural voice is unavailable: configure EXPO_PUBLIC_REALTIME_URL."
       );
       return;
     }
@@ -3963,13 +5669,16 @@ function RoomView({
   }, [
     effectiveTranslationLockMessage,
     forceSegmentedRealtime,
+    language,
     publishTalkieLock,
     realtimeEnabled,
     realtimeConfigured,
     translationControlsDisabled,
+    ui.translationUnlockHint,
   ]);
 
   const handleManualPushToTalkPressOut = useCallback(() => {
+    triggerTalkieHaptic("stop");
     manualPushToTalkPressedRef.current = false;
     if (manualStartInFlightRef.current) {
       pendingStopAfterStartRef.current = true;
@@ -3982,7 +5691,7 @@ function RoomView({
     }
     setTalkieUiState("stopping");
     void stopRecordingAndTranslate();
-  }, [recordingActive, stopRecordingAndTranslate]);
+  }, [recordingActive, stopRecordingAndTranslate, triggerTalkieHaptic]);
 
   const enqueueRealtimeSegment = useCallback(
     (uri: string) => {
@@ -3995,7 +5704,11 @@ function RoomView({
       realtimeQueueRef.current.push(next);
       if (realtimeQueueRef.current.length > REALTIME_MAX_QUEUE) {
         realtimeQueueRef.current.shift();
-        setTranslationError("Realtime surcharge: un segment audio a ete ignore pour garder une faible latence.");
+        setTranslationError(
+          language === "fr"
+            ? "Realtime surcharge: un segment audio a ete ignore pour garder une faible latence."
+            : "Realtime overload: one audio segment was skipped to preserve low latency."
+        );
       }
       setRealtimeQueueDepth(realtimeQueueRef.current.length);
     },
@@ -4003,8 +5716,10 @@ function RoomView({
   );
 
   const processRealtimeQueue = useCallback(
-    async (isCancelled: () => boolean) => {
-      while (!isCancelled() && (realtimeLoopRef.current || realtimeQueueRef.current.length > 0)) {
+    async (isCancelled: () => boolean, sessionId: number) => {
+      const isRealtimeSessionActive = () =>
+        !isCancelled() && realtimeSessionIdRef.current === sessionId;
+      while (isRealtimeSessionActive() && (realtimeLoopRef.current || realtimeQueueRef.current.length > 0)) {
         const segment = realtimeQueueRef.current.shift() || null;
         setRealtimeQueueDepth(realtimeQueueRef.current.length);
         if (!segment) {
@@ -4012,11 +5727,19 @@ function RoomView({
           continue;
         }
 
+        const abortController = typeof AbortController === "undefined" ? null : new AbortController();
         try {
+          activeTranscriptionAbortControllerRef.current?.abort();
+          activeTranscriptionAbortControllerRef.current = abortController;
           const transcribed = await transcribeWithFallbackLanguage(
             segment.uri,
-            segment.sourceLang
+            segment.sourceLang,
+            undefined,
+            {
+              signal: abortController?.signal,
+            }
           );
+          if (!isRealtimeSessionActive()) return;
           const clean = transcribed.trim();
           if (!clean) continue;
           const incremental = extractIncrementalSpeech(lastTranscriptRef.current, clean);
@@ -4025,23 +5748,30 @@ function RoomView({
 
           if (isHostSession) {
             const consumed = await consumeTranslationSeconds(1, "local");
+            if (!isRealtimeSessionActive()) return;
             if (!consumed) {
-              setTranslationError(effectiveTranslationLockMessage || TRANSLATION_UNLOCK_HINT);
+              setTranslationError(effectiveTranslationLockMessage || ui.translationUnlockHint);
               setRealtimeEnabled(false);
               break;
             }
           }
           await processTranscript(incremental, segment.sourceLang, 1);
+          if (!isRealtimeSessionActive()) return;
           setRealtimeLatencyMs(Date.now() - segment.capturedAt);
           setRealtimeStatus("running");
         } catch (err) {
-          const friendlyError = toFriendlyAudioError(err);
+          if (!isRealtimeSessionActive()) return;
+          const friendlyError = toFriendlyAudioError(err, language);
           if (/audio invalide|trop court|no speech/i.test(friendlyError)) {
             setRealtimeStatus("running");
             continue;
           }
           setRealtimeStatus("error");
           setTranslationError(friendlyError);
+        } finally {
+          if (activeTranscriptionAbortControllerRef.current === abortController) {
+            activeTranscriptionAbortControllerRef.current = null;
+          }
         }
       }
     },
@@ -4049,8 +5779,11 @@ function RoomView({
       consumeTranslationSeconds,
       effectiveTranslationLockMessage,
       isHostSession,
+      language,
       processTranscript,
+      realtimeSessionIdRef,
       transcribeWithFallbackLanguage,
+      ui.translationUnlockHint,
     ]
   );
 
@@ -4102,6 +5835,8 @@ function RoomView({
     }
 
     let cancelled = false;
+    const sessionId = realtimeSessionIdRef.current + 1;
+    realtimeSessionIdRef.current = sessionId;
     const isCancelled = () => cancelled;
 
     realtimeLoopRef.current = false;
@@ -4117,41 +5852,55 @@ function RoomView({
     const runRealtime = async () => {
       const permission = await requestRecordingPermissionsAsync();
       if (!permission.granted) {
-        throw new Error("Microphone permission denied.");
+        throw new Error(language === "fr" ? "Autorisation micro refusee." : "Microphone permission denied.");
       }
       await pauseRoomMicForRecorder();
       if (realtimeNativeEnabled) {
         setRealtimeEngine("native");
         try {
-          await runNativeRealtimeSession(isCancelled);
+          await runNativeRealtimeSession(isCancelled, sessionId);
+          if (realtimeSessionIdRef.current !== sessionId) return;
           return;
         } catch (nativeError) {
           if (isCancelled()) return;
           await stopNativeRealtimeSession().catch(() => {});
           setForceSegmentedRealtime(true);
           setTranslationError(
-            `Live natif indisponible, bascule en mode compatibilite: ${toFriendlyAudioError(
-              nativeError
-            )}`
+            language === "fr"
+              ? `Live natif indisponible, bascule en mode compatibilite: ${toFriendlyAudioError(
+                  nativeError,
+                  language
+                )}`
+              : `Native live mode unavailable, switching to compatibility mode: ${toFriendlyAudioError(
+                  nativeError,
+                  language
+                )}`
           );
           setRealtimeStatus("running");
         }
       }
       setRealtimeEngine("segmented");
       realtimeLoopRef.current = true;
-      await Promise.all([captureRealtimeLoop(isCancelled), processRealtimeQueue(isCancelled)]);
+      await Promise.all([
+        captureRealtimeLoop(isCancelled),
+        processRealtimeQueue(isCancelled, sessionId),
+      ]);
     };
 
     void runRealtime().catch((err) => {
       if (cancelled) return;
       setRealtimeStatus("error");
-      setTranslationError(toFriendlyAudioError(err));
+      setTranslationError(toFriendlyAudioError(err, language));
       setRealtimeEnabled(false);
     });
 
     return () => {
       cancelled = true;
+      if (realtimeSessionIdRef.current === sessionId) {
+        realtimeSessionIdRef.current += 1;
+      }
       realtimeLoopRef.current = false;
+      abortActiveTranscription();
       void stopNativeRealtimeSession();
       void recorder.stop().catch(() => {});
       void setPlaybackAudioMode().catch(() => {});
@@ -4159,9 +5908,12 @@ function RoomView({
       setTranslationBusy(false);
     };
   }, [
+    abortActiveTranscription,
     captureRealtimeLoop,
+    language,
     pauseRoomMicForRecorder,
     processRealtimeQueue,
+    realtimeSessionIdRef,
     realtimeNativeEnabled,
     realtimeEnabled,
     recorder,
@@ -4179,20 +5931,34 @@ function RoomView({
   useEffect(() => {
     if (!isHostSession) return;
     if (!session.roomId?.trim()) return;
-    if (!session.bearerToken?.trim()) return;
 
     let cancelled = false;
     const action = realtimeEnabled ? "ensure" : "release";
+    const ensureKey = `${session.roomId}:${sourceLanguage}:${targetLanguage}:${realtimeVoiceId}`;
+    const releaseRoomKey = session.roomId;
+
+    if (action === "ensure") {
+      translatorWorkerReleaseRoomRef.current = "";
+      if (translatorWorkerEnsureKeyRef.current === ensureKey) {
+        return;
+      }
+      translatorWorkerEnsureKeyRef.current = ensureKey;
+    } else {
+      translatorWorkerEnsureKeyRef.current = "";
+      if (translatorWorkerReleaseRoomRef.current === releaseRoomKey) {
+        return;
+      }
+      translatorWorkerReleaseRoomRef.current = releaseRoomKey;
+    }
 
     const syncTranslatorWorker = async () => {
       try {
-        const response = await fetch(
-          `${publicApiBase}/api/livekit/translator/session`,
-          {
+        const response = await withFreshBearerToken(async (activeBearerToken) => {
+          const nextResponse = await fetch(`${publicApiBase}/api/livekit/translator/session`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              Authorization: `Bearer ${session.bearerToken!.trim()}`,
+              Authorization: `Bearer ${activeBearerToken}`,
             },
             body: JSON.stringify({
               action,
@@ -4201,19 +5967,30 @@ function RoomView({
               targetLanguage,
               voice: realtimeVoiceId,
             }),
+          });
+          if (nextResponse.status === 401) {
+            throw new Error("Unauthorized");
           }
-        );
+          return nextResponse;
+        });
         if (!response.ok) {
           const raw = await response.text().catch(() => "");
           throw new Error(raw || `Translator orchestrator error (${response.status})`);
         }
       } catch (error) {
+        if (action === "ensure" && translatorWorkerEnsureKeyRef.current === ensureKey) {
+          translatorWorkerEnsureKeyRef.current = "";
+        }
         if (cancelled) return;
         if (realtimeEnabled) {
           setTranslationError(
             error instanceof Error
+            ? language === "fr"
               ? `Worker traducteur indisponible: ${error.message}`
-              : "Worker traducteur indisponible."
+              : `Translator worker unavailable: ${error.message}`
+              : language === "fr"
+                ? "Worker traducteur indisponible."
+                : "Translator worker unavailable."
           );
         }
       }
@@ -4223,40 +6000,53 @@ function RoomView({
 
     return () => {
       cancelled = true;
-      if (!realtimeEnabled) return;
-      void (async () => {
-        try {
-          await fetch(
-            `${publicApiBase}/api/livekit/translator/session`,
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${session.bearerToken!.trim()}`,
-              },
-              body: JSON.stringify({
-                action: "release",
-                room: session.roomId,
-              }),
-            }
-          );
-        } catch {}
-      })();
+      if (action === "ensure" && translatorWorkerEnsureKeyRef.current === ensureKey) {
+        translatorWorkerEnsureKeyRef.current = "";
+      }
     };
   }, [
+    language,
     realtimeEnabled,
     realtimeVoiceId,
-    session.bearerToken,
     isHostSession,
     session.roomId,
     publicApiBase,
     sourceLanguage,
     targetLanguage,
+    withFreshBearerToken,
   ]);
+  useEffect(() => {
+    return () => {
+      if (!isHostSession) return;
+      if (!session.roomId?.trim()) return;
+      void (async () => {
+        try {
+          await withFreshBearerToken(async (activeBearerToken) => {
+            const nextResponse = await fetch(`${publicApiBase}/api/livekit/translator/session`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${activeBearerToken}`,
+              },
+              body: JSON.stringify({
+                action: "release",
+                room: session.roomId,
+              }),
+            });
+            if (nextResponse.status === 401) {
+              throw new Error("Unauthorized");
+            }
+            return nextResponse;
+          });
+        } catch {}
+      })();
+    };
+  }, [isHostSession, publicApiBase, session.roomId, withFreshBearerToken]);
 
   const cancelRecording = useCallback(async () => {
     manualPushToTalkPressedRef.current = false;
     manualStartInFlightRef.current = false;
+    manualStopRequestIdRef.current += 1;
     pendingStopAfterStartRef.current = false;
     stopTranslateInFlightRef.current = false;
     setTalkieUiState("idle");
@@ -4272,22 +6062,55 @@ function RoomView({
     manualRecordingStartedAtRef.current = 0;
     recordingStartUriRef.current = "";
     await setPlaybackAudioMode();
+    await releaseExpoAudioActivity();
     await restoreRoomMicAfterRecorder();
   }, [
     realtimeEnabled,
     recordingActive,
     recorder,
     publishTalkieLock,
+    releaseExpoAudioActivity,
     restoreRoomMicAfterRecorder,
     setPlaybackAudioMode,
   ]);
+  const roomAlertMessage = recordingError || translationError || voiceLoadError || "";
+  const renderRoomAlert = () =>
+    roomAlertMessage ? (
+      <View
+        pointerEvents="none"
+        style={[
+          styles.roomAlertBanner,
+          immersiveMode && styles.roomAlertBannerImmersive,
+        ]}
+      >
+        <Text style={styles.roomAlertText}>{roomAlertMessage}</Text>
+      </View>
+    ) : null;
+  const renderImmersiveControls = () =>
+    immersiveMode ? (
+      <View
+        pointerEvents="box-none"
+        style={[styles.immersiveControlsRoot, { top: immersiveControlsTopOffset }]}
+      >
+        <View style={styles.immersiveControlsRow}>
+          <Pressable
+            style={[styles.controlButton, styles.leaveButton]}
+            onPress={isHostSession ? onEndForAll : () => onLeave("leave")}
+          >
+            <Text style={styles.leaveText}>{isHostSession ? ui.endForAll : ui.leaveCall}</Text>
+          </Pressable>
+        </View>
+      </View>
+    ) : null;
 
   const toggleMicrophone = useCallback(async () => {
     if (!localParticipant) return;
     try {
       await localParticipant.setMicrophoneEnabled(!isMicrophoneEnabled);
     } catch (err) {
-      setTranslationError(err instanceof Error ? err.message : "Mic toggle failed.");
+      setTranslationError(
+        err instanceof Error ? err.message : language === "fr" ? "Echec bascule micro." : "Mic toggle failed."
+      );
     }
   }, [isMicrophoneEnabled, localParticipant]);
 
@@ -4297,12 +6120,19 @@ function RoomView({
       if (isCameraEnabled) {
         await localParticipant.setCameraEnabled(false);
       } else {
-        await localParticipant.setCameraEnabled(true, { facingMode: cameraFacingMode });
+        lastAppliedVideoCaptureProfileRef.current = videoCaptureProfile;
+        await localParticipant.setCameraEnabled(true, desiredCameraCaptureOptions);
       }
     } catch (err) {
-      setTranslationError(err instanceof Error ? err.message : "Camera toggle failed.");
+      setTranslationError(
+        err instanceof Error
+          ? err.message
+          : language === "fr"
+            ? "Echec bascule camera."
+            : "Camera toggle failed."
+      );
     }
-  }, [cameraFacingMode, isCameraEnabled, localParticipant]);
+  }, [desiredCameraCaptureOptions, isCameraEnabled, localParticipant, videoCaptureProfile]);
 
   const toggleCameraFacing = useCallback(async () => {
     if (!localParticipant) return;
@@ -4318,15 +6148,30 @@ function RoomView({
     try {
       const publication = localParticipant.getTrackPublication(Track.Source.Camera);
       const videoTrack = publication?.videoTrack;
+      const nextCaptureOptions = {
+        facingMode: nextFacingMode,
+        resolution:
+          videoCaptureProfile === "low"
+            ? IOS_VISIO_LOW_SIGNAL_VIDEO_RESOLUTION
+            : IOS_VISIO_BALANCED_VIDEO_RESOLUTION,
+      };
       if (videoTrack) {
-        await videoTrack.restartTrack({ facingMode: nextFacingMode });
+        lastAppliedVideoCaptureProfileRef.current = videoCaptureProfile;
+        await videoTrack.restartTrack(nextCaptureOptions);
       } else {
-        await localParticipant.setCameraEnabled(true, { facingMode: nextFacingMode });
+        lastAppliedVideoCaptureProfileRef.current = videoCaptureProfile;
+        await localParticipant.setCameraEnabled(true, nextCaptureOptions);
       }
     } catch (err) {
-      setTranslationError(err instanceof Error ? err.message : "Camera lens switch failed.");
+      setTranslationError(
+        err instanceof Error
+          ? err.message
+          : language === "fr"
+            ? "Echec changement d'objectif."
+            : "Camera lens switch failed."
+      );
     }
-  }, [cameraFacingMode, isCameraEnabled, localParticipant]);
+  }, [cameraFacingMode, isCameraEnabled, localParticipant, videoCaptureProfile]);
 
   const applyVirtualBackgroundEffect = useCallback(async () => {
     if (!localParticipant) return false;
@@ -4464,18 +6309,17 @@ function RoomView({
 
   const connectionPhaseLabel =
     connectionPhase === "connected"
-      ? "Stable"
+      ? ui.stable
       : connectionPhase === "reconnecting"
-        ? "Reconnecting"
-        : "Signal...";
+        ? ui.reconnecting
+        : ui.signal;
   const qualityLabel = localConnectionQuality.toUpperCase();
   const focusModeLabel = pinnedTrackKey
-    ? "Pinned"
+    ? ui.pinned
     : followActiveSpeaker
-      ? "Auto speaker"
-      : "Manual";
-  const isChatVideoCall = isChatCall && !isChatAudioCall;
-  const coachConversationLayoutActive = coachConversationEnabled && !isChatCall;
+      ? ui.autoSpeaker
+      : ui.manual;
+  const useLegacyCompactVideoLayout = false;
   const useManualDraftFullscreen = Platform.OS === "ios";
   const renderManualDraftFullscreenModal = () =>
     useManualDraftFullscreen ? (
@@ -4494,11 +6338,11 @@ function RoomView({
           keyboardVerticalOffset={8}
         >
           <View style={styles.manualDraftSheetHeader}>
-            <Text style={styles.manualDraftSheetTitle}>Corriger avant envoi</Text>
+            <Text style={styles.manualDraftSheetTitle}>{ui.correctBeforeSendTitle}</Text>
             <View style={styles.manualDraftSheetActions}>
               {keyboardVisible ? (
                 <Pressable style={styles.manualDraftSheetActionGhost} onPress={dismissKeyboard}>
-                  <Text style={styles.manualDraftSheetActionGhostText}>Clavier</Text>
+                  <Text style={styles.manualDraftSheetActionGhostText}>{ui.keyboard}</Text>
                 </Pressable>
               ) : null}
               <Pressable
@@ -4506,7 +6350,7 @@ function RoomView({
                 onPress={cancelManualDraft}
                 disabled={manualDraftSending}
               >
-                <Text style={styles.manualDraftSheetActionGhostText}>Annuler</Text>
+                <Text style={styles.manualDraftSheetActionGhostText}>{ui.cancel}</Text>
               </Pressable>
               <Pressable
                 style={[
@@ -4521,7 +6365,7 @@ function RoomView({
                 {manualDraftSending ? (
                   <ActivityIndicator size="small" color="#ffffff" />
                 ) : (
-                  <Text style={styles.manualDraftSheetActionPrimaryText}>Envoyer</Text>
+                  <Text style={styles.manualDraftSheetActionPrimaryText}>{ui.send}</Text>
                 )}
               </Pressable>
             </View>
@@ -4529,7 +6373,7 @@ function RoomView({
 
           <View style={styles.manualDraftSheetBody}>
             <Text style={styles.realtimeStatus}>
-              Verifie ton texte, puis envoie la version corrigee.
+              {ui.reviewTextThenSend}
             </Text>
             <TextInput
               style={[styles.aiPromptInput, styles.manualDraftSheetInput]}
@@ -4539,7 +6383,7 @@ function RoomView({
               multiline
               textAlignVertical="top"
               autoFocus
-              placeholder="Corrige ton texte si besoin..."
+              placeholder={ui.correctTextPlaceholder}
               placeholderTextColor="#64748b"
               returnKeyType="done"
               blurOnSubmit
@@ -4549,29 +6393,330 @@ function RoomView({
         </KeyboardAvoidingView>
       </Modal>
     ) : null;
+  const visibleSourceSubtitleText = sourceText.trim();
+  const visibleTargetSubtitleText = captionText.trim();
+  const translatedVoiceEnabled = VOICE_TRANSLATION_ENABLED && ttsEnabled;
+  const shouldShowSourceSubtitle =
+    subtitleDisplayMode === "dual" && visibleSourceSubtitleText.length > 0;
+  const shouldShowTargetSubtitle = visibleTargetSubtitleText.length > 0;
+  const hasVisibleSubtitle = shouldShowSourceSubtitle || shouldShowTargetSubtitle;
+  const expandedSubtitleText =
+    expandedSubtitleKind === "source"
+      ? visibleSourceSubtitleText
+      : expandedSubtitleKind === "target"
+        ? visibleTargetSubtitleText
+        : "";
+  const expandedSubtitleTitle =
+    expandedSubtitleKind === "source" ? ui.source : ui.translation;
+  const expandedSubtitleLanguageLabel =
+    expandedSubtitleKind === "source" ? sourceLanguageLabel : targetLanguageLabel;
+  const expandedSubtitleIsRtl =
+    expandedSubtitleKind === "source" ? sourceLanguageIsRtl : targetLanguageIsRtl;
+  const openExpandedSubtitle = useCallback(
+    (kind: Exclude<ExpandedSubtitleKind, null>) => {
+      if (kind === "source" && !visibleSourceSubtitleText) return;
+      if (kind === "target" && !visibleTargetSubtitleText) return;
+      setExpandedSubtitleKind(kind);
+    },
+    [visibleSourceSubtitleText, visibleTargetSubtitleText]
+  );
+  const closeExpandedSubtitle = useCallback(() => {
+    setExpandedSubtitleKind(null);
+  }, []);
+  useEffect(() => {
+    if (!expandedSubtitleKind) return;
+    if (!expandedSubtitleText) {
+      setExpandedSubtitleKind(null);
+    }
+  }, [expandedSubtitleKind, expandedSubtitleText]);
+  const renderExpandedSubtitleModal = () =>
+    expandedSubtitleKind ? (
+      <Modal
+        transparent
+        visible
+        animationType="fade"
+        onRequestClose={closeExpandedSubtitle}
+      >
+        <View style={styles.subtitleSheetRoot}>
+          <Pressable style={styles.subtitleSheetBackdrop} onPress={closeExpandedSubtitle} />
+          <View style={styles.subtitleSheetCard}>
+            <View style={styles.subtitleSheetHeader}>
+              <View style={styles.subtitleSheetHeaderText}>
+                <Text style={styles.subtitleSheetTitle}>{expandedSubtitleTitle}</Text>
+                <Text style={styles.subtitleSheetMeta}>{expandedSubtitleLanguageLabel}</Text>
+              </View>
+              <Pressable style={styles.subtitleSheetCloseButton} onPress={closeExpandedSubtitle}>
+                <Text style={styles.subtitleSheetCloseButtonText}>{ui.close}</Text>
+              </Pressable>
+            </View>
+            <ScrollView
+              style={styles.subtitleSheetBody}
+              contentContainerStyle={styles.subtitleSheetBodyContent}
+              showsVerticalScrollIndicator
+            >
+              <Text
+                style={[
+                  expandedSubtitleKind === "source"
+                    ? styles.subtitleSheetSourceText
+                    : styles.subtitleSheetTargetText,
+                  expandedSubtitleIsRtl && styles.rtlText,
+                ]}
+              >
+                {expandedSubtitleText}
+              </Text>
+              {expandedSubtitleKind === "target" && captionPhoneticText ? (
+                <Text style={styles.captionPhoneticLine}>{ui.phonetic(captionPhoneticText)}</Text>
+              ) : null}
+            </ScrollView>
+            {expandedSubtitleKind === "target" ? (
+              <View style={styles.subtitleSheetActions}>
+                  <Pressable
+                    style={[
+                      styles.controlButton,
+                      styles.controlButtonSecondary,
+                      replayButtonActive && styles.controlButtonActive,
+                      (!translatedVoiceEnabled ||
+                        translationBusy ||
+                        !visibleTargetSubtitleText) &&
+                        styles.controlButtonDisabled,
+                    ]}
+                    onPress={replayCaption}
+                    disabled={!translatedVoiceEnabled || translationBusy || !visibleTargetSubtitleText}
+                  >
+                  <View style={styles.controlButtonContent}>
+                    <View style={styles.controlButtonSpinnerSlot}>
+                      {replayButtonActive ? (
+                        <ActivityIndicator size="small" color="#ffffff" />
+                      ) : null}
+                    </View>
+                    <Text style={styles.controlButtonText}>
+                      {replayButtonActive ? ui.replayBusy : ui.replay}
+                    </Text>
+                  </View>
+                </Pressable>
+              </View>
+            ) : null}
+          </View>
+        </View>
+      </Modal>
+    ) : null;
+  const renderTalkieControl = () => (
+    <>
+      <View
+        style={[
+          styles.talkieStatusBanner,
+          talkieStatusTone === "idle" && styles.talkieStatusBannerIdle,
+          talkieStatusTone === "active" && styles.talkieStatusBannerActive,
+          talkieStatusTone === "busy" && styles.talkieStatusBannerBusy,
+          talkieStatusTone === "review" && styles.talkieStatusBannerReview,
+          talkieStatusTone === "warning" && styles.talkieStatusBannerWarning,
+        ]}
+      >
+        <Text style={styles.talkieStatusText}>{talkieStatusLabel}</Text>
+      </View>
 
-  if (isChatAudioCall) {
+      <View style={[styles.row, styles.talkieRowCentered]}>
+        <Animated.View
+          style={talkiePulseEnabled ? { opacity: talkiePulseOpacityRef.current } : undefined}
+        >
+          {!(talkieUiState === "stopping" ||
+          talkieUiState === "review" ||
+          translationBusy ||
+          manualDraftVisible ||
+          manualDraftSending ||
+          translationControlsDisabled ||
+          isTalkieLockedByOther) ? (
+            <Pressable
+              style={({ pressed }) => [
+                styles.talkieButton,
+                isCompactPhone && styles.talkieButtonCompact,
+                talkieUiState === "starting" && styles.talkieButtonStarting,
+                talkieLooksRecording && styles.talkieButtonRecording,
+                pressed &&
+                  !talkieBusyVisual &&
+                  talkieUiState === "idle" &&
+                  styles.talkieButtonPressed,
+              ]}
+              onPressIn={handleManualPushToTalkPressIn}
+              onPressOut={handleManualPushToTalkPressOut}
+            >
+              <View style={styles.talkieButtonContent}>
+                <Text style={styles.talkieButtonText}>{talkieButtonLabel}</Text>
+              </View>
+            </Pressable>
+          ) : (
+            <View
+              style={[
+                styles.talkieButton,
+                styles.talkieButtonPassive,
+                isCompactPhone && styles.talkieButtonCompact,
+                (talkieUiState === "starting" ||
+                  talkieUiState === "review" ||
+                  talkieUiState === "stopping" ||
+                  translationBusy ||
+                  manualDraftVisible ||
+                  manualDraftSending) &&
+                  styles.talkieButtonBusy,
+                (translationControlsDisabled || isTalkieLockedByOther) && styles.talkieButtonLocked,
+              ]}
+            >
+              <View style={styles.talkieButtonContent}>
+                {(talkieUiState === "starting" ||
+                  talkieUiState === "review" ||
+                  talkieUiState === "stopping" ||
+                  translationBusy ||
+                  manualDraftSending) && <ActivityIndicator size="small" color="#ffffff" />}
+                <Text style={styles.talkieButtonText}>{talkieButtonLabel}</Text>
+              </View>
+            </View>
+          )}
+        </Animated.View>
+      </View>
+
+      {recordingActive ? (
+        <View style={[styles.row, styles.talkieRowCentered]}>
+          <Pressable style={styles.controlButton} onPress={cancelRecording}>
+            <Text style={styles.controlButtonText}>{ui.cancel}</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
+    </>
+  );
+  const renderSubtitleContent = (lineClamp: { source: number; target: number }) => (
+    <View style={styles.subtitleStack}>
+      {shouldShowSourceSubtitle ? (
+        <Pressable
+          style={({ pressed }) => [
+            styles.subtitleSourceBubble,
+            pressed && styles.subtitleBubblePressed,
+          ]}
+          onPress={() => openExpandedSubtitle("source")}
+        >
+          <Text style={styles.subtitleLabel}>{ui.source} ({sourceLanguageLabel})</Text>
+          <Text
+            numberOfLines={lineClamp.source}
+            ellipsizeMode="tail"
+            style={[styles.subtitleSourceText, sourceLanguageIsRtl && styles.rtlText]}
+          >
+            {visibleSourceSubtitleText}
+          </Text>
+        </Pressable>
+      ) : null}
+      {shouldShowTargetSubtitle ? (
+        <Pressable
+          style={({ pressed }) => [
+            styles.subtitleTargetBubble,
+            pressed && styles.subtitleBubblePressed,
+          ]}
+          onPress={() => openExpandedSubtitle("target")}
+        >
+          <View style={styles.subtitleMetaRow}>
+            <Text style={styles.subtitleLabel}>{ui.translation} ({targetLanguageLabel})</Text>
+            <View style={styles.subtitleMetaActions}>
+              {!translatedVoiceEnabled ? (
+                <View style={styles.subtitleMutedBadge}>
+                  <Text style={styles.subtitleMutedBadgeText}>{ui.translatedVoiceMutedBadge}</Text>
+                </View>
+              ) : null}
+              <Text style={styles.subtitleActionText}>{ui.viewFullTranslation}</Text>
+            </View>
+          </View>
+          <Text
+            numberOfLines={lineClamp.target}
+            ellipsizeMode="tail"
+            style={[styles.subtitleTargetText, targetLanguageIsRtl && styles.rtlText]}
+          >
+            {visibleTargetSubtitleText}
+          </Text>
+        </Pressable>
+      ) : null}
+      {hasVisibleSubtitle ? (
+        <Text style={styles.subtitleHintText}>{ui.tapSubtitleToExpand}</Text>
+      ) : null}
+    </View>
+  );
+  const renderInCallTopUpCta = () =>
+    shouldShowInCallTopUp ? (
+      <View style={styles.row}>
+        <Text style={styles.translationLockNotice}>{ui.topUpFromDashboard}</Text>
+      </View>
+    ) : null;
+  const renderLanguageSettings = (prefix: string) => (
+    <>
+      <View style={styles.controlSettingGroup}>
+        <Text style={styles.langSelectorLabel}>{ui.languageYouSpeak}: {sourceLanguageLabel}</Text>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.langScroller}
+          contentContainerStyle={styles.langScrollerContent}
+        >
+          {LANGUAGE_OPTIONS.map((lang) => (
+            <Pressable
+              key={`${prefix}-src-${lang.code}`}
+              onPress={() => setSourceLanguage(lang.code)}
+              onLongPress={() => showLanguageInfo(lang)}
+              style={[
+                styles.langChip,
+                sourceLanguage === lang.code && styles.langChipActive,
+              ]}
+            >
+              <Text style={styles.langChipText}>{getLanguageChipLabel(lang)}</Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+      </View>
+
+      <View style={styles.controlSettingGroup}>
+        <Text style={styles.langSelectorLabel}>{ui.receptionLanguage}: {targetLanguageLabel}</Text>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.langScroller}
+          contentContainerStyle={styles.langScrollerContent}
+        >
+          {LANGUAGE_OPTIONS.map((lang) => (
+            <Pressable
+              key={`${prefix}-dst-${lang.code}`}
+              onPress={() => setTargetLanguage(lang.code)}
+              onLongPress={() => showLanguageInfo(lang)}
+              style={[
+                styles.langChip,
+                targetLanguage === lang.code && styles.langChipActive,
+              ]}
+            >
+              <Text style={styles.langChipText}>{getLanguageChipLabel(lang)}</Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+      </View>
+    </>
+  );
+
+  if (isAudioOnlyCall) {
     return (
       <View style={styles.roomRoot}>
+        {renderRoomAlert()}
         <View style={styles.audioCallStage}>
           <View style={styles.audioCallCard}>
-            <Text style={styles.audioCallTitle}>Appel audio chat</Text>
+            <Text style={styles.audioCallTitle}>{ui.audioCallTitle}</Text>
             <Text style={styles.audioCallSubtitle}>
-              {connected ? "Connecté" : "Connexion..."} · Q:{qualityLabel}
+              {connected ? ui.connected : ui.connecting} · Q:{qualityLabel}
             </Text>
-            <Text style={styles.audioCallSubtitle}>
-              Interlocuteur{remoteParticipantCount > 1 ? "s" : ""}: {remoteParticipantCount}
-            </Text>
+            <Text style={styles.audioCallSubtitle}>{ui.participants(remoteParticipantCount)}</Text>
             <Text style={styles.audioCallHint}>
               {remoteParticipantCount
-                ? "Canal audio actif. Tu peux parler normalement."
-                : "En attente de l’interlocuteur..."}
+                ? ui.audioChannelActive
+                : ui.waitingParticipant}
             </Text>
           </View>
 
           <View style={styles.audioCallControls}>
             <Pressable style={styles.controlButton} onPress={toggleMicrophone}>
-              <Text style={styles.controlButtonText}>{isMicrophoneEnabled ? "Mic on" : "Mic off"}</Text>
+              <Text style={styles.controlButtonText}>
+                {isMicrophoneEnabled ? ui.micOn : ui.micOff}
+              </Text>
             </Pressable>
           </View>
         </View>
@@ -4579,7 +6724,7 @@ function RoomView({
     );
   }
 
-  if (isChatVideoCall) {
+  if (useLegacyCompactVideoLayout) {
     const focusedKey = focusedTrack ? trackKey(focusedTrack) : "";
     const showPreview =
       Boolean(previewTrack) &&
@@ -4587,6 +6732,7 @@ function RoomView({
 
     return (
       <View style={styles.roomRoot}>
+        {renderRoomAlert()}
         <View style={styles.chatVideoStage}>
           {focusedTrack ? (
             <Pressable
@@ -4598,20 +6744,17 @@ function RoomView({
                 style={styles.chatVideoTrack}
                 mirror={focusedTrack.participant.isLocal}
               />
-              <View style={styles.focusedBadge}>
-                <Text style={styles.focusedBadgeText}>{getLabel(focusedTrack)}</Text>
-              </View>
             </Pressable>
           ) : (
             <View style={styles.videoPlaceholder}>
-              <Text style={styles.placeholderText}>Aucune piste camera pour le moment.</Text>
+              <Text style={styles.placeholderText}>{ui.noCameraTrack}</Text>
             </View>
           )}
 
           {showPreview && previewTrack ? (
             <Pressable
               style={styles.chatVideoPreview}
-              onPress={() => setFocusedTrackKey(trackKey(previewTrack))}
+              onPress={() => focusTrackManually(previewTrack)}
             >
               <VideoTrack
                 trackRef={previewTrack}
@@ -4628,25 +6771,29 @@ function RoomView({
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator
         >
-          <View style={styles.chatVideoStatusRow}>
-            <Text style={styles.audioCallSubtitle}>
-              {connected ? "Connecté" : "Connexion..."} · Q:{qualityLabel}
-            </Text>
-            <Text style={styles.audioCallSubtitle}>
-              Interlocuteur{remoteParticipantCount > 1 ? "s" : ""}: {remoteParticipantCount}
-            </Text>
-          </View>
+          {topStatusBadgeLabel ? (
+            <View style={styles.chatVideoStatusRow}>
+              <View
+                style={[
+                  styles.connectionMetaChip,
+                  !effectiveTranslationEnabled && styles.connectionMetaChipWarning,
+                ]}
+              >
+                <Text style={styles.connectionMetaChipText}>{topStatusBadgeLabel}</Text>
+              </View>
+            </View>
+          ) : null}
 
           <View style={[styles.audioCallControls, styles.audioCallControlsWrap]}>
             <Pressable style={styles.controlButton} onPress={toggleMicrophone}>
-              <Text style={styles.controlButtonText}>{isMicrophoneEnabled ? "Mic on" : "Mic off"}</Text>
+              <Text style={styles.controlButtonText}>{isMicrophoneEnabled ? ui.micOn : ui.micOff}</Text>
             </Pressable>
             <Pressable style={styles.controlButton} onPress={toggleCamera}>
-              <Text style={styles.controlButtonText}>{isCameraEnabled ? "Cam on" : "Cam off"}</Text>
+              <Text style={styles.controlButtonText}>{isCameraEnabled ? ui.cameraOn : ui.cameraOff}</Text>
             </Pressable>
             <Pressable style={styles.controlButton} onPress={toggleCameraFacing}>
               <Text style={styles.controlButtonText}>
-                {cameraFacingMode === "user" ? "Front camera" : "Back camera"}
+                {cameraFacingMode === "user" ? ui.frontCamera : ui.backCamera}
               </Text>
             </Pressable>
             <Pressable
@@ -4654,116 +6801,32 @@ function RoomView({
               onPress={() => setTranslationPanelOpen((current) => !current)}
             >
               <Text style={styles.controlButtonText}>
-                {translationPanelOpen ? "Masquer traduction" : "Menu traduction"}
+                {translationPanelOpen ? ui.translationMenuHide : ui.translationMenuShow}
               </Text>
             </Pressable>
           </View>
 
           {translationPanelOpen ? (
             <View style={styles.chatVideoTranslationCard}>
-            <Text style={styles.panelTitle}>Traduction</Text>
-            <Text style={styles.langSelectorLabel}>Langue que tu parles: {sourceLanguageLabel}</Text>
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              style={styles.langScroller}
-              contentContainerStyle={styles.langScrollerContent}
-            >
-              {LANGUAGE_OPTIONS.map((lang) => (
-                <Pressable
-                  key={`chat-src-${lang.code}`}
-                  onPress={() => setSourceLanguage(lang.code)}
-                  onLongPress={() => showLanguageInfo(lang)}
-                  style={[
-                    styles.langChip,
-                    sourceLanguage === lang.code && styles.langChipActive,
-                  ]}
-                >
-                  <Text style={styles.langChipText}>{getLanguageChipLabel(lang)}</Text>
-                </Pressable>
-              ))}
-            </ScrollView>
-
-            <Text style={styles.langSelectorLabel}>Langue de reception: {targetLanguageLabel}</Text>
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              style={styles.langScroller}
-              contentContainerStyle={styles.langScrollerContent}
-            >
-              {LANGUAGE_OPTIONS.map((lang) => (
-                <Pressable
-                  key={`chat-dst-${lang.code}`}
-                  onPress={() => setTargetLanguage(lang.code)}
-                  onLongPress={() => showLanguageInfo(lang)}
-                  style={[
-                    styles.langChip,
-                    targetLanguage === lang.code && styles.langChipActive,
-                  ]}
-                >
-                  <Text style={styles.langChipText}>{getLanguageChipLabel(lang)}</Text>
-                </Pressable>
-              ))}
-            </ScrollView>
-
+            {renderLanguageSettings("chat")}
             {translationRemainingLabel ? (
               <Text style={styles.realtimeStatus}>
-                Temps traduction restant (hote): {translationRemainingLabel}
+                {ui.hostTranslationRemaining(translationRemainingLabel)}
               </Text>
             ) : null}
             {!effectiveTranslationEnabled ? (
               <Text style={styles.translationLockNotice}>
-                {effectiveTranslationLockMessage || TRANSLATION_WAIT_HOST_HINT}
+                {effectiveTranslationLockMessage || ui.translationWaitHostHint}
               </Text>
             ) : null}
+            {renderInCallTopUpCta()}
 
-            <View style={styles.row}>
-              <Animated.View
-                style={talkiePulseEnabled ? { opacity: talkiePulseOpacityRef.current } : undefined}
-              >
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.talkieButton,
-                    isCompactPhone && styles.talkieButtonCompact,
-                    talkieUiState === "starting" && styles.talkieButtonStarting,
-                    talkieLooksRecording && styles.talkieButtonRecording,
-                    (talkieUiState === "stopping" || translationBusy) && styles.talkieButtonBusy,
-                    translationControlsDisabled && styles.talkieButtonLocked,
-                    isTalkieLockedByOther && styles.talkieButtonLocked,
-                    pressed &&
-                      !talkieBusyVisual &&
-                      !translationControlsDisabled &&
-                      !isTalkieLockedByOther &&
-                      talkieUiState === "idle" &&
-                      styles.talkieButtonPressed,
-                  ]}
-                  onPressIn={handleManualPushToTalkPressIn}
-                  onPressOut={handleManualPushToTalkPressOut}
-                  disabled={
-                    translationBusy ||
-                    isTalkieLockedByOther ||
-                    translationControlsDisabled
-                  }
-                >
-                  <View style={styles.talkieButtonContent}>
-                    {(talkieUiState === "starting" ||
-                      talkieUiState === "stopping" ||
-                      translationBusy) && <ActivityIndicator size="small" color="#ffffff" />}
-                    <Text style={styles.talkieButtonText}>{talkieButtonLabel}</Text>
-                  </View>
-                </Pressable>
-              </Animated.View>
-            </View>
-
-            {isTalkieLockedByOther ? (
-              <Text style={styles.realtimeStatus}>
-                Talkie occupe par {talkieLockHolderName || "un interlocuteur"}.
-              </Text>
-            ) : null}
+            {renderTalkieControl()}
             </View>
           ) : null}
         </ScrollView>
 
+        {renderExpandedSubtitleModal()}
         {renderManualDraftFullscreenModal()}
       </View>
     );
@@ -4771,36 +6834,50 @@ function RoomView({
 
   return (
     <View style={styles.roomRoot}>
-      {!immersiveMode && !coachConversationLayoutActive ? (
+      {renderRoomAlert()}
+      {!immersiveMode ? (
         <View style={[styles.connectionBadge, videoFullscreen && styles.connectionBadgeFloating]}>
           <View style={styles.connectionRow}>
-            <Text style={styles.connectionText}>
-              {connected ? "Connected" : "Connecting..."} · {connectionPhaseLabel} · Q:{qualityLabel} ·
-              Camera {isCameraEnabled ? "on" : "off"} · Tracks {renderedTracks.length} · {focusModeLabel}
-              {activeSpeakerIdentity ? ` · Speaker ${activeSpeakerIdentity}` : ""}
-            </Text>
-            <Pressable
-              style={styles.stageModeButton}
-              onPress={() => setImmersiveMode(true)}
-            >
-              <Text style={styles.stageModeButtonText}>Plein ecran</Text>
-            </Pressable>
+            <View style={styles.connectionBadgeSummary}>
+              {topStatusBadgeLabel ? (
+                <View
+                  style={[
+                    styles.connectionMetaChip,
+                    !effectiveTranslationEnabled && styles.connectionMetaChipWarning,
+                  ]}
+                >
+                  <Text style={styles.connectionMetaChipText}>{topStatusBadgeLabel}</Text>
+                </View>
+              ) : null}
+              {!connected ? (
+                <View style={[styles.connectionMetaChip, styles.connectionMetaChipWarning]}>
+                  <Text style={styles.connectionMetaChipText}>{ui.connecting}</Text>
+                </View>
+              ) : null}
+            </View>
           </View>
+          {exceedsRecommendedParticipantCount ? (
+            <View style={styles.connectionWarningBox}>
+              <Text style={styles.connectionWarningText}>
+                {ui.groupSizeWarning(totalParticipantCount)}
+              </Text>
+            </View>
+          ) : null}
         </View>
       ) : null}
 
-      {!coachConversationLayoutActive ? (
-      <View
-        style={[
-          styles.videoStage,
+        <View
+          style={[
+            styles.videoStage,
           videoFullscreen && styles.videoStageFullscreen,
           immersiveMode && styles.videoStageImmersive,
           isVeryCompactPhone && styles.videoStageCompact,
-        ]}
-      >
-        <View
-          style={[
-            styles.stageBackgroundLayer,
+          ]}
+        >
+          {renderImmersiveControls()}
+          <View
+            style={[
+              styles.stageBackgroundLayer,
             { backgroundColor: selectedBackgroundPreset.color },
           ]}
         >
@@ -4814,7 +6891,13 @@ function RoomView({
         </View>
 
         {focusedTrack ? (
-          <View style={[styles.focusedVideoCard, immersiveMode && styles.focusedVideoCardImmersive]}>
+          <View
+            style={[styles.focusedVideoCard, immersiveMode && styles.focusedVideoCardImmersive]}
+            onLayout={({ nativeEvent }) => {
+              const { width, height } = nativeEvent.layout;
+              handleFocusedVideoLayout(width, height);
+            }}
+          >
             <Pressable
               style={styles.focusedVideoPressable}
               onPress={() => {
@@ -4831,73 +6914,80 @@ function RoomView({
                 style={isVeryCompactPhone ? styles.focusedVideoTrackCompact : styles.focusedVideoTrack}
                 mirror={focusedTrack.participant.isLocal}
               />
-              {!immersiveMode ? (
-                <View style={styles.focusedBadge}>
-                  <Text style={styles.focusedBadgeText}>
-                    {getLabel(focusedTrack)}
-                    {pinnedTrackKey === trackKey(focusedTrack) ? " · PIN" : ""}
-                  </Text>
-                </View>
-              ) : null}
             </Pressable>
 
             {previewTrack && !immersiveMode ? (
-              <Pressable
+              <Animated.View
                 style={[
                   styles.localPreviewCard,
-                  activeSpeakerIdentity === previewTrack.participant.identity &&
-                    styles.trackCardActiveSpeaker,
-                  pinnedTrackKey === trackKey(previewTrack) && styles.trackCardPinned,
+                  !previewPositionReady && styles.localPreviewCardDefaultPosition,
+                  previewPositionReady && {
+                    left: previewPosition.x,
+                    top: previewPosition.y,
+                  },
+                  {
+                    width: previewCardSize.width,
+                    height: previewCardSize.height,
+                  },
                 ]}
-                onPress={() => setFocusedTrackKey(trackKey(previewTrack))}
-                onLongPress={() => {
-                  const key = trackKey(previewTrack);
-                  setPinnedTrackKey((current) => (current === key ? null : key));
-                }}
+                {...(previewPanResponder ? previewPanResponder.panHandlers : {})}
               >
-                <VideoTrack
-                  trackRef={previewTrack}
-                  style={styles.localPreviewTrack}
-                  mirror={previewTrack.participant.isLocal}
-                />
-                <Text style={styles.localPreviewText}>{getLabel(previewTrack)}</Text>
-              </Pressable>
+                <Pressable
+                  style={[
+                    styles.localPreviewPressable,
+                    activeSpeakerIdentity === previewTrack.participant.identity &&
+                      styles.trackCardActiveSpeaker,
+                    pinnedTrackKey === trackKey(previewTrack) && styles.trackCardPinned,
+                  ]}
+                  onPress={() => handlePreviewTap(previewTrack)}
+                  onLongPress={() => {
+                    const key = trackKey(previewTrack);
+                    setPinnedTrackKey((current) => (current === key ? null : key));
+                  }}
+                >
+                  <VideoTrack
+                    trackRef={previewTrack}
+                    style={styles.localPreviewTrack}
+                    mirror={previewTrack.participant.isLocal}
+                  />
+                </Pressable>
+              </Animated.View>
             ) : null}
           </View>
         ) : (
           <View style={styles.videoPlaceholder}>
-            <Text style={styles.placeholderText}>Aucune piste camera pour le moment.</Text>
+            <Text style={styles.placeholderText}>{ui.noCameraTrack}</Text>
           </View>
         )}
 
-        {(sourceText || captionText) && (
+        {hasVisibleSubtitle && (
           <View
-            pointerEvents="none"
+            pointerEvents="box-none"
             style={[
               styles.subtitleOverlay,
+              videoFullscreen && !immersiveMode && styles.subtitleOverlayFullscreen,
               immersiveMode && styles.subtitleOverlayImmersive,
+              immersiveMode && { top: immersiveSubtitleTopOffset },
             ]}
           >
-            {sourceText ? (
-              <View style={styles.subtitleSourceBubble}>
-                <Text style={styles.subtitleLabel}>Source ({sourceLanguageLabel})</Text>
-                <Text style={[styles.subtitleSourceText, sourceLanguageIsRtl && styles.rtlText]}>
-                  {sourceText}
-                </Text>
-              </View>
-            ) : null}
-            {captionText ? (
-              <View style={styles.subtitleTargetBubble}>
-                <Text style={styles.subtitleLabel}>Traduction ({targetLanguageLabel})</Text>
-                <Text style={[styles.subtitleTargetText, targetLanguageIsRtl && styles.rtlText]}>
-                  {captionText}
-                </Text>
-              </View>
-            ) : null}
+            {renderSubtitleContent({
+              source: immersiveMode ? 3 : 2,
+              target: immersiveMode ? 4 : 3,
+            })}
           </View>
         )}
+
+        <View
+          pointerEvents="box-none"
+          style={[
+            styles.talkieOverlay,
+            isCompactPhone && styles.talkieOverlayCompact,
+            immersiveMode && styles.talkieOverlayImmersive,
+          ]}
+        >
+          {renderTalkieControl()}
+        </View>
       </View>
-      ) : null}
 
       {!immersiveMode ? (
         <View
@@ -4906,17 +6996,14 @@ function RoomView({
             videoFullscreen &&
               !keyboardVisible &&
               !manualDraftVisible &&
-              !coachConversationLayoutActive &&
               styles.panelDockFloating,
             isCompactPhone && styles.panelDockCompact,
             keyboardVisible &&
-              !coachConversationLayoutActive &&
               !manualDraftVisible &&
               styles.panelDockKeyboardRaised,
-            coachConversationLayoutActive && styles.panelDockCoachMode,
           ]}
         >
-        {switchTracks.length && !coachConversationLayoutActive ? (
+        {switchTracks.length ? (
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
@@ -4934,7 +7021,7 @@ function RoomView({
                       styles.trackCardActiveSpeaker,
                     pinnedTrackKey === key && styles.trackCardPinned,
                   ]}
-                  onPress={() => setFocusedTrackKey(key)}
+                  onPress={() => focusTrackManually(item)}
                   onLongPress={() =>
                     setPinnedTrackKey((current) => (current === key ? null : key))
                   }
@@ -4944,27 +7031,24 @@ function RoomView({
                     style={styles.quickThumbTrack}
                     mirror={item.participant.isLocal}
                   />
-                  <Text style={styles.quickThumbText}>{getLabel(item)}</Text>
                 </Pressable>
               );
             })}
           </ScrollView>
         ) : null}
 
-        {!coachConversationLayoutActive && shouldShowAccordionPanel("controls") ? (
+        {shouldShowAccordionPanel("controls") ? (
         <View style={styles.accordionCard}>
           <Pressable
             style={styles.accordionHeader}
             onPress={() => toggleAccordionPanel("controls")}
           >
             <View style={styles.accordionHeaderText}>
-              <Text style={styles.accordionTitle}>Controles</Text>
+              <Text style={styles.accordionTitle}>{ui.controls}</Text>
               <Text style={styles.accordionMeta}>
-                {coachConversationLayoutActive
-                  ? `${isMicrophoneEnabled ? "Mic on" : "Mic off"} · Coach IA actif`
-                  : `${isMicrophoneEnabled ? "Mic on" : "Mic off"} · ${isCameraEnabled ? "Cam on" : "Cam off"} · ${
-                      cameraFacingMode === "user" ? "Front camera" : "Back camera"
-                    }`}
+                {`${isMicrophoneEnabled ? ui.micOn : ui.micOff} · ${isCameraEnabled ? ui.cameraOn : ui.cameraOff} · ${
+                  cameraFacingMode === "user" ? ui.frontCamera : ui.backCamera
+                } · ${languagePairSummary}`}
               </Text>
             </View>
             <Text style={styles.accordionIcon}>{controlsOpen ? "−" : "+"}</Text>
@@ -4973,43 +7057,28 @@ function RoomView({
           {controlsOpen ? (
             <View style={styles.controls}>
               <Pressable style={styles.controlButton} onPress={toggleMicrophone}>
-                <Text style={styles.controlButtonText}>{isMicrophoneEnabled ? "Mic on" : "Mic off"}</Text>
+                <Text style={styles.controlButtonText}>{isMicrophoneEnabled ? ui.micOn : ui.micOff}</Text>
               </Pressable>
-              {!coachConversationLayoutActive ? (
-                <Pressable style={styles.controlButton} onPress={toggleCamera}>
-                  <Text style={styles.controlButtonText}>{isCameraEnabled ? "Cam on" : "Cam off"}</Text>
-                </Pressable>
-              ) : null}
-              {!coachConversationLayoutActive ? (
-                <Pressable style={styles.controlButton} onPress={toggleCameraFacing}>
-                  <Text style={styles.controlButtonText}>
-                    {cameraFacingMode === "user" ? "Front camera" : "Back camera"}
-                  </Text>
-                </Pressable>
-              ) : null}
+              <Pressable style={styles.controlButton} onPress={toggleCamera}>
+                <Text style={styles.controlButtonText}>{isCameraEnabled ? ui.cameraOn : ui.cameraOff}</Text>
+              </Pressable>
+              <Pressable style={styles.controlButton} onPress={toggleCameraFacing}>
+                <Text style={styles.controlButtonText}>
+                  {cameraFacingMode === "user" ? ui.frontCamera : ui.backCamera}
+                </Text>
+              </Pressable>
+              <View style={styles.controlSettingGroup}>
+                <Text style={styles.langSelectorLabel}>FR / EN</Text>
+                <View style={styles.row}>
+                  <LanguageSwitcher compact inverted />
+                </View>
+              </View>
               <Pressable
                 style={[styles.controlButton, followActiveSpeaker && styles.realtimeButton]}
                 onPress={() => setFollowActiveSpeaker((value) => !value)}
               >
-                <Text style={styles.controlButtonText}>
-                  Auto Speaker {followActiveSpeaker ? "On" : "Off"}
-                </Text>
+                <Text style={styles.controlButtonText}>{ui.autoSpeakerToggle(followActiveSpeaker)}</Text>
               </Pressable>
-              {isCoachSession ? (
-                <Pressable
-                  onPress={() => setCoachConversationEnabled((value) => !value)}
-                  disabled={!canUseCoachConversation}
-                  style={[
-                    styles.controlButton,
-                    coachConversationEnabled && styles.realtimeButton,
-                    !canUseCoachConversation && styles.controlButtonDisabled,
-                  ]}
-                >
-                  <Text style={styles.controlButtonText}>
-                    Coach conversation IA {coachConversationEnabled ? "On" : "Off"}
-                  </Text>
-                </Pressable>
-              ) : null}
               {focusedTrack ? (
                 <Pressable
                   style={[styles.controlButton, pinnedTrackKey && styles.realtimeButton]}
@@ -5019,477 +7088,168 @@ function RoomView({
                   }}
                 >
                   <Text style={styles.controlButtonText}>
-                    {pinnedTrackKey === trackKey(focusedTrack) ? "Unpin Focus" : "Pin Focus"}
+                    {pinnedTrackKey === trackKey(focusedTrack) ? ui.unpinFocus : ui.pinFocus}
                   </Text>
                 </Pressable>
               ) : null}
+              <View style={styles.controlSettingGroup}>
+                <Text style={styles.langSelectorLabel}>{ui.subtitleLayout}</Text>
+                <View style={styles.row}>
+                  <Pressable
+                    style={[
+                      styles.toggleChip,
+                      subtitleDisplayMode === "dual" && styles.toggleChipActive,
+                    ]}
+                    onPress={() => setSubtitleDisplayMode("dual")}
+                  >
+                    <Text
+                      style={[
+                        styles.toggleChipText,
+                        subtitleDisplayMode === "dual" && styles.toggleChipTextActive,
+                      ]}
+                    >
+                      {ui.subtitleLayoutDual}
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={[
+                      styles.toggleChip,
+                      subtitleDisplayMode === "translationOnly" && styles.toggleChipActive,
+                    ]}
+                    onPress={() => setSubtitleDisplayMode("translationOnly")}
+                  >
+                    <Text
+                      style={[
+                        styles.toggleChipText,
+                        subtitleDisplayMode === "translationOnly" &&
+                          styles.toggleChipTextActive,
+                      ]}
+                    >
+                      {ui.subtitleLayoutTranslationOnly}
+                    </Text>
+                  </Pressable>
+                </View>
+              </View>
+              <View style={styles.controlSettingGroup}>
+                <Text style={styles.langSelectorLabel}>{ui.translatedVoiceSetting}</Text>
+                <View style={styles.row}>
+                  <Pressable
+                    style={[styles.toggleChip, translatedVoiceEnabled && styles.toggleChipActive]}
+                    onPress={() => setTtsEnabled(true)}
+                  >
+                    <Text
+                      style={[
+                        styles.toggleChipText,
+                        translatedVoiceEnabled && styles.toggleChipTextActive,
+                      ]}
+                    >
+                      {ui.translatedVoiceOn}
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.toggleChip, !translatedVoiceEnabled && styles.toggleChipActive]}
+                    onPress={() => setTtsEnabled(false)}
+                  >
+                    <Text
+                      style={[
+                        styles.toggleChipText,
+                        !translatedVoiceEnabled && styles.toggleChipTextActive,
+                      ]}
+                    >
+                      {ui.translatedVoiceOff}
+                    </Text>
+                  </Pressable>
+                </View>
+              </View>
+              <View style={styles.controlSettingGroup}>
+                <Text style={styles.langSelectorLabel}>{ui.fullTranslationSetting}</Text>
+                <Pressable
+                  style={[
+                    styles.controlButton,
+                    styles.controlButtonSecondary,
+                    !visibleTargetSubtitleText && styles.controlButtonDisabled,
+                  ]}
+                  onPress={() => openExpandedSubtitle("target")}
+                  disabled={!visibleTargetSubtitleText}
+                >
+                  <Text style={styles.controlButtonText}>{ui.viewFullTranslation}</Text>
+                </Pressable>
+              </View>
             </View>
           ) : null}
         </View>
         ) : null}
 
         {shouldShowAccordionPanel("translation") ? (
-        <View
-          style={[
-            styles.accordionCard,
-            coachConversationLayoutActive && styles.accordionCardCoachMode,
-          ]}
-        >
-          {!coachConversationLayoutActive ? (
+        <View style={styles.accordionCard}>
             <Pressable
               style={styles.accordionHeader}
               onPress={() => toggleAccordionPanel("translation")}
             >
               <View style={styles.accordionHeaderText}>
-                <Text style={styles.accordionTitle}>Traduction</Text>
-                <Text style={styles.accordionMeta}>{sourceLanguageLabel} → {targetLanguageLabel} · Talkie</Text>
+                <Text style={styles.accordionTitle}>{ui.translation}</Text>
+                {topStatusBadgeLabel ? (
+                  <Text style={styles.accordionMeta}>
+                    {topStatusBadgeLabel}
+                  </Text>
+                ) : null}
               </View>
               <Text style={styles.accordionIcon}>{translationPanelOpen ? "−" : "+"}</Text>
             </Pressable>
-          ) : null}
 
-          {translationPanelOpen || coachConversationLayoutActive ? (
+          {translationPanelOpen ? (
             <ScrollView
-              style={[
-                styles.translationPanelScroll,
-                coachConversationLayoutActive && styles.translationPanelScrollCoach,
-              ]}
+              style={styles.translationPanelScroll}
               contentContainerStyle={styles.translationPanel}
               nestedScrollEnabled
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator
             >
-              {!coachConversationLayoutActive ? (
-                <>
-                  <Text style={styles.panelTitle}>Traduction</Text>
-                  <View style={styles.translationInfoHeader}>
-                    <Text style={styles.realtimeStatus}>Talkie traduction actif</Text>
-                    <Pressable
-                      onPress={() => setShowTranslationInfo((current) => !current)}
-                      style={styles.translationInfoButton}
-                    >
-                      <Text style={styles.translationInfoButtonText}>i</Text>
-                    </Pressable>
-                  </View>
-                  {showTranslationInfo ? (
-                    <View style={styles.translationInfoBox}>
-                      <Text style={styles.realtimeStatus}>
-                        Maintiens "Maintenir pour parler", parle, puis relache pour traduire.
-                      </Text>
-                      <Text style={styles.realtimeStatus}>
-                        Les sous-titres sont partages avec tous les participants.
-                      </Text>
-                    </View>
-                  ) : null}
-                </>
-              ) : null}
-
-              {isCoachSession ? (
-              <View style={styles.coachConversationCard}>
-                <View style={styles.coachConversationHeader}>
-                  <Text style={styles.panelTitle}>Coach conversation IA</Text>
-                  <Text style={styles.realtimeStatus}>
-                    {coachConversationEnabled ? "Actif" : "Inactif"}
-                  </Text>
-                </View>
-                <Text style={styles.realtimeStatus}>
-                  Entrainement avec Coach conversation IA (reponse courte + relance).
-                </Text>
-                {!canUseCoachConversation ? (
-                  <Text style={styles.realtimeStatus}>
-                    Disponible en mode hote connecte.
-                  </Text>
-                ) : null}
-                {coachConversationEnabled ? (
-                  <View style={styles.coachPartnerCard}>
-                    <View style={styles.coachPartnerHeader}>
-                      <View style={styles.coachAvatarBadge}>
-                        <Text style={styles.coachAvatarText}>AI</Text>
-                      </View>
-                      <View style={styles.coachPartnerHeaderText}>
-                        <Text style={styles.coachPartnerTitle}>
-                          Partenaire IA ({targetLanguageLabel})
-                        </Text>
-                        <Text style={styles.realtimeStatus}>
-                          Parle puis relache: l'IA repond dans la langue de travail.
-                        </Text>
-                      </View>
-                    </View>
-                    {coachPartnerLoading ? (
-                      <View style={styles.coachPartnerLoadingRow}>
-                        <ActivityIndicator size="small" color="#93c5fd" />
-                        <Text style={styles.realtimeStatus}>Le partenaire IA prepare sa reponse...</Text>
-                      </View>
-                    ) : null}
-                    {coachPartnerReply ? (
-                      <Text
-                        style={[
-                          styles.coachPartnerReplyText,
-                          coachPartnerReplyLanguageIsRtl && styles.rtlText,
-                        ]}
-                      >
-                        {coachPartnerReply}
-                      </Text>
-                    ) : (
-                      <Text style={styles.coachPartnerPlaceholder}>
-                        Aucune reponse IA pour le moment.
-                      </Text>
-                    )}
-                    {coachPartnerReplyTranslation ? (
-                      <View style={styles.coachPartnerTranslationBox}>
-                        <Text style={styles.coachPartnerTranslationLabel}>
-                          Traduction rapide ({sourceLanguageLabel})
-                        </Text>
-                        <Text
-                          style={[
-                            styles.coachPartnerTranslationText,
-                            coachPartnerTranslationLanguageIsRtl && styles.rtlText,
-                          ]}
-                        >
-                          {coachPartnerReplyTranslation}
-                        </Text>
-                      </View>
-                    ) : null}
-                    {coachReplySuggestionsLoading ? (
-                      <Text style={styles.realtimeStatus}>Suggestions de reponse en cours...</Text>
-                    ) : null}
-                    {coachReplySuggestions.length > 0 ? (
-                      <View style={styles.infoStack}>
-                        <Text style={styles.realtimeStatus}>
-                          Suggestions de reponse ({targetLanguageLabel})
-                        </Text>
-                        {coachReplySuggestions.map((entry) => (
-                          <View key={entry.id} style={styles.coachSuggestionCard}>
-                            <Text
-                              style={[
-                                styles.coachPartnerReplyText,
-                                coachPartnerReplyLanguageIsRtl && styles.rtlText,
-                              ]}
-                            >
-                              {entry.targetText}
-                            </Text>
-                            {entry.sourceText.trim() ? (
-                              <Text
-                                style={[
-                                  styles.coachPartnerTranslationText,
-                                  coachPartnerTranslationLanguageIsRtl && styles.rtlText,
-                                ]}
-                              >
-                                {entry.sourceText}
-                              </Text>
-                            ) : null}
-                            {entry.phoneticText.trim() ? (
-                              <View style={styles.coachPartnerTranslationBox}>
-                                <Text style={styles.coachPartnerTranslationLabel}>
-                                  Phonetique ({targetLanguageLabel})
-                                </Text>
-                                <Text style={styles.coachPartnerTranslationText}>
-                                  {entry.phoneticText}
-                                </Text>
-                              </View>
-                            ) : null}
-                            <View style={styles.row}>
-                              <Pressable
-                                style={({ pressed }) => [
-                                  styles.controlButton,
-                                  styles.controlButtonSecondary,
-                                  coachSuggestionSpeakingId === entry.id && styles.controlButtonActive,
-                                  pressed && styles.controlButtonPressed,
-                                ]}
-                                onPress={() => playCoachSuggestion(entry)}
-                              >
-                                <View style={styles.controlButtonContent}>
-                                  <View style={styles.controlButtonSpinnerSlot}>
-                                    {coachSuggestionSpeakingId === entry.id ? (
-                                      <ActivityIndicator size="small" color="#ffffff" />
-                                    ) : null}
-                                  </View>
-                                  <Text style={styles.controlButtonText} numberOfLines={1}>
-                                    {coachSuggestionSpeakingId === entry.id
-                                      ? "Lecture..."
-                                      : `Lire (${targetLanguageLabel})`}
-                                  </Text>
-                                </View>
-                              </Pressable>
-                            </View>
-                          </View>
-                        ))}
-                      </View>
-                    ) : null}
-                    {coachPartnerError ? <Text style={styles.error}>{coachPartnerError}</Text> : null}
-                    <View style={styles.row}>
-                      <Pressable
-                        style={({ pressed }) => [
-                          styles.controlButton,
-                          styles.controlButtonSecondary,
-                          coachPartnerSpeakActive && styles.controlButtonActive,
-                          pressed && styles.controlButtonPressed,
-                          (!coachPartnerReply.trim() || coachPartnerLoading) && styles.controlButtonDisabled,
-                        ]}
-                        onPress={playCoachPartnerReply}
-                        disabled={!coachPartnerReply.trim() || coachPartnerLoading}
-                      >
-                        <View style={styles.controlButtonContent}>
-                          <View style={styles.controlButtonSpinnerSlot}>
-                            {coachPartnerSpeakActive ? (
-                              <ActivityIndicator size="small" color="#ffffff" />
-                            ) : null}
-                          </View>
-                          <Text style={styles.controlButtonText} numberOfLines={1}>
-                            {coachPartnerSpeakActive ? "Lecture..." : "Lire la reponse IA"}
-                          </Text>
-                        </View>
-                      </Pressable>
-                    </View>
-                  </View>
-                ) : (
-                  <Text style={styles.realtimeStatus}>
-                    Active le mode pour t'entrainer en conversation directe avec un avatar IA.
-                  </Text>
-                )}
-              </View>
-              ) : null}
+              {renderLanguageSettings("translation")}
 
               {isHostSession ? (
                 <>
-                  <Text style={styles.langSelectorLabel}>Langue que tu parles: {sourceLanguageLabel}</Text>
-                  <ScrollView
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    style={styles.langScroller}
-                    contentContainerStyle={styles.langScrollerContent}
-                  >
-                    {LANGUAGE_OPTIONS.map((lang) => (
-                      <Pressable
-                        key={`src-${lang.code}`}
-                        onPress={() => setSourceLanguage(lang.code)}
-                        onLongPress={() => showLanguageInfo(lang)}
-                        style={[
-                          styles.langChip,
-                          sourceLanguage === lang.code && styles.langChipActive,
-                        ]}
-                      >
-                        <Text style={styles.langChipText}>{getLanguageChipLabel(lang)}</Text>
-                      </Pressable>
-                    ))}
-                  </ScrollView>
-                  <Text style={styles.langSelectorLabel}>
-                    {coachConversationLayoutActive
-                      ? `Langue du coach: ${targetLanguageLabel}`
-                      : `Langue de reception: ${targetLanguageLabel}`}
-                  </Text>
-                  <ScrollView
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    style={styles.langScroller}
-                    contentContainerStyle={styles.langScrollerContent}
-                  >
-                    {LANGUAGE_OPTIONS.map((lang) => (
-                      <Pressable
-                        key={`dst-${lang.code}`}
-                        onPress={() => setTargetLanguage(lang.code)}
-                        onLongPress={() => showLanguageInfo(lang)}
-                        style={[
-                          styles.langChip,
-                          targetLanguage === lang.code && styles.langChipActive,
-                        ]}
-                      >
-                        <Text style={styles.langChipText}>{getLanguageChipLabel(lang)}</Text>
-                      </Pressable>
-                    ))}
-                  </ScrollView>
-
                   {translationEntitlement.loading ? (
-                    <Text style={styles.realtimeStatus}>Verification des credits traduction...</Text>
+                    <Text style={styles.realtimeStatus}>{ui.checkingCredits}</Text>
                   ) : null}
                   {translationRemainingLabel ? (
                     <Text style={styles.realtimeStatus}>
-                      Temps traduction restant (hote): {translationRemainingLabel}
+                      {ui.hostTranslationRemaining(translationRemainingLabel)}
                     </Text>
                   ) : null}
                   {!effectiveTranslationEnabled ? (
                     <Text style={styles.translationLockNotice}>
-                      {effectiveTranslationLockMessage || TRANSLATION_UNLOCK_HINT}
+                      {effectiveTranslationLockMessage || ui.translationUnlockHint}
                     </Text>
                   ) : null}
+                  {renderInCallTopUpCta()}
 
-                  <View style={styles.row}>
-                    <Animated.View
-                      style={talkiePulseEnabled ? { opacity: talkiePulseOpacityRef.current } : undefined}
-                    >
-                    <Pressable
-                      style={({ pressed }) => [
-                        styles.talkieButton,
-                        isCompactPhone && styles.talkieButtonCompact,
-                        talkieUiState === "starting" && styles.talkieButtonStarting,
-                        talkieLooksRecording && styles.talkieButtonRecording,
-                        (talkieUiState === "stopping" || translationBusy) && styles.talkieButtonBusy,
-                        translationControlsDisabled && styles.talkieButtonLocked,
-                        isTalkieLockedByOther && styles.talkieButtonLocked,
-                        pressed &&
-                          !talkieBusyVisual &&
-                          !translationControlsDisabled &&
-                          !isTalkieLockedByOther &&
-                          talkieUiState === "idle" &&
-                          styles.talkieButtonPressed,
-                      ]}
-                      onPressIn={handleManualPushToTalkPressIn}
-                      onPressOut={handleManualPushToTalkPressOut}
-                      disabled={
-                        translationBusy ||
-                        isTalkieLockedByOther ||
-                        translationControlsDisabled
-                      }
-                    >
-                      <View style={styles.talkieButtonContent}>
-                        {(talkieUiState === "starting" ||
-                          talkieUiState === "stopping" ||
-                          translationBusy) && <ActivityIndicator size="small" color="#ffffff" />}
-                        <Text style={styles.talkieButtonText}>{talkieButtonLabel}</Text>
-                      </View>
-                      </Pressable>
-                    </Animated.View>
-                  </View>
-
-                  {recordingActive ? (
-                    <View style={styles.row}>
-                      <Pressable style={styles.controlButton} onPress={cancelRecording}>
-                        <Text style={styles.controlButtonText}>Annuler</Text>
-                      </Pressable>
-                    </View>
-                  ) : null}
-
-                  {isTalkieLockedByOther && (
-                    <Text style={styles.realtimeStatus}>
-                      Talkie occupé par {talkieLockHolderName || "un interlocuteur"}.
-                    </Text>
-                  )}
                 </>
               ) : (
                 <>
-                  <Text style={styles.langSelectorLabel}>
-                    Langue que tu parles: {sourceLanguageLabel}
-                  </Text>
                   {translationRemainingLabel ? (
                     <Text style={styles.realtimeStatus}>
-                      Temps traduction restant (hote): {translationRemainingLabel}
+                      {ui.hostTranslationRemaining(translationRemainingLabel)}
                     </Text>
                   ) : null}
                   {!effectiveTranslationEnabled ? (
                     <Text style={styles.translationLockNotice}>
-                      {effectiveTranslationLockMessage || TRANSLATION_WAIT_HOST_HINT}
+                      {effectiveTranslationLockMessage || ui.translationWaitHostHint}
                     </Text>
                   ) : null}
-                  <ScrollView
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    style={styles.langScroller}
-                    contentContainerStyle={styles.langScrollerContent}
-                  >
-                    {LANGUAGE_OPTIONS.map((lang) => (
-                      <Pressable
-                        key={`guest-src-${lang.code}`}
-                        onPress={() => setSourceLanguage(lang.code)}
-                        onLongPress={() => showLanguageInfo(lang)}
-                        style={[
-                          styles.langChip,
-                          sourceLanguage === lang.code && styles.langChipActive,
-                        ]}
-                      >
-                        <Text style={styles.langChipText}>{getLanguageChipLabel(lang)}</Text>
-                      </Pressable>
-                    ))}
-                  </ScrollView>
-                  <Text style={styles.langSelectorLabel}>
-                    {coachConversationLayoutActive
-                      ? `Langue du coach: ${targetLanguageLabel}`
-                      : `Langue de reception: ${targetLanguageLabel}`}
-                  </Text>
-                  <ScrollView
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    style={styles.langScroller}
-                    contentContainerStyle={styles.langScrollerContent}
-                  >
-                    {LANGUAGE_OPTIONS.map((lang) => (
-                      <Pressable
-                        key={`guest-dst-${lang.code}`}
-                        onPress={() => setTargetLanguage(lang.code)}
-                        onLongPress={() => showLanguageInfo(lang)}
-                        style={[
-                          styles.langChip,
-                          targetLanguage === lang.code && styles.langChipActive,
-                        ]}
-                      >
-                        <Text style={styles.langChipText}>{getLanguageChipLabel(lang)}</Text>
-                      </Pressable>
-                    ))}
-                  </ScrollView>
-
-                  <View style={styles.row}>
-                    <Animated.View
-                      style={talkiePulseEnabled ? { opacity: talkiePulseOpacityRef.current } : undefined}
-                    >
-                    <Pressable
-                      style={({ pressed }) => [
-                        styles.talkieButton,
-                        isCompactPhone && styles.talkieButtonCompact,
-                        talkieUiState === "starting" && styles.talkieButtonStarting,
-                        talkieLooksRecording && styles.talkieButtonRecording,
-                        (talkieUiState === "stopping" || translationBusy) && styles.talkieButtonBusy,
-                        translationControlsDisabled && styles.talkieButtonLocked,
-                        isTalkieLockedByOther && styles.talkieButtonLocked,
-                        pressed &&
-                          !talkieBusyVisual &&
-                          !translationControlsDisabled &&
-                          !isTalkieLockedByOther &&
-                          talkieUiState === "idle" &&
-                          styles.talkieButtonPressed,
-                      ]}
-                      onPressIn={handleManualPushToTalkPressIn}
-                      onPressOut={handleManualPushToTalkPressOut}
-                      disabled={
-                        translationBusy ||
-                        isTalkieLockedByOther ||
-                        translationControlsDisabled
-                      }
-                    >
-                      <View style={styles.talkieButtonContent}>
-                        {(talkieUiState === "starting" ||
-                          talkieUiState === "stopping" ||
-                          translationBusy) && <ActivityIndicator size="small" color="#ffffff" />}
-                        <Text style={styles.talkieButtonText}>{talkieButtonLabel}</Text>
-                      </View>
-                      </Pressable>
-                    </Animated.View>
-                  </View>
-
-                  {recordingActive ? (
-                    <View style={styles.row}>
-                      <Pressable style={styles.controlButton} onPress={cancelRecording}>
-                        <Text style={styles.controlButtonText}>Annuler</Text>
-                      </Pressable>
-                    </View>
-                  ) : null}
-
-                  {isTalkieLockedByOther && (
-                    <Text style={styles.realtimeStatus}>
-                      Talkie occupé par {talkieLockHolderName || "un interlocuteur"}.
-                    </Text>
-                  )}
+                  {renderInCallTopUpCta()}
                 </>
               )}
 
               {targetVoiceLikelyUnavailable ? (
                 <Text style={styles.realtimeStatus}>
-                  Voix traduite: aucune voix {targetLanguageLabel} installee sur cet iPhone.
-                  Installe-la dans Reglages {'>'} Accessibilite {'>'} Contenu enonce {'>'} Voix.
+                  {ui.translatedVoiceUnavailable(targetLanguageLabel)}
                 </Text>
               ) : null}
 
               {manualDraftVisible && !useManualDraftFullscreen ? (
                 <View style={styles.manualDraftCard}>
-                  <Text style={styles.realtimeStatus}>Verifie ton texte avant envoi</Text>
+                  <Text style={styles.realtimeStatus}>{ui.verifyTextBeforeSend}</Text>
                   <TextInput
                     style={[styles.aiPromptInput, styles.manualDraftInput]}
                     value={manualDraftText}
@@ -5497,7 +7257,7 @@ function RoomView({
                     editable={!manualDraftSending}
                     multiline
                     textAlignVertical="top"
-                    placeholder="Corrige ton texte si besoin..."
+                    placeholder={ui.correctTextPlaceholder}
                     placeholderTextColor="#64748b"
                     returnKeyType="done"
                     blurOnSubmit
@@ -5506,7 +7266,7 @@ function RoomView({
                   <View style={styles.row}>
                     {keyboardVisible ? (
                       <Pressable style={styles.controlButton} onPress={dismissKeyboard}>
-                        <Text style={styles.controlButtonText}>Fermer clavier</Text>
+                        <Text style={styles.controlButtonText}>{ui.closeKeyboard}</Text>
                       </Pressable>
                     ) : null}
                     <Pressable
@@ -5514,7 +7274,7 @@ function RoomView({
                       onPress={cancelManualDraft}
                       disabled={manualDraftSending}
                     >
-                      <Text style={styles.controlButtonText}>Annuler</Text>
+                      <Text style={styles.controlButtonText}>{ui.cancel}</Text>
                     </Pressable>
                     <Pressable
                       style={[
@@ -5530,7 +7290,7 @@ function RoomView({
                       {manualDraftSending ? (
                         <ActivityIndicator size="small" color="#ffffff" />
                       ) : (
-                        <Text style={styles.controlButtonText}>Envoyer</Text>
+                        <Text style={styles.controlButtonText}>{ui.send}</Text>
                       )}
                     </Pressable>
                   </View>
@@ -5539,17 +7299,13 @@ function RoomView({
 
               {sourceText ? (
                 <View style={styles.infoStack}>
-                  <Text style={styles.realtimeStatus}>Source ({sourceLanguageLabel})</Text>
+                  <Text style={styles.realtimeStatus}>{ui.source} ({sourceLanguageLabel})</Text>
                   <Text style={[styles.sourceLine, sourceLanguageIsRtl && styles.rtlText]}>{sourceText}</Text>
                 </View>
               ) : null}
               {captionText ? (
                 <View style={styles.infoStack}>
-                  <Text style={styles.realtimeStatus}>
-                    {coachConversationLayoutActive
-                      ? `Reponse en langue du coach (${targetLanguageLabel})`
-                      : `Traduction (${targetLanguageLabel})`}
-                  </Text>
+                  <Text style={styles.realtimeStatus}>{ui.translation} ({targetLanguageLabel})</Text>
                   <Text style={[styles.captionLine, targetLanguageIsRtl && styles.rtlText]}>
                     {captionText}
                   </Text>
@@ -5575,8 +7331,8 @@ function RoomView({
                         </View>
                         <Text style={styles.controlButtonText} numberOfLines={1}>
                           {translationBusy || retranslateButtonActive
-                            ? "Retraduction..."
-                            : "Retraduire"}
+                            ? ui.retranslateBusy
+                            : ui.retranslate}
                         </Text>
                       </View>
                     </Pressable>
@@ -5588,10 +7344,13 @@ function RoomView({
                         styles.controlButtonSecondary,
                         replayButtonActive && styles.controlButtonActive,
                         pressed && styles.controlButtonPressed,
-                        (translationBusy || !captionText.trim()) && styles.controlButtonDisabled,
+                        (!translatedVoiceEnabled ||
+                          translationBusy ||
+                          !captionText.trim()) &&
+                          styles.controlButtonDisabled,
                       ]}
                       onPress={replayCaption}
-                      disabled={translationBusy || !captionText.trim()}
+                      disabled={!translatedVoiceEnabled || translationBusy || !captionText.trim()}
                     >
                       <View style={styles.controlButtonContent}>
                         <View style={styles.controlButtonSpinnerSlot}>
@@ -5600,15 +7359,15 @@ function RoomView({
                           ) : null}
                         </View>
                         <Text style={styles.controlButtonText} numberOfLines={1}>
-                          {replayButtonActive ? "Reecoute..." : "Reecouter"}
+                          {replayButtonActive ? ui.replayBusy : ui.replay}
                         </Text>
                       </View>
                     </Pressable>
                   </View>
                   {captionPhoneticBusy ? (
-                    <Text style={styles.captionPhoneticLine}>Phonetique: generation...</Text>
+                    <Text style={styles.captionPhoneticLine}>{ui.phoneticLoading}</Text>
                   ) : captionPhoneticText ? (
-                    <Text style={styles.captionPhoneticLine}>Phonetique: {captionPhoneticText}</Text>
+                    <Text style={styles.captionPhoneticLine}>{ui.phonetic(captionPhoneticText)}</Text>
                   ) : null}
                 </View>
               ) : null}
@@ -5621,6 +7380,7 @@ function RoomView({
         ) : null}
       </View>
       ) : null}
+      {renderExpandedSubtitleModal()}
       {renderManualDraftFullscreenModal()}
     </View>
   );
@@ -5631,11 +7391,14 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#020617",
   },
+  topBarShell: {
+    width: "100%",
+    borderBottomWidth: 1,
+    borderColor: "#1e293b",
+  },
   topBar: {
     paddingHorizontal: 12,
     paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderColor: "#1e293b",
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
@@ -5643,6 +7406,35 @@ const styles = StyleSheet.create({
   topBarCompact: {
     paddingHorizontal: 10,
     paddingVertical: 8,
+    alignItems: "flex-start",
+    gap: 8,
+    flexWrap: "wrap",
+  },
+  topBarTablet: {
+    width: "100%",
+    maxWidth: 920,
+    alignSelf: "center",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 16,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+  },
+  topIdentity: {
+    flex: 1,
+    minWidth: 0,
+    paddingRight: 10,
+  },
+  topIdentityCompact: {
+    width: "100%",
+    paddingRight: 0,
+  },
+  topIdentityTablet: {
+    flex: 1,
+    minWidth: 0,
+    maxWidth: 640,
+    paddingRight: 16,
   },
   topActions: {
     flexDirection: "row",
@@ -5651,6 +7443,15 @@ const styles = StyleSheet.create({
   },
   topActionsCompact: {
     gap: 6,
+    width: "100%",
+    justifyContent: "flex-end",
+    flexWrap: "wrap",
+  },
+  topActionsTablet: {
+    justifyContent: "flex-end",
+    flexWrap: "nowrap",
+    gap: 10,
+    flexShrink: 0,
   },
   topTitle: {
     color: "#e2e8f0",
@@ -5684,6 +7485,11 @@ const styles = StyleSheet.create({
     fontSize: 9,
     paddingHorizontal: 7,
   },
+  topActionButtonTablet: {
+    minWidth: 148,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   shareButton: {
     backgroundColor: "#0c4a6e",
     borderRadius: 999,
@@ -5703,6 +7509,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 8,
   },
+  leaveButtonDisabled: {
+    opacity: 0.55,
+  },
   leaveText: {
     color: "#fee2e2",
     fontSize: 12,
@@ -5710,6 +7519,28 @@ const styles = StyleSheet.create({
   },
   roomRoot: {
     flex: 1,
+  },
+  roomAlertBanner: {
+    position: "absolute",
+    top: 12,
+    left: 12,
+    right: 12,
+    zIndex: 28,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#f59e0b",
+    backgroundColor: "rgba(120,53,15,0.9)",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  roomAlertBannerImmersive: {
+    top: 20,
+  },
+  roomAlertText: {
+    color: "#fff7ed",
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: "700",
   },
   audioCallStage: {
     flex: 1,
@@ -5836,11 +7667,74 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 10,
   },
+  connectionBadgeSummary: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  connectionWarningBox: {
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: "#f59e0b",
+    backgroundColor: "rgba(120,53,15,0.28)",
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  connectionWarningText: {
+    color: "#fde68a",
+    fontSize: 11,
+    fontWeight: "700",
+    lineHeight: 16,
+  },
+  connectionMetaRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: 8,
+  },
   connectionText: {
     color: "#93c5fd",
     fontSize: 12,
     fontWeight: "600",
     flex: 1,
+  },
+  connectionMetaChip: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "#1d4ed8",
+    backgroundColor: "rgba(30,64,175,0.22)",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  connectionMetaChipWarning: {
+    borderColor: "#f59e0b",
+    backgroundColor: "rgba(146,64,14,0.28)",
+  },
+  connectionMetaChipText: {
+    color: "#dbeafe",
+    fontSize: 11,
+    fontWeight: "800",
+  },
+  connectionMetaChipAction: {
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: "#38bdf8",
+    backgroundColor: "#082f49",
+  },
+  connectionMetaChipActionPrimary: {
+    borderColor: "#38bdf8",
+    backgroundColor: "#0c4a6e",
+  },
+  connectionMetaChipActionText: {
+    color: "#e0f2fe",
+    fontSize: 11,
+    fontWeight: "800",
   },
   stageModeButton: {
     borderWidth: 1,
@@ -5884,18 +7778,42 @@ const styles = StyleSheet.create({
   },
   subtitleOverlay: {
     position: "absolute",
-    left: 10,
-    right: 10,
-    bottom: 10,
+    left: 16,
+    right: 16,
+    top: 14,
+    alignItems: "center",
     gap: 6,
-    zIndex: 12,
+    zIndex: 16,
+  },
+  subtitleOverlayFullscreen: {
+    top: 72,
   },
   subtitleOverlayImmersive: {
-    left: 8,
-    right: 8,
-    bottom: 14,
+    left: 10,
+    right: 10,
+    top: 18,
+  },
+  subtitleStack: {
+    width: "100%",
+    maxWidth: 280,
+    gap: 6,
+  },
+  subtitleSpeakerBadge: {
+    alignSelf: "center",
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "#38bdf8",
+    backgroundColor: "rgba(8,47,73,0.9)",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  subtitleSpeakerBadgeText: {
+    color: "#e0f2fe",
+    fontSize: 11,
+    fontWeight: "800",
   },
   subtitleSourceBubble: {
+    width: "100%",
     borderRadius: 12,
     borderWidth: 1,
     borderColor: "#334155",
@@ -5905,6 +7823,7 @@ const styles = StyleSheet.create({
     gap: 2,
   },
   subtitleTargetBubble: {
+    width: "100%",
     borderRadius: 12,
     borderWidth: 1,
     borderColor: "#38bdf8",
@@ -5913,10 +7832,50 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     gap: 2,
   },
+  subtitleBubblePressed: {
+    opacity: 0.88,
+    transform: [{ scale: 0.995 }],
+  },
   subtitleLabel: {
     color: "#bfdbfe",
     fontSize: 10,
     fontWeight: "700",
+  },
+  subtitleMetaRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  subtitleMetaActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    flexShrink: 1,
+  },
+  subtitleActionText: {
+    color: "#e0f2fe",
+    fontSize: 10,
+    fontWeight: "800",
+  },
+  subtitleMutedBadge: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "#f59e0b",
+    backgroundColor: "rgba(120,53,15,0.88)",
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+  },
+  subtitleMutedBadgeText: {
+    color: "#fde68a",
+    fontSize: 9,
+    fontWeight: "800",
+  },
+  subtitleHintText: {
+    color: "#cbd5e1",
+    fontSize: 10,
+    fontWeight: "600",
+    textAlign: "center",
   },
   subtitleSourceText: {
     color: "#e2e8f0",
@@ -5976,15 +7935,18 @@ const styles = StyleSheet.create({
   },
   localPreviewCard: {
     position: "absolute",
-    right: 10,
-    top: 10,
-    width: 110,
-    height: 160,
     borderRadius: 12,
     overflow: "hidden",
     borderWidth: 1,
     borderColor: "#38bdf8",
     backgroundColor: "#020617",
+  },
+  localPreviewCardDefaultPosition: {
+    right: IOS_PREVIEW_CARD_MARGIN,
+    top: IOS_PREVIEW_CARD_MARGIN,
+  },
+  localPreviewPressable: {
+    flex: 1,
   },
   localPreviewTrack: {
     width: "100%",
@@ -6051,11 +8013,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingBottom: 8,
   },
-  panelDockCoachMode: {
-    flex: 1,
-    paddingTop: 8,
-    paddingBottom: 12,
-  },
   panelDockCompact: {
     gap: 6,
     paddingHorizontal: 8,
@@ -6113,10 +8070,6 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(2,6,23,0.88)",
     overflow: "hidden",
   },
-  accordionCardCoachMode: {
-    flex: 1,
-    minHeight: 260,
-  },
   accordionHeader: {
     flexDirection: "row",
     alignItems: "center",
@@ -6151,6 +8104,10 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingHorizontal: 12,
     paddingBottom: 12,
+  },
+  controlSettingGroup: {
+    width: "100%",
+    gap: 6,
   },
   controlButton: {
     borderRadius: 999,
@@ -6235,7 +8192,7 @@ const styles = StyleSheet.create({
     borderColor: "#86efac",
   },
   talkieButtonStarting: {
-    backgroundColor: "#1e3a8a",
+    backgroundColor: "#1d4ed8",
     borderColor: "#93c5fd",
   },
   talkieButtonRecording: {
@@ -6243,12 +8200,85 @@ const styles = StyleSheet.create({
     borderColor: "#86efac",
   },
   talkieButtonBusy: {
-    backgroundColor: "#7f1d1d",
-    borderColor: "#fca5a5",
+    backgroundColor: "#1e40af",
+    borderColor: "#93c5fd",
+  },
+  talkieButtonPassive: {
+    shadowOpacity: 0,
+    shadowRadius: 0,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 0,
   },
   talkieButtonLocked: {
     backgroundColor: "#1e293b",
     borderColor: "#64748b",
+  },
+  talkieOverlay: {
+    position: "absolute",
+    left: 16,
+    right: 16,
+    bottom: 18,
+    zIndex: 18,
+  },
+  talkieOverlayCompact: {
+    left: 12,
+    right: 12,
+    bottom: 14,
+  },
+  talkieOverlayImmersive: {
+    bottom: 28,
+  },
+  immersiveControlsRoot: {
+    position: "absolute",
+    top: 18,
+    left: 12,
+    right: 12,
+    zIndex: 22,
+  },
+  immersiveControlsRow: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 10,
+  },
+  immersiveControlButton: {
+    flexGrow: 1,
+    flexBasis: 0,
+  },
+  talkieStatusBanner: {
+    alignSelf: "center",
+    marginBottom: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    maxWidth: "100%",
+  },
+  talkieStatusBannerIdle: {
+    backgroundColor: "#0f172a",
+    borderColor: "#334155",
+  },
+  talkieStatusBannerActive: {
+    backgroundColor: "#052e16",
+    borderColor: "#22c55e",
+  },
+  talkieStatusBannerBusy: {
+    backgroundColor: "#172554",
+    borderColor: "#60a5fa",
+  },
+  talkieStatusBannerReview: {
+    backgroundColor: "#3b0764",
+    borderColor: "#d8b4fe",
+  },
+  talkieStatusBannerWarning: {
+    backgroundColor: "#3f3f46",
+    borderColor: "#a1a1aa",
+  },
+  talkieStatusText: {
+    color: "#f8fafc",
+    fontSize: 12,
+    fontWeight: "800",
+    textAlign: "center",
+    letterSpacing: 0.2,
   },
   talkieButtonContent: {
     flexDirection: "row",
@@ -6283,136 +8313,6 @@ const styles = StyleSheet.create({
   translationPanelScroll: {
     maxHeight: 380,
   },
-  translationPanelScrollCoach: {
-    minHeight: 260,
-  },
-  translationInfoHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  translationInfoButton: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "#38bdf8",
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#0c4a6e",
-  },
-  translationInfoButtonText: {
-    color: "#e2e8f0",
-    fontSize: 13,
-    fontWeight: "800",
-  },
-  translationInfoBox: {
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "#334155",
-    backgroundColor: "#020617",
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    gap: 4,
-  },
-  coachConversationCard: {
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "#1e3a5f",
-    backgroundColor: "#061425",
-    paddingHorizontal: 10,
-    paddingVertical: 9,
-    gap: 8,
-  },
-  coachConversationHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 10,
-  },
-  coachPartnerCard: {
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "#334155",
-    backgroundColor: "#020617",
-    paddingHorizontal: 10,
-    paddingVertical: 9,
-    gap: 8,
-  },
-  coachPartnerHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-  },
-  coachAvatarBadge: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#0c4a6e",
-    borderWidth: 1,
-    borderColor: "#38bdf8",
-  },
-  coachAvatarText: {
-    color: "#e0f2fe",
-    fontSize: 12,
-    fontWeight: "800",
-    letterSpacing: 0.3,
-  },
-  coachPartnerHeaderText: {
-    flex: 1,
-    gap: 2,
-  },
-  coachPartnerTitle: {
-    color: "#e2e8f0",
-    fontSize: 12,
-    fontWeight: "800",
-  },
-  coachPartnerLoadingRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-  coachPartnerReplyText: {
-    color: "#e2e8f0",
-    fontSize: 13,
-    lineHeight: 20,
-    fontWeight: "600",
-  },
-  coachPartnerPlaceholder: {
-    color: "#94a3b8",
-    fontSize: 12,
-    lineHeight: 18,
-  },
-  coachPartnerTranslationBox: {
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "#334155",
-    backgroundColor: "#0b1220",
-    paddingHorizontal: 8,
-    paddingVertical: 7,
-    gap: 4,
-  },
-  coachPartnerTranslationLabel: {
-    color: "#cbd5e1",
-    fontSize: 11,
-    fontWeight: "700",
-  },
-  coachPartnerTranslationText: {
-    color: "#f8fafc",
-    fontSize: 12,
-    lineHeight: 18,
-  },
-  coachSuggestionCard: {
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "#334155",
-    backgroundColor: "#0b1220",
-    paddingHorizontal: 8,
-    paddingVertical: 7,
-    gap: 4,
-  },
   panelTitle: {
     color: "#e2e8f0",
     fontSize: 14,
@@ -6422,6 +8322,11 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     flexWrap: "wrap",
     gap: 6,
+  },
+  talkieRowCentered: {
+    width: "100%",
+    justifyContent: "center",
+    alignItems: "center",
   },
   rowSplit: {
     flexDirection: "row",
@@ -6451,22 +8356,6 @@ const styles = StyleSheet.create({
     paddingVertical: 9,
     fontSize: 13,
   },
-  coachPromptInput: {
-    minHeight: 96,
-  },
-  coachResponseBox: {
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "#334155",
-    backgroundColor: "#020617",
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-  },
-  coachResponseText: {
-    color: "#e2e8f0",
-    fontSize: 12,
-    lineHeight: 18,
-  },
   mutedLine: {
     color: "#94a3b8",
     fontSize: 12,
@@ -6489,6 +8378,18 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     backgroundColor: "#020617",
   },
+  toggleChipActive: {
+    borderColor: "#38bdf8",
+    backgroundColor: "#082f49",
+  },
+  toggleChipText: {
+    color: "#cbd5e1",
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  toggleChipTextActive: {
+    color: "#e0f2fe",
+  },
   langChipActive: {
     borderColor: "#38bdf8",
     backgroundColor: "#082f49",
@@ -6502,6 +8403,9 @@ const styles = StyleSheet.create({
     color: "#93c5fd",
     fontSize: 11,
     fontWeight: "600",
+  },
+  warningText: {
+    color: "#fde68a",
   },
   voiceLabel: {
     color: "#cbd5e1",
@@ -6574,6 +8478,85 @@ const styles = StyleSheet.create({
   },
   manualDraftInput: {
     minHeight: 64,
+  },
+  subtitleSheetRoot: {
+    flex: 1,
+    justifyContent: "center",
+    paddingHorizontal: 16,
+    backgroundColor: "rgba(2,6,23,0.66)",
+  },
+  subtitleSheetBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  subtitleSheetCard: {
+    maxHeight: "72%",
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "#1e293b",
+    backgroundColor: "#020617",
+    overflow: "hidden",
+  },
+  subtitleSheetHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    borderColor: "#1e293b",
+  },
+  subtitleSheetHeaderText: {
+    flex: 1,
+    gap: 4,
+  },
+  subtitleSheetTitle: {
+    color: "#f8fafc",
+    fontSize: 16,
+    fontWeight: "800",
+  },
+  subtitleSheetMeta: {
+    color: "#93c5fd",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  subtitleSheetCloseButton: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "#334155",
+    backgroundColor: "#0f172a",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  subtitleSheetCloseButtonText: {
+    color: "#e2e8f0",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  subtitleSheetBody: {
+    maxHeight: 320,
+  },
+  subtitleSheetBodyContent: {
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    gap: 10,
+  },
+  subtitleSheetSourceText: {
+    color: "#e2e8f0",
+    fontSize: 16,
+    lineHeight: 24,
+    fontWeight: "600",
+  },
+  subtitleSheetTargetText: {
+    color: "#f8fafc",
+    fontSize: 17,
+    lineHeight: 26,
+    fontWeight: "700",
+  },
+  subtitleSheetActions: {
+    paddingHorizontal: 14,
+    paddingBottom: 14,
+    paddingTop: 4,
   },
   manualDraftSheetRoot: {
     flex: 1,
