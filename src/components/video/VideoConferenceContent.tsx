@@ -1,13 +1,14 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { onAuthStateChanged } from "firebase/auth";
 import { auth } from "@/lib/firebaseConfig";
+import { extractLivekitInviteId } from "@/lib/livekitInviteLinks";
 import VideoCall from "@/components/video/VideoCall";
 import { setAuthGuardCookie } from "@/lib/authGuard";
 import { useUiLocale, type UiLocale } from "@/components/ui/UiLocaleProvider";
-import { useTokenWallet } from "@/hooks/useTokenWallet";
+import { useTranslationEntitlement } from "@/hooks/useTranslationEntitlement";
 
 /* =======================================================
    🎥 BFZoom — Version stable & responsive (2025)
@@ -16,6 +17,36 @@ import { useTokenWallet } from "@/hooks/useTokenWallet";
 ======================================================= */
 
 const GUEST_NAME_STORAGE_KEY = "bfzoom:guest-name";
+const buildGuestSessionIdentity = () =>
+  `guest-${Math.random().toString(36).slice(2, 10)}${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+const sanitizeIdentityBase = (value: string) =>
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 72);
+const buildUserScopedGuestIdentity = (userId?: string | null) => {
+  const base = sanitizeIdentityBase(String(userId || ""));
+  return base
+    ? `guest-${base}-${Math.random().toString(36).slice(2, 10)}${Math.random()
+        .toString(36)
+        .slice(2, 10)}`
+    : buildGuestSessionIdentity();
+};
+const buildRoomSuffix = () =>
+  `${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8)}`;
+
+type GuestInviteJoinState = {
+  inviteId: string;
+  roomId: string;
+  identity: string;
+  token: string;
+  guestTtsToken?: string;
+};
 
 type VideoConferenceCopy = {
   guestDefaultName: string;
@@ -31,6 +62,7 @@ type VideoConferenceCopy = {
   allowlistDeniedCreate: string;
   allowlistUnknownError: string;
   allowlistRetryAction: string;
+  inviteOnlyAccess: string;
   createRoomOrJoin: string;
   createRoom: string;
   joinRoomPlaceholder: string;
@@ -38,14 +70,12 @@ type VideoConferenceCopy = {
   joinRoomEmptyError: string;
   checkingRights: string;
   checkingRightsHint: string;
+  translationActive: (minutes: number) => string;
+  translationLocked: string;
+  buyCreditsAction: string;
   guestNameLabel: string;
   guestNamePlaceholder: string;
   guestNameVisibleHint: string;
-  directExerciseLoading: string;
-  backToDashboard: string;
-  creditsRemaining: string;
-  consumedThisSession: string;
-  buyCredits: string;
 };
 
 const VIDEO_COPY: Record<UiLocale, VideoConferenceCopy> = {
@@ -63,21 +93,21 @@ const VIDEO_COPY: Record<UiLocale, VideoConferenceCopy> = {
     allowlistDeniedCreate: "Ton compte n'est pas autorisé pour le moment.",
     allowlistUnknownError: "Impossible de vérifier tes droits.",
     allowlistRetryAction: "Réessayer la vérification",
+    inviteOnlyAccess: "Cette visioconférence n'accepte plus les codes de room. Utilise une invitation BFZoom.",
     createRoomOrJoin: "Crée une salle ou rejoins-en une existante.",
     createRoom: "➕ Créer une salle",
-    joinRoomPlaceholder: "Code de salle (ex: room-ab12cd)",
+    joinRoomPlaceholder: "Lien ou invitation BFZoom",
     joinRoomAction: "🔗 Rejoindre en invité",
-    joinRoomEmptyError: "Entre un code de salle pour rejoindre.",
+    joinRoomEmptyError: "Colle une invitation BFZoom valide pour rejoindre.",
     checkingRights: "Vérification en cours…",
     checkingRightsHint: "🔄 Vérification des droits en cours, patiente juste une seconde…",
+    translationActive: (minutes: number) => `Traduction disponible · ${minutes} min restantes`,
+    translationLocked:
+      "Tu peux continuer la visio sans crédits. La traduction reste simplement désactivée jusqu’à recharge.",
+    buyCreditsAction: "Acheter des crédits",
     guestNameLabel: "Nom invité",
     guestNamePlaceholder: "Ex: Marie",
     guestNameVisibleHint: "Visible pour les participants.",
-    directExerciseLoading: "Ouverture de l'exercice IA en cours...",
-    backToDashboard: "Retour au dashboard",
-    creditsRemaining: "Credits restants",
-    consumedThisSession: "Consomme (session)",
-    buyCredits: "Acheter des credits",
   },
   en: {
     guestDefaultName: "BFZoom Guest",
@@ -93,21 +123,21 @@ const VIDEO_COPY: Record<UiLocale, VideoConferenceCopy> = {
     allowlistDeniedCreate: "Your account is not currently allowed.",
     allowlistUnknownError: "Unable to verify your permissions.",
     allowlistRetryAction: "Retry verification",
+    inviteOnlyAccess: "This call no longer accepts room codes. Use a BFZoom invite.",
     createRoomOrJoin: "Create a room or join an existing one.",
     createRoom: "➕ Create room",
-    joinRoomPlaceholder: "Room code (e.g. room-ab12cd)",
+    joinRoomPlaceholder: "BFZoom invite or link",
     joinRoomAction: "🔗 Join as guest",
-    joinRoomEmptyError: "Enter a room code to join.",
+    joinRoomEmptyError: "Paste a valid BFZoom invite to join.",
     checkingRights: "Checking permissions…",
     checkingRightsHint: "🔄 Verifying permissions, please wait a second…",
+    translationActive: (minutes: number) => `Translation available · ${minutes} min left`,
+    translationLocked:
+      "You can still use the video room without credits. Translation is simply disabled until you top up.",
+    buyCreditsAction: "Buy credits",
     guestNameLabel: "Guest name",
     guestNamePlaceholder: "Ex: Maria",
     guestNameVisibleHint: "Visible to participants.",
-    directExerciseLoading: "Opening AI exercise...",
-    backToDashboard: "Back to dashboard",
-    creditsRemaining: "Credits remaining",
-    consumedThisSession: "Consumed (session)",
-    buyCredits: "Buy credits",
   },
 };
 
@@ -115,7 +145,6 @@ export default function VideoConferenceContent() {
   const { locale } = useUiLocale();
   const t = VIDEO_COPY[locale];
   const [roomId, setRoomId] = useState<string | null>(null);
-  const [userUid, setUserUid] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string>("");
   const [authReady, setAuthReady] = useState(false);
   const [allowlistStatus, setAllowlistStatus] = useState<
@@ -126,40 +155,30 @@ export default function VideoConferenceContent() {
   const [createError, setCreateError] = useState("");
   const [guestDisplayName, setGuestDisplayName] = useState("");
   const [joinRoomInput, setJoinRoomInput] = useState("");
-  const [exerciseStartBalance, setExerciseStartBalance] = useState<number | null>(null);
-  const { balance: tokenBalance, loading: walletLoading } = useTokenWallet(userUid);
+  const [guestInviteJoin, setGuestInviteJoin] = useState<GuestInviteJoinState | null>(null);
+  const [guestInviteStatus, setGuestInviteStatus] = useState<"idle" | "loading" | "ready" | "error">(
+    "idle"
+  );
+  const translationEntitlement = useTranslationEntitlement();
 
   const searchParams = useSearchParams();
   const router = useRouter();
-  const wantsAiExercise = searchParams.get("exercise") === "1";
-  const wantsHost = searchParams.get("host") === "1" || wantsAiExercise;
-  const isHost = wantsAiExercise ? true : wantsHost && allowlistStatus === "allowed";
-  const wantsCreate = searchParams.get("create") === "1" || wantsAiExercise;
+  const wantsHost = searchParams.get("host") === "1";
+  const isHost = wantsHost && allowlistStatus === "allowed";
+  const wantsCreate = searchParams.get("create") === "1";
+  const inviteFromQuery = searchParams.get("invite")?.trim() || "";
   const roomFromQuery = searchParams.get("room")?.trim() || "";
-  const canJoinAsGuestByLink = Boolean(roomFromQuery) && !wantsHost;
-  const focusedExerciseMode = wantsAiExercise && isHost;
+  const canJoinAsGuestByLink = Boolean(inviteFromQuery) && !wantsHost;
   const guestNameFromQuery =
     searchParams.get("name")?.trim() || searchParams.get("guest")?.trim() || "";
-  const exerciseConsumedCredits =
-    typeof exerciseStartBalance === "number" && typeof tokenBalance === "number"
-      ? Math.max(0, exerciseStartBalance - tokenBalance)
-      : 0;
-
-  useEffect(() => {
-    if (!focusedExerciseMode) {
-      setExerciseStartBalance(null);
-      return;
-    }
-    if (exerciseStartBalance !== null) return;
-    if (typeof tokenBalance !== "number") return;
-    setExerciseStartBalance(tokenBalance);
-  }, [exerciseStartBalance, focusedExerciseMode, tokenBalance]);
+  const guestInviteIdentity = useMemo(() => {
+    return buildUserScopedGuestIdentity(auth.currentUser?.uid);
+  }, []);
 
   /* 🔐 Vérifie la connexion Firebase */
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (user) => {
       setAuthGuardCookie(Boolean(user));
-      setUserUid(user?.uid ?? null);
       setUserEmail(user?.email || "");
       setAuthReady(true);
     });
@@ -167,13 +186,26 @@ export default function VideoConferenceContent() {
   }, []);
 
   useEffect(() => {
+    if (!inviteFromQuery || !wantsHost) return;
+    const query = new URLSearchParams({ invite: inviteFromQuery });
+    if (guestNameFromQuery) {
+      query.set("name", guestNameFromQuery.slice(0, 80));
+    }
+    router.replace(`/videoconference?${query.toString()}`);
+  }, [guestNameFromQuery, inviteFromQuery, router, wantsHost]);
+
+  useEffect(() => {
     if (!authReady) return;
+    if (roomFromQuery && !wantsHost) {
+      router.replace("/videoconference");
+      return;
+    }
     if (userEmail) return;
     if (canJoinAsGuestByLink) return;
     const search = searchParams.toString();
     const next = `/videoconference${search ? `?${search}` : ""}`;
     router.replace(`/login?next=${encodeURIComponent(next)}`);
-  }, [authReady, canJoinAsGuestByLink, router, searchParams, userEmail]);
+  }, [authReady, canJoinAsGuestByLink, roomFromQuery, router, searchParams, userEmail, wantsHost]);
 
   useEffect(() => {
     if (!authReady || !canJoinAsGuestByLink) return;
@@ -215,7 +247,11 @@ export default function VideoConferenceContent() {
         if (!res.ok) {
           throw new Error(t.allowlistDeniedByStatus(res.status));
         }
-        const data = (await res.json()) as { allowed?: boolean };
+        const data = (await res.json()) as {
+          allowed?: boolean;
+          allowlisted?: boolean;
+          accessMode?: "allowlist" | "authenticated";
+        };
         if (cancelled) return;
         if (data.allowed) {
           setAllowlistStatus("allowed");
@@ -243,13 +279,96 @@ export default function VideoConferenceContent() {
 
   /* 🔗 Récupère ou génère un roomId depuis l'URL */
   useEffect(() => {
+    if (inviteFromQuery || !wantsHost) return;
     const urlRoom = searchParams.get("room");
     if (urlRoom && urlRoom !== roomId) {
       setRoomId(urlRoom);
     }
-  }, [searchParams, roomId]);
+  }, [inviteFromQuery, roomId, searchParams, wantsHost]);
 
-  const generateRoomId = () => "room-" + Math.random().toString(36).slice(2, 8);
+  useEffect(() => {
+    if (!inviteFromQuery || wantsHost) {
+      setGuestInviteJoin(null);
+      setGuestInviteStatus("idle");
+      return;
+    }
+
+    const displayName = guestDisplayName.trim() || t.guestDefaultName;
+    if (!displayName) return;
+
+    let cancelled = false;
+    const controller = new AbortController();
+
+    const redeemInvite = async () => {
+      setRoomId(null);
+      setGuestInviteStatus("loading");
+      setCreateError("");
+      try {
+        const res = await fetch("/api/livekit/invite/redeem", {
+          method: "POST",
+          signal: controller.signal,
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            invite: inviteFromQuery,
+            identity: guestInviteIdentity,
+            name: displayName,
+            includeGuestTtsToken: true,
+          }),
+        });
+        const payload = (await res.json().catch(() => ({}))) as {
+          room?: string;
+          token?: string;
+          guestTtsToken?: string | null;
+          error?: string;
+        };
+        if (!res.ok) {
+          throw new Error(payload.error || "Unable to join this invite.");
+        }
+        const nextRoomId = (payload.room || "").trim();
+        const nextToken = (payload.token || "").trim();
+        if (!nextRoomId || !nextToken) {
+          throw new Error("Invite response is incomplete.");
+        }
+        if (cancelled) return;
+        setRoomId(nextRoomId);
+        setGuestInviteJoin({
+          inviteId: inviteFromQuery,
+          roomId: nextRoomId,
+          identity: guestInviteIdentity,
+          token: nextToken,
+          guestTtsToken: (payload.guestTtsToken || "").trim() || undefined,
+        });
+        setGuestInviteStatus("ready");
+      } catch (error) {
+        if (cancelled) return;
+        setGuestInviteJoin(null);
+        setGuestInviteStatus("error");
+        setCreateError(
+          error instanceof Error && error.message.trim()
+            ? error.message
+            : t.joinRoomEmptyError
+        );
+      }
+    };
+
+    void redeemInvite();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [
+    guestDisplayName,
+    guestInviteIdentity,
+    inviteFromQuery,
+    t.guestDefaultName,
+    t.joinRoomEmptyError,
+    wantsHost,
+  ]);
+
+  const generateRoomId = () => `room-${buildRoomSuffix()}`;
 
   useEffect(() => {
     if (roomId) return;
@@ -258,16 +377,8 @@ export default function VideoConferenceContent() {
     if (!authReady) return;
     if (!userEmail) {
       router.push(
-        `/login?next=${encodeURIComponent(
-          wantsAiExercise ? "/videoconference?exercise=1" : "/videoconference?create=1"
-        )}`
+        `/login?next=${encodeURIComponent("/videoconference?create=1")}`
       );
-      return;
-    }
-    if (wantsAiExercise) {
-      const id = generateRoomId();
-      router.replace(`/videoconference?room=${id}&host=1&exercise=1`);
-      setRoomId(id);
       return;
     }
     if (allowlistStatus === "loading" || allowlistStatus === "idle") return;
@@ -278,10 +389,7 @@ export default function VideoConferenceContent() {
       return;
     }
     const id = generateRoomId();
-    const target = wantsAiExercise
-      ? `/videoconference?room=${id}&host=1&exercise=1`
-      : `/videoconference?room=${id}&host=1`;
-    router.replace(target);
+    router.replace(`/videoconference?room=${id}&host=1`);
     setRoomId(id);
   }, [
     roomId,
@@ -290,7 +398,6 @@ export default function VideoConferenceContent() {
     allowlistStatus,
     router,
     authReady,
-    wantsAiExercise,
     t.unauthorizedCreate,
   ]);
 
@@ -332,13 +439,13 @@ export default function VideoConferenceContent() {
   }, [setAllowlistRefetchTrigger, setCreateError]);
 
   const handleJoinRoom = useCallback(() => {
-    const target = joinRoomInput.trim();
-    if (!target) {
+    const inviteToken = extractLivekitInviteId(joinRoomInput);
+    if (!inviteToken) {
       setCreateError(t.joinRoomEmptyError);
       return;
     }
     setCreateError("");
-    router.push(`/videoconference?room=${encodeURIComponent(target)}`);
+    router.push(`/videoconference?invite=${encodeURIComponent(inviteToken)}`);
   }, [joinRoomInput, router, t.joinRoomEmptyError]);
 
   /* 🚪 Quitter la salle proprement */
@@ -356,21 +463,27 @@ export default function VideoConferenceContent() {
       ? allowlistError || t.allowlistUnknownError
       : "";
   const showRetryAllowlist = allowlistStatus === "error";
+  const translationMinutesRemaining = Math.max(
+    0,
+    Math.ceil(translationEntitlement.totalSecondsRemaining / 60)
+  );
+  const showTranslationStatus =
+    authReady && Boolean(userEmail) && !translationEntitlement.loading;
+  const showTranslationUpsell =
+    showTranslationStatus &&
+    !translationEntitlement.enabled &&
+    !translationEntitlement.isAdmin &&
+    !translationEntitlement.isPremium;
+  const translationStatusMessage = !showTranslationStatus
+    ? ""
+    : translationEntitlement.enabled
+    ? t.translationActive(translationMinutesRemaining)
+    : t.translationLocked;
 
   /* =======================================================
      🧱 LOBBY (avant création de salle)
   ======================================================= */
-  if (!roomId) {
-    if (wantsAiExercise) {
-      return (
-        <div className="min-h-dvh flex flex-col items-center justify-center bg-linear-to-b from-gray-50 to-gray-100 text-gray-800 px-4">
-          <div className="w-full max-w-md rounded-2xl border border-gray-200 bg-white p-6 text-center shadow-xl">
-            <div className="mx-auto mb-3 h-6 w-6 animate-spin rounded-full border-2 border-sky-500 border-t-transparent" />
-            <p className="text-sm font-semibold text-slate-700">{t.directExerciseLoading}</p>
-          </div>
-        </div>
-      );
-    }
+  if (!roomId && !inviteFromQuery) {
     return (
       <div className="min-h-dvh flex flex-col items-center justify-center bg-linear-to-b from-gray-50 to-gray-100 text-gray-800 px-4">
         <div className="w-full max-w-md bg-white rounded-2xl shadow-xl border border-gray-200 p-6 text-center">
@@ -378,7 +491,7 @@ export default function VideoConferenceContent() {
             🎥 BFZoom
           </h1>
           <p className="text-center text-gray-500 text-sm mb-6">
-            {t.createRoomOrJoin}
+            {t.inviteOnlyAccess}
           </p>
           <button
             onClick={handleCreateRoom}
@@ -440,6 +553,23 @@ export default function VideoConferenceContent() {
               )}
             </div>
           )}
+          {translationStatusMessage && (
+            <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-left text-xs text-slate-700">
+              <p>{translationStatusMessage}</p>
+              {showTranslationUpsell && (
+                <button
+                  onClick={() =>
+                    router.push(
+                      `/credits?returnTo=${encodeURIComponent("/videoconference")}`
+                    )
+                  }
+                  className="mt-3 inline-flex items-center rounded-lg border border-sky-300 bg-sky-50 px-3 py-2 text-xs font-semibold text-sky-700 hover:bg-sky-100"
+                >
+                  {t.buyCreditsAction}
+                </button>
+              )}
+            </div>
+          )}
           {createError && (
             <p className="mt-3 text-xs text-amber-700">{createError}</p>
           )}
@@ -453,40 +583,8 @@ export default function VideoConferenceContent() {
   ======================================================= */
   return (
     <div
-      className={`flex h-dvh min-h-dvh flex-col overflow-x-hidden text-white ${
-        focusedExerciseMode ? "bg-black" : "bg-gray-900"
-      }`}
+      className="flex h-dvh min-h-dvh flex-col overflow-x-hidden bg-gray-900 text-white"
     >
-      {focusedExerciseMode && (
-        <>
-        <div className="pointer-events-none absolute left-3 top-3 z-40 sm:left-4 sm:top-4">
-          <button
-            type="button"
-            onClick={() => router.push("/dashboard")}
-            className="pointer-events-auto inline-flex items-center rounded-full border border-white/20 bg-black/70 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-black/85"
-          >
-            {t.backToDashboard}
-          </button>
-        </div>
-        <div className="pointer-events-none absolute right-3 top-3 z-40 sm:right-4 sm:top-4">
-          <div className="pointer-events-auto rounded-xl border border-white/15 bg-black/70 px-3 py-2 text-right text-[11px] text-white shadow-lg backdrop-blur">
-            <p className="font-semibold">
-              {t.creditsRemaining}: {walletLoading ? "..." : tokenBalance ?? 0}
-            </p>
-            <p className="text-[10px] text-amber-200">
-              {t.consumedThisSession}: {exerciseConsumedCredits}
-            </p>
-            <button
-              type="button"
-              onClick={() => router.push("/pricing")}
-              className="mt-1 inline-flex items-center rounded-full border border-amber-300/70 bg-amber-500/20 px-2.5 py-1 text-[10px] font-semibold text-amber-100 transition hover:bg-amber-500/30"
-            >
-              {t.buyCredits}
-            </button>
-          </div>
-        </div>
-        </>
-      )}
       {canJoinAsGuestByLink && (
         <div className="shrink-0 px-3 pt-3 sm:px-6">
           <div className="mx-auto w-full max-w-7xl rounded-xl border border-white/15 bg-black/25 p-3">
@@ -505,27 +603,45 @@ export default function VideoConferenceContent() {
           </div>
         </div>
       )}
+      {createError && inviteFromQuery ? (
+        <div className="shrink-0 px-3 pt-3 sm:px-6">
+          <div className="mx-auto w-full max-w-7xl rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+            {createError}
+          </div>
+        </div>
+      ) : null}
       {/* 🎦 Zone vidéo responsive */}
       <div
-        className={`flex min-h-0 flex-1 items-center justify-center ${
-          focusedExerciseMode ? "p-0" : "p-1.5 sm:p-3 md:p-5"
-        }`}
+        className="flex min-h-0 flex-1 items-center justify-center p-1.5 sm:p-3 md:p-5"
       >
         <div
-          className={`h-full min-h-0 w-full overflow-hidden ${
-            focusedExerciseMode
-              ? "mx-0 max-w-none rounded-none border-0 bg-black shadow-none"
-              : "mx-auto max-w-7xl rounded-xl border border-gray-800 bg-gray-950 shadow-2xl"
-          }`}
+          className="mx-auto h-full min-h-0 w-full max-w-7xl overflow-hidden rounded-xl border border-gray-800 bg-gray-950 shadow-2xl"
         >
-          <VideoCall
-            roomId={roomId}
-            isHost={isHost}
-            aiTrainingAutoStart={wantsAiExercise}
-            skipPreJoin={wantsAiExercise}
-            defaultDisplayName={guestDisplayName}
-            onLeave={handleLeaveRoom}
-          />
+          {inviteFromQuery && !roomId ? (
+            <div className="flex h-full min-h-70 items-center justify-center px-6 text-center text-sm text-slate-300">
+              {guestInviteStatus === "error"
+                ? createError || t.allowlistDeniedGeneric
+                : t.sessionLoading}
+            </div>
+          ) : (
+            <VideoCall
+              roomId={roomId || guestInviteJoin?.roomId || ""}
+              isHost={isHost}
+              guestInviteId={guestInviteJoin?.inviteId}
+              sessionIdentity={guestInviteJoin?.identity}
+              skipPreJoin={Boolean(guestInviteJoin)}
+              initialLivekitAuth={
+                guestInviteJoin
+                  ? {
+                      token: guestInviteJoin.token,
+                      guestTtsToken: guestInviteJoin.guestTtsToken,
+                    }
+                  : undefined
+              }
+              defaultDisplayName={guestDisplayName}
+              onLeave={handleLeaveRoom}
+            />
+          )}
         </div>
       </div>
 

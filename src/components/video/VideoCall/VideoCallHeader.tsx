@@ -4,7 +4,7 @@ import { motion } from "framer-motion";
 import { Users, Power } from "lucide-react";
 
 export default function VideoCallHeader({
-  roomId,
+  roomId: _roomId,
   userCount,
   onLeave,
 }: {
@@ -23,8 +23,7 @@ export default function VideoCallHeader({
       <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
         <div>
           <h2 className="text-lg font-semibold tracking-tight">
-            Salle :{" "}
-            <span className="text-blue-600 font-mono text-base break-all">{roomId}</span>
+            BFZoom
           </h2>
 
           <p className="text-sm text-slate-600 mt-1 flex items-center gap-2">

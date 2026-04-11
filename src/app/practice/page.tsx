@@ -1,14 +1,16 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { onAuthStateChanged, User, getIdToken } from "firebase/auth";
 import { auth } from "@/lib/firebaseConfig";
 import { Languages, ArrowLeft, Play } from "lucide-react";
 import { motion } from "framer-motion";
+import { usePracticeRealtimeCapture } from "@/hooks/practice/usePracticeRealtimeCapture";
 
 const LANGUAGE_OPTIONS = [
   "Arabe",
+  "Darija (Maghreb)",
   "Anglais",
   "Chinois",
   "Espagnol",
@@ -18,6 +20,18 @@ const LANGUAGE_OPTIONS = [
   "Russe",
 ];
 const LEVEL_OPTIONS = ["Débutant", "Intermédiaire", "Avancé", "Fluent"];
+const PRACTICE_SPEECH_LOCALES: Record<string, string> = {
+  Arabe: "ar-SA",
+  "Darija (Maghreb)": "ar-MA",
+  Anglais: "en-US",
+  Chinois: "zh-CN",
+  Espagnol: "es-ES",
+  "Persan (Farsi)": "fa-IR",
+  Hébreu: "he-IL",
+  Italien: "it-IT",
+  Russe: "ru-RU",
+};
+
 
 export default function PracticePage() {
   const router = useRouter();
@@ -49,6 +63,8 @@ export default function PracticePage() {
   const [transcriptStatus, setTranscriptStatus] = useState<string | null>(null);
   const [recorderSupported, setRecorderSupported] = useState(true);
   const [isRecording, setIsRecording] = useState(false);
+  const [realtimeBetaEnabled, setRealtimeBetaEnabled] = useState(false);
+  const [realtimeBetaLoaded, setRealtimeBetaLoaded] = useState(false);
   const [ttsEnabled, setTtsEnabled] = useState(false);
   const [ttsVoice, setTtsVoice] = useState("alloy");
   const [ttsVolume, setTtsVolume] = useState(0.8);
@@ -74,6 +90,15 @@ export default function PracticePage() {
   const audioPlaybackRef = useRef<HTMLAudioElement | null>(null);
   const ttsQueueRef = useRef<string[]>([]);
   const ttsPlayingRef = useRef(false);
+  const stopRealtimeCaptureRef = useRef<() => boolean>(() => false);
+
+  // Ajout du sélecteur de langue de réponse pour l'enregistrement
+  // Par défaut, langue cible (celle de l'exercice), mais possibilité de répondre en FR
+  const [responseLang, setResponseLang] = useState<string>(language === "Anglais" ? "en" : "fr");
+  const languageOptions = [
+    { code: "fr", label: "Français", flag: "🇫🇷" },
+    { code: "en", label: "Anglais", flag: "🇬🇧" },
+  ];
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
@@ -86,6 +111,23 @@ export default function PracticePage() {
     });
     return () => unsubscribe();
   }, [router]);
+
+  useEffect(() => {
+    setResponseLang(language === "Anglais" ? "en" : "fr");
+  }, [language]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem("bfzoom.practice.realtime-beta");
+    setRealtimeBetaEnabled(stored === "1");
+    setRealtimeBetaLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    if (!realtimeBetaLoaded) return;
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem("bfzoom.practice.realtime-beta", realtimeBetaEnabled ? "1" : "0");
+  }, [realtimeBetaEnabled, realtimeBetaLoaded]);
 
   useEffect(() => {
     if (typeof navigator === "undefined") return;
@@ -121,7 +163,8 @@ export default function PracticePage() {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [practiceLog.length, transcriptStatus, isThinking]);
 
-  const stopAudio = () => {
+  const stopAudio = useCallback(() => {
+    stopRealtimeCaptureRef.current();
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
       mediaRecorderRef.current.stop();
     }
@@ -141,17 +184,17 @@ export default function PracticePage() {
       audioPlaybackRef.current.pause();
       audioPlaybackRef.current.src = "";
     }
-  };
+  }, []);
 
-  const getAuthToken = async () => {
+  const getAuthToken = useCallback(async () => {
     const currentUser = auth.currentUser;
     if (!currentUser) {
       throw new Error("Utilisateur non connecté");
     }
     return getIdToken(currentUser, true);
-  };
+  }, []);
 
-  const addPracticeLog = (phrase: string, userText: string, feedback: string) => {
+  const addPracticeLog = useCallback((phrase: string, userText: string, feedback: string) => {
     const time = new Date().toLocaleTimeString("fr-FR", {
       hour: "2-digit",
       minute: "2-digit",
@@ -160,7 +203,7 @@ export default function PracticePage() {
       ...prev,
       { id: `log-${Date.now()}-${Math.random()}`, phrase, userText, feedback, time },
     ]);
-  };
+  }, []);
 
   const buildLessonPrompt = () => {
     const levelRules: Record<string, string> = {
@@ -185,7 +228,7 @@ export default function PracticePage() {
     ].join(" ");
   };
 
-  const buildFeedbackPrompt = (target: string, userText: string) => {
+  const buildFeedbackPrompt = useCallback((target: string, userText: string) => {
     return [
       "Tu es un coach de langue.",
       `Langue cible: ${language}. Niveau: ${level}.`,
@@ -194,7 +237,7 @@ export default function PracticePage() {
       "Donne un feedback bref en français (max 20 mots) + correction en langue cible.",
       'Format STRICT: {"feedback":"...","correction":"..."}',
     ].join(" ");
-  };
+  }, [language, level]);
 
   const buildTranslatePrompt = (text: string) => {
     return [
@@ -219,6 +262,71 @@ export default function PracticePage() {
       `Texte: ${text}`,
     ].join(" ");
   };
+
+  const handlePracticeTranscript = useCallback(
+    async (userText: string, captureSource: "recording" | "realtime" = "recording") => {
+      if (!lesson) return;
+      const phrase = lesson.phrases[currentPhraseIndex] ?? "";
+      const trimmed = userText.trim();
+      if (!trimmed) {
+        addPracticeLog(phrase, "", "Transcription vide, réessaie.");
+        return;
+      }
+
+      setTranscriptStatus(captureSource === "realtime" ? "Analyse du direct…" : "Transcription en cours…");
+      setIsThinking(true);
+      try {
+        const token = await getAuthToken();
+        const messages = [
+          { role: "system", content: buildFeedbackPrompt(phrase, trimmed) },
+          { role: "user", content: trimmed },
+        ];
+        const res = await fetch("/api/openai", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ messages }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data?.error || "Erreur feedback");
+        }
+        const content = data?.choices?.[0]?.message?.content ?? "";
+        const cleaned = content.replace(/```json|```/gi, "").trim();
+        let feedbackText = "Bon travail.";
+        try {
+          const parsed = JSON.parse(cleaned) as { feedback?: string; correction?: string };
+          feedbackText = `${parsed.feedback ?? "Bon travail."} ${parsed.correction ?? ""}`.trim();
+        } catch {
+          feedbackText = cleaned.trim();
+        }
+        addPracticeLog(phrase, trimmed, feedbackText);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Erreur feedback";
+        addPracticeLog(phrase, trimmed, `Erreur: ${message}`);
+      } finally {
+        setIsThinking(false);
+        setTranscriptStatus(null);
+      }
+    },
+    [addPracticeLog, buildFeedbackPrompt, currentPhraseIndex, getAuthToken, lesson]
+  );
+
+  const realtimeCapture = usePracticeRealtimeCapture({
+    lang: PRACTICE_SPEECH_LOCALES[language] ?? "fr-FR",
+    onFinalTranscript: (text) => {
+      void handlePracticeTranscript(text, "realtime");
+    },
+    onError: (message) => {
+      setTranscriptStatus(message);
+    },
+  });
+
+  useEffect(() => {
+    stopRealtimeCaptureRef.current = realtimeCapture.cancel;
+  }, [realtimeCapture.cancel]);
 
   const fetchTranslation = async (entryId: string, text: string) => {
     try {
@@ -496,7 +604,7 @@ export default function PracticePage() {
     }
   };
 
-  const startPushToTalk = async () => {
+  const startClassicPushToTalk = async () => {
     if (isRecording) return;
     setTranscriptStatus(null);
     setIsRecording(true);
@@ -525,8 +633,31 @@ export default function PracticePage() {
     }
   };
 
+  const startPushToTalk = async () => {
+    if (isRecording) return;
+    if (realtimeBetaEnabled) {
+      const startedRealtime = realtimeCapture.start();
+      if (startedRealtime) {
+        setIsRecording(true);
+        setTranscriptStatus("Ecoute en direct…");
+        return;
+      }
+      if (!realtimeCapture.supported) {
+        setRealtimeBetaEnabled(false);
+      }
+      setTranscriptStatus("Mode realtime indisponible, bascule en mode classique…");
+    }
+    await startClassicPushToTalk();
+  };
+
   const stopPushToTalk = async () => {
     if (!isRecording) return;
+    if (realtimeBetaEnabled && realtimeCapture.isListening) {
+      setIsRecording(false);
+      setTranscriptStatus("Analyse du direct…");
+      realtimeCapture.stop();
+      return;
+    }
     setIsRecording(false);
     const recorder = mediaRecorderRef.current;
     if (!recorder || recorder.state === "inactive") return;
@@ -538,45 +669,11 @@ export default function PracticePage() {
       const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
       try {
         const userText = await transcribeAudio(blob);
-        setTranscriptStatus(null);
-        const phrase = lesson.phrases[currentPhraseIndex] ?? "";
-        if (!userText) {
-          addPracticeLog(phrase, "", "Transcription vide, réessaie.");
-          return;
-        }
-        setIsThinking(true);
-        const token = await getAuthToken();
-        const messages = [
-          { role: "system", content: buildFeedbackPrompt(phrase, userText) },
-          { role: "user", content: userText },
-        ];
-        const res = await fetch("/api/openai", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({ messages }),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data?.error || "Erreur feedback");
-        }
-        const content = data?.choices?.[0]?.message?.content ?? "";
-        const cleaned = content.replace(/```json|```/gi, "").trim();
-        let feedbackText = "Bon travail.";
-        try {
-          const parsed = JSON.parse(cleaned) as { feedback?: string; correction?: string };
-          feedbackText = `${parsed.feedback ?? "Bon travail."} ${parsed.correction ?? ""}`.trim();
-        } catch {
-          feedbackText = cleaned.trim();
-        }
-        addPracticeLog(phrase, userText, feedbackText);
+        await handlePracticeTranscript(userText, "recording");
       } catch (error) {
         const message = error instanceof Error ? error.message : "Erreur feedback";
         addPracticeLog(lesson?.phrases[currentPhraseIndex] ?? "", "", `Erreur: ${message}`);
-      } finally {
-        setIsThinking(false);
+        setTranscriptStatus(null);
       }
     };
     recorder.stop();
@@ -595,7 +692,7 @@ export default function PracticePage() {
 
   useEffect(() => {
     return () => stopAudio();
-  }, []);
+  }, [stopAudio]);
 
   if (loading) {
     return (
@@ -888,6 +985,33 @@ export default function PracticePage() {
                   />
                 </div>
               </div>
+              <div className="mt-4 rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xs font-semibold text-sky-100">Realtime web beta</div>
+                    <p className="mt-1 text-[11px] text-slate-300">
+                      Utilise la reconnaissance vocale du navigateur. Si elle n’est pas
+                      disponible, le mode classique reste actif.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setRealtimeBetaEnabled((value) => !value)}
+                    className={`rounded-full px-3 py-2 text-[11px] font-semibold transition ${
+                      realtimeBetaEnabled
+                        ? "bg-sky-600 text-white"
+                        : "border border-sky-500/30 text-sky-100 hover:bg-sky-500/10"
+                    }`}
+                  >
+                    {realtimeBetaEnabled ? "Beta activée" : "Activer beta"}
+                  </button>
+                </div>
+                <div className="mt-2 text-[11px] text-slate-400">
+                  {realtimeCapture.supported
+                    ? "Reconnaissance vocale web disponible."
+                    : "Ce navigateur n'expose pas SpeechRecognition: fallback classique automatique."}
+                </div>
+              </div>
               <div className="mt-4 flex flex-wrap items-center gap-3">
                 <button
                   onClick={handleUnlockTts}
@@ -962,6 +1086,26 @@ export default function PracticePage() {
                   {lesson.phrases[currentPhraseIndex]}
                 </div>
                 <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px]">
+                  <div className="flex flex-col items-center mb-2 w-full">
+                    <label className="text-xs font-semibold text-sky-300 mb-1">Répondre en&nbsp;:</label>
+                    <div className="flex gap-2 w-full justify-center">
+                      {languageOptions.map(opt => (
+                        <button
+                          key={opt.code}
+                          type="button"
+                          className={`rounded-full px-3 py-1 text-xs font-semibold border transition-colors duration-150 flex items-center ${responseLang === opt.code ? 'bg-sky-700 text-white border-sky-400 shadow-lg scale-105' : 'bg-slate-800 text-slate-200 border-slate-600 hover:bg-sky-900/60'}`}
+                          onClick={() => setResponseLang(opt.code)}
+                          disabled={isRecording}
+                          aria-pressed={responseLang === opt.code}
+                          style={{ minWidth: 80 }}
+                        >
+                          <span className="mr-1">{opt.flag}</span>
+                          {opt.label}
+                          {responseLang === opt.code && <span className="ml-1">✔️</span>}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                   <button
                     onClick={() => playTtsText(lesson.phrases[currentPhraseIndex])}
                     className="rounded-md border border-white/10 px-2 py-1 text-slate-200 transition hover:border-white/30"
@@ -974,11 +1118,26 @@ export default function PracticePage() {
                     onPointerLeave={stopPushToTalk}
                     onPointerCancel={stopPushToTalk}
                     className={`rounded-md px-3 py-2 text-[11px] font-semibold text-white transition ${
-                      isRecording ? "bg-emerald-600" : "bg-slate-800 hover:bg-slate-700"
+                      realtimeBetaEnabled && realtimeCapture.supported
+                        ? "bg-sky-600 hover:bg-sky-700"
+                        : isRecording
+                          ? "bg-emerald-600"
+                          : "bg-slate-800 hover:bg-slate-700"
                     }`}
                   >
-                    {isRecording ? "Enregistrement..." : "Maintenir pour parler"}
+                    {realtimeBetaEnabled && realtimeCapture.supported
+                      ? isRecording
+                        ? "Ecoute en direct..."
+                        : "Maintenir pour parler"
+                      : isRecording
+                        ? "Enregistrement..."
+                        : "Maintenir pour parler"}
                   </button>
+                  {realtimeBetaEnabled && realtimeCapture.supported && realtimeCapture.transcript && (
+                    <div className="w-full rounded-lg border border-sky-500/20 bg-sky-500/10 px-3 py-2 text-[11px] text-sky-100">
+                      {realtimeCapture.transcript}
+                    </div>
+                  )}
                   <button
                     onClick={() => {
                       const key = `phrase-${currentPhraseIndex}`;

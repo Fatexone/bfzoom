@@ -592,6 +592,9 @@ export const fetchTtsAudio = async ({
   text,
   voice,
   format,
+  language,
+  locale,
+  instructions,
   pocketFlow,
   signal,
   timeoutMs = TTS_REQUEST_TIMEOUT_MS,
@@ -599,6 +602,9 @@ export const fetchTtsAudio = async ({
   text: string;
   voice: string;
   format: TtsAudioFormat;
+  language?: string;
+  locale?: string;
+  instructions?: string;
 }) => {
   let res: Response | undefined;
   try {
@@ -615,6 +621,9 @@ export const fetchTtsAudio = async ({
           text,
           voice,
           format,
+          language,
+          locale,
+          instructions,
         }),
       },
       {

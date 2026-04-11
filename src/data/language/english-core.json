@@ -1,0 +1,151 @@
+{
+  "language": "en",
+  "irregularVerbs": [
+    {
+      "base": "be",
+      "past": "was/were",
+      "participle": "been",
+      "example": "I was late yesterday."
+    },
+    {
+      "base": "go",
+      "past": "went",
+      "participle": "gone",
+      "example": "She went to Paris last year."
+    },
+    {
+      "base": "get",
+      "past": "got",
+      "participle": "got/gotten",
+      "example": "I got your message."
+    },
+    {
+      "base": "make",
+      "past": "made",
+      "participle": "made",
+      "example": "They made a quick decision."
+    },
+    {
+      "base": "do",
+      "past": "did",
+      "participle": "done",
+      "example": "He did his homework."
+    },
+    {
+      "base": "have",
+      "past": "had",
+      "participle": "had",
+      "example": "We had a great meeting."
+    },
+    {
+      "base": "take",
+      "past": "took",
+      "participle": "taken",
+      "example": "I took the train."
+    },
+    {
+      "base": "see",
+      "past": "saw",
+      "participle": "seen",
+      "example": "Have you seen this movie?"
+    },
+    {
+      "base": "come",
+      "past": "came",
+      "participle": "come",
+      "example": "He came early today."
+    },
+    {
+      "base": "know",
+      "past": "knew",
+      "participle": "known",
+      "example": "I knew the answer."
+    },
+    {
+      "base": "think",
+      "past": "thought",
+      "participle": "thought",
+      "example": "She thought it was a good idea."
+    },
+    {
+      "base": "say",
+      "past": "said",
+      "participle": "said",
+      "example": "He said he was busy."
+    }
+  ],
+  "grammarRules": [
+    {
+      "id": "en-present-simple-3rd",
+      "title": "Present simple: 3rd person -s",
+      "when": "habits, routines, facts",
+      "pattern": "He/She/It + verb+s",
+      "example": "She works in London."
+    },
+    {
+      "id": "en-past-simple",
+      "title": "Past simple",
+      "when": "finished action in the past",
+      "pattern": "Subject + past form",
+      "example": "I went there yesterday."
+    },
+    {
+      "id": "en-present-perfect",
+      "title": "Present perfect",
+      "when": "experience or link with now",
+      "pattern": "have/has + past participle",
+      "example": "I have already finished."
+    },
+    {
+      "id": "en-question-do",
+      "title": "Questions with do/does",
+      "when": "present simple questions",
+      "pattern": "Do/Does + subject + base verb",
+      "example": "Do you work here?"
+    },
+    {
+      "id": "en-modals-might-would",
+      "title": "Modals for nuance",
+      "when": "polite or uncertain statements",
+      "pattern": "might / would + base verb",
+      "example": "I might join later."
+    },
+    {
+      "id": "en-linkers-because-so",
+      "title": "Connectors",
+      "when": "justify and chain ideas",
+      "pattern": "because / so / however",
+      "example": "I stayed home because it was late."
+    }
+  ],
+  "miniLessons": [
+    {
+      "id": "EN-A1-GREETING",
+      "level": "A1",
+      "title": "Greeting and follow-up",
+      "goal": "answer briefly and ask one question back",
+      "template": "I'm good, thanks. How about you?"
+    },
+    {
+      "id": "EN-A2-PAST-EXPERIENCE",
+      "level": "A2",
+      "title": "Talk about past experience",
+      "goal": "use one past verb + one detail",
+      "template": "I went there last year, and it was great."
+    },
+    {
+      "id": "EN-B1-OPINION",
+      "level": "B1",
+      "title": "Give an opinion with reason",
+      "goal": "state opinion + because-clause",
+      "template": "I think it's useful because it saves time."
+    },
+    {
+      "id": "EN-B1-RELANCE",
+      "level": "B1",
+      "title": "Keep conversation moving",
+      "goal": "respond then ask a relevant follow-up",
+      "template": "That makes sense. What do you usually do in that case?"
+    }
+  ]
+}

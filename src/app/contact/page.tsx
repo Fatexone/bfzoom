@@ -1,8 +1,25 @@
-"use client";
-
 import Link from "next/link";
 
-export default function ContactPage() {
+type ContactPageProps = {
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
+};
+
+export default async function ContactPage({ searchParams }: ContactPageProps) {
+  const resolvedSearchParams = searchParams ? await searchParams : undefined;
+  const rawMobileReturn = resolvedSearchParams?.mobileReturn;
+  const mobileReturn = (
+    Array.isArray(rawMobileReturn) ? rawMobileReturn[0] : rawMobileReturn || ""
+  )
+    .trim()
+    .toLowerCase();
+  const appReturnHref =
+    mobileReturn === "home" ||
+    mobileReturn === "dashboard" ||
+    mobileReturn === "conference" ||
+    mobileReturn === "interpreter"
+      ? `bfzoom://${mobileReturn}`
+      : "/videoconference";
+
   return (
     <div className="min-h-screen bg-linear-to-b from-blue-50 via-sky-50 to-sky-100 text-slate-900">
       <header className="sticky top-0 z-40 w-full bg-white/90 backdrop-blur border-b border-slate-200">
@@ -35,8 +52,8 @@ export default function ContactPage() {
           <div className="space-y-4 text-sm sm:text-base text-slate-700">
             <div className="flex items-start gap-3">
               <span className="font-semibold text-slate-900">Email</span>
-              <a href="mailto:support@bfzoom.live" className="text-sky-700 hover:underline">
-                support@bfzoom.live
+              <a href="mailto:support@bfzoom.fr" className="text-sky-700 hover:underline">
+                support@bfzoom.fr
               </a>
             </div>
             <div className="flex items-start gap-3">
@@ -51,10 +68,10 @@ export default function ContactPage() {
 
           <div className="mt-8">
             <Link
-              href="/videoconference"
+              href={appReturnHref}
               className="inline-flex items-center justify-center px-4 py-2 rounded-xl bg-sky-600 text-white text-sm sm:text-base font-medium hover:bg-sky-700 transition-colors"
             >
-              Retour à la visioconférence
+              Retour à BFZoom
             </Link>
           </div>
         </div>

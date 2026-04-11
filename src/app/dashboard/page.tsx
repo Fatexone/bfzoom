@@ -336,6 +336,18 @@ export default function Dashboard() {
   );
 
   const emailLabel = user?.email ?? (locale === "fr" ? "Adresse inconnue" : "Unknown address");
+  const dashboardDisplayName = useMemo(() => {
+    const localPart = emailLabel.split("@")[0]?.trim() || "";
+    if (!localPart) return emailLabel;
+
+    const formatted = localPart
+      .split(/[._-]+/)
+      .filter(Boolean)
+      .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+      .join(" ");
+
+    return formatted || localPart;
+  }, [emailLabel]);
   const hasCredits = (tokenBalance ?? 0) > 0;
   const isPremiumAccount = statusTag === "Premium";
 
@@ -422,7 +434,7 @@ export default function Dashboard() {
         >
           <p className="text-xs uppercase tracking-[0.22em] text-sky-200/90">{t.labels.dashboard}</p>
           <h1 className="mt-2 text-3xl font-extrabold tracking-tight text-white sm:text-4xl">
-            {t.labels.welcome}, {emailLabel.split("@")[0]} 👋
+            {t.labels.welcome}, {dashboardDisplayName}
           </h1>
           <p className="mt-2 text-sm text-gray-300 sm:text-base">{t.labels.subtitle}</p>
         </motion.section>

@@ -1,15 +1,11 @@
 import { NextResponse } from "next/server";
 import { Resend } from "resend";
 import { createOtp } from "@/lib/otpStore";
+import { getAppReviewOtpCode, isAppReviewEmail } from "@/lib/reviewAccess";
 
 export const runtime = "nodejs";
 
 export async function POST(req: Request) {
-  const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) {
-    return NextResponse.json({ error: "RESEND_API_KEY missing" }, { status: 500 });
-  }
-
   let body: { email?: string };
   try {
     body = (await req.json()) as { email?: string };
@@ -20,6 +16,15 @@ export async function POST(req: Request) {
   const email = body.email?.trim().toLowerCase();
   if (!email) {
     return NextResponse.json({ error: "Email missing" }, { status: 400 });
+  }
+
+  if (isAppReviewEmail(email) && getAppReviewOtpCode()) {
+    return NextResponse.json({ ok: true, bypass: true, expiresAt: null });
+  }
+
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    return NextResponse.json({ error: "RESEND_API_KEY missing" }, { status: 500 });
   }
 
   const { code, expiresAt } = await createOtp(email);

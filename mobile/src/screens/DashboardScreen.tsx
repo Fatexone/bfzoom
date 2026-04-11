@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import type { User } from "firebase/auth";
 import { doc, onSnapshot } from "firebase/firestore";
 import Constants from "expo-constants";
-import { LanguageSwitcher, useI18n } from "../i18n";
+import { useI18n } from "../i18n";
 import { env } from "../config/env";
 import { useTranslationCredits } from "../hooks/useTranslationCredits";
 import { db } from "../services/firebase";
@@ -37,6 +37,8 @@ type PackPresentation = {
 
 type DashboardAccordionKey = "pocket" | "video" | "minutes" | "account";
 
+const MOBILE_BRAND_ICON = require("../../assets/icon.png");
+
 const toSafeString = (value: unknown) => (typeof value === "string" ? value.trim() : "");
 
 const logIap = (event: string, details?: Record<string, unknown>) => {
@@ -46,6 +48,21 @@ const logIap = (event: string, details?: Record<string, unknown>) => {
         .join(" ")}`
     : "";
   console.log(`[BFZoom][IAP] ${event}${suffix}`);
+};
+
+const matchesMessage = (message: string, pattern: RegExp) => pattern.test(message.toLowerCase());
+const isPurchaseCanceledMessage = (message: string) =>
+  matchesMessage(message, /(purchase canceled|achat annule|purchase did not start)/i);
+const isPurchasePendingMessage = (message: string) =>
+  matchesMessage(message, /(pending approval|en attente d'approbation|deferred)/i);
+const isNativeIapBuildMessage = (message: string) =>
+  matchesMessage(message, /(storekit|iap ios natif indisponible|this build|purchase listener unavailable)/i);
+const isStoreAccountMessage = (message: string) =>
+  matchesMessage(message, /(not available.*app store|unavailable.*app store|compte app store|pack de traduction n'est pas disponible)/i);
+
+type DashboardNotice = {
+  title: string;
+  body: string;
 };
 
 type DashboardAccordionProps = {
@@ -103,12 +120,11 @@ export function DashboardScreen({
               `Achat deja traite. Solde estime: ${totalMinutes} min.`,
             purchaseConfirmed: (minutesAdded: number, totalMinutes: number) =>
               `Achat confirme: +${minutesAdded} min. Solde estime: ${totalMinutes} min.`,
-            heroKicker: "BFZOOM IOS",
             welcome: (name: string) => `Bienvenue, ${name}`,
             heroSubtitle:
-              "Lance une room, partage le lien et utilise tes minutes de traduction depuis cet ecran.",
+              "Retrouve ici tes deux usages BFZoom: la visioconference pour parler au monde et Pocket Interpreter pour echanger sans barriere en face-a-face.",
             heroSubtitleGuest:
-              "Achete tes packs iPhone sans creer de compte BFZoom. Cree un compte plus tard pour synchroniser tes minutes sur plusieurs appareils.",
+              "Depuis cet ecran, tu retrouves la visioconference BFZoom, Pocket Interpreter et tes minutes de traduction. Cree un compte quand tu veux pour synchroniser ton usage sur plusieurs appareils.",
             pocketTitle: "Pocket Interpreter",
             pocketSummary:
               "Mode face-a-face sur iPhone: maintiens pour parler, BFZoom traduit et lit la phrase a haute voix.",
@@ -126,15 +142,24 @@ export function DashboardScreen({
             premium: "Premium",
             standard: "Standard",
             guest: "Invite",
-            creditsError: (message: string) => `Erreur credits: ${message}`,
+            creditsIssueTitle: "Minutes temporairement indisponibles",
+            creditsIssueBody:
+              "Impossible de verifier ton solde pour le moment. Reessaie dans quelques secondes.",
             loadingOffers: "Chargement des offres iOS...",
             buyInIos: "Acheter ce pack",
             finalApplePriceHint:
               "Le prix final et la devise sont confirmes par Apple sur l'ecran d'achat.",
+            debugCatalogTitle: "Achat iPhone non testable sur cette build",
+            debugCatalogBody:
+              "Cette build debug charge bien le catalogue BFZoom, mais pas les vrais produits App Store. Pour acheter sur iPhone, il faut une build signee avec le bundle officiel BFZoom ou une build TestFlight.",
+            packUnavailableShort: "TestFlight requis",
+            packUnavailableHint:
+              "Achat bloque sur cette build debug: produit App Store non charge.",
             buildLabel: (version: string, build: string | null) =>
-              build ? `BFZoom iOS ${version} (${build})` : `BFZoom iOS ${version}`,
+              build ? `Version ${version} · build ${build}` : `Version ${version}`,
+            brandSignature: "by Beyond Frontiers",
             iapUnavailableBuild:
-              "Achats in-app indisponibles sur ce build. Utilise une build iOS avec StoreKit actif.",
+              "Achats in-app indisponibles sur cette build debug. Utilise le bundle officiel BFZoom ou TestFlight.",
             packMinutes: (minutes: number) => `${minutes} min de traduction`,
             packStarterBadge: "Decouverte",
             packStarterSummary: "Pour tester BFZoom ou couvrir un appel ponctuel.",
@@ -146,6 +171,18 @@ export function DashboardScreen({
               "Ce pack de traduction n'est pas disponible avec ce compte App Store.",
             unavailableCatalog:
               "Les packs de traduction ne sont pas disponibles pour ce compte App Store.",
+            purchasePendingTitle: "Achat en attente",
+            purchasePendingBody:
+              "Apple attend encore une validation. Tu peux verifier ton achat dans quelques instants.",
+            purchaseUnavailableTitle: "Achats iPhone indisponibles",
+            purchaseUnavailableBody:
+              "Les achats integres ne sont pas actifs sur cette build. Il faut tester une build iOS avec StoreKit.",
+            storeAccountTitle: "Pack indisponible",
+            storeAccountBody:
+              "Ce pack n'est pas accessible avec le compte App Store actuellement connecte.",
+            purchaseIssueTitle: "Achat non finalise",
+            purchaseIssueBody:
+              "La demande d'achat n'a pas pu aboutir. Reessaie dans un instant.",
             accountTitle: "Compte",
             unknownEmail: "Adresse inconnue",
             guestEmail: "Aucun email partage pour l'instant",
@@ -169,12 +206,11 @@ export function DashboardScreen({
               `Purchase already processed. Estimated balance: ${totalMinutes} min.`,
             purchaseConfirmed: (minutesAdded: number, totalMinutes: number) =>
               `Purchase confirmed: +${minutesAdded} min. Estimated balance: ${totalMinutes} min.`,
-            heroKicker: "BFZOOM IOS",
             welcome: (name: string) => `Welcome, ${name}`,
             heroSubtitle:
-              "Launch a room, share the link and use your translation minutes from this screen.",
+              "This is your BFZoom hub: multilingual video calls to speak to the world, and Pocket Interpreter for barrier-free face-to-face moments.",
             heroSubtitleGuest:
-              "Buy iPhone packs without creating a BFZoom account. Create one later to sync your minutes across devices.",
+              "From this screen, you access BFZoom video calls, Pocket Interpreter and your translation minutes. Create an account whenever you want to sync your usage across devices.",
             pocketTitle: "Pocket Interpreter",
             pocketSummary:
               "Face-to-face mode on iPhone: hold to talk, BFZoom translates and reads the sentence aloud.",
@@ -192,15 +228,24 @@ export function DashboardScreen({
             premium: "Premium",
             standard: "Standard",
             guest: "Guest",
-            creditsError: (message: string) => `Credits error: ${message}`,
+            creditsIssueTitle: "Minutes temporarily unavailable",
+            creditsIssueBody:
+              "Your balance could not be checked right now. Try again in a few seconds.",
             loadingOffers: "Loading iOS offers...",
             buyInIos: "Buy this pack",
             finalApplePriceHint:
               "Apple confirms the final local price and currency on the purchase sheet.",
+            debugCatalogTitle: "iPhone purchase unavailable on this build",
+            debugCatalogBody:
+              "This debug build loads the BFZoom catalog but not the live App Store products. To purchase on iPhone, use a build signed with the official BFZoom bundle ID or TestFlight.",
+            packUnavailableShort: "TestFlight required",
+            packUnavailableHint:
+              "Purchase blocked on this debug build: App Store product not loaded.",
             buildLabel: (version: string, build: string | null) =>
-              build ? `BFZoom iOS ${version} (${build})` : `BFZoom iOS ${version}`,
+              build ? `Version ${version} · build ${build}` : `Version ${version}`,
+            brandSignature: "by Beyond Frontiers",
             iapUnavailableBuild:
-              "In-app purchases are unavailable in this build. Use an iOS build with StoreKit enabled.",
+              "In-app purchases are unavailable in this debug build. Use the official BFZoom bundle or TestFlight.",
             packMinutes: (minutes: number) => `${minutes} translation min`,
             packStarterBadge: "Starter",
             packStarterSummary: "Best for trying BFZoom or covering a short call.",
@@ -212,6 +257,18 @@ export function DashboardScreen({
               "This translation pack is not available on the current App Store account.",
             unavailableCatalog:
               "Translation packs are unavailable on this App Store account right now.",
+            purchasePendingTitle: "Purchase pending",
+            purchasePendingBody:
+              "Apple is still waiting for approval. Check your purchase status again in a moment.",
+            purchaseUnavailableTitle: "iPhone purchases unavailable",
+            purchaseUnavailableBody:
+              "In-app purchases are not active in this build. Test with an iOS build that includes StoreKit.",
+            storeAccountTitle: "Pack unavailable",
+            storeAccountBody:
+              "This pack is not available for the App Store account currently signed in on the device.",
+            purchaseIssueTitle: "Purchase not completed",
+            purchaseIssueBody:
+              "The purchase request could not be completed. Please try again shortly.",
             accountTitle: "Account",
             unknownEmail: "Unknown email",
             guestEmail: "No email shared yet",
@@ -243,7 +300,7 @@ export function DashboardScreen({
       }
     );
     return () => unsubscribe();
-  }, [user.uid]);
+  }, [user]);
 
   useEffect(() => {
     let cancelled = false;
@@ -258,7 +315,7 @@ export function DashboardScreen({
     return () => {
       cancelled = true;
     };
-  }, [user.uid]);
+  }, [user]);
 
   const {
     credits,
@@ -312,6 +369,69 @@ export function DashboardScreen({
     () => (iapNativeReady ? iapPacks.filter((pack) => pack.hasNativeProduct) : []),
     [iapNativeReady, iapPacks]
   );
+
+  const showDebugCatalogFallback =
+    __DEV__ && iapNativeReady && availableIapPacks.length === 0 && iapPacks.length > 0;
+
+  const displayedIapPacks = useMemo(() => {
+    if (availableIapPacks.length > 0) return availableIapPacks;
+    if (showDebugCatalogFallback) return iapPacks;
+    return [];
+  }, [availableIapPacks, iapPacks, showDebugCatalogFallback]);
+
+  const creditsNotice = useMemo<DashboardNotice | null>(() => {
+    const message = toSafeString(creditsError);
+    if (!message) return null;
+    return {
+      title: ui.creditsIssueTitle,
+      body: ui.creditsIssueBody,
+    };
+  }, [creditsError, ui.creditsIssueBody, ui.creditsIssueTitle]);
+
+  const iapNotice = useMemo<DashboardNotice | null>(() => {
+    const message = toSafeString(iapError);
+    if (!message || isPurchaseCanceledMessage(message)) return null;
+    if (isPurchasePendingMessage(message)) {
+      return {
+        title: ui.purchasePendingTitle,
+        body: ui.purchasePendingBody,
+      };
+    }
+    if (isNativeIapBuildMessage(message)) {
+      return {
+        title: ui.purchaseUnavailableTitle,
+        body: ui.purchaseUnavailableBody,
+      };
+    }
+    if (isStoreAccountMessage(message)) {
+      return {
+        title: ui.storeAccountTitle,
+        body: ui.storeAccountBody,
+      };
+    }
+    return {
+      title: ui.purchaseIssueTitle,
+      body: ui.purchaseIssueBody,
+    };
+  }, [
+    iapError,
+    ui.purchaseIssueBody,
+    ui.purchaseIssueTitle,
+    ui.purchasePendingBody,
+    ui.purchasePendingTitle,
+    ui.purchaseUnavailableBody,
+    ui.purchaseUnavailableTitle,
+    ui.storeAccountBody,
+    ui.storeAccountTitle,
+  ]);
+
+  const catalogNotice = useMemo<DashboardNotice | null>(() => {
+    if (!showDebugCatalogFallback) return null;
+    return {
+      title: ui.debugCatalogTitle,
+      body: ui.debugCatalogBody,
+    };
+  }, [showDebugCatalogFallback, ui.debugCatalogBody, ui.debugCatalogTitle]);
 
   const describePack = (minutes: number): PackPresentation => {
     if (minutes >= 600) {
@@ -384,7 +504,7 @@ export function DashboardScreen({
     return () => {
       cancelled = true;
     };
-  }, [ui.apiMissing, ui.iapLoadError, user.uid]);
+  }, [ui.apiMissing, ui.iapLoadError, user]);
 
   useEffect(() => {
     if (iapLoading) return;
@@ -462,14 +582,17 @@ export function DashboardScreen({
     <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
       <View style={styles.heroCard}>
         <View style={styles.heroHeader}>
-          <View style={styles.heroTextBlock}>
-            <Text style={styles.kicker}>{ui.heroKicker}</Text>
-            <Text style={styles.title}>{ui.welcome(displayName)}</Text>
-            <Text style={styles.buildText}>{buildLabel}</Text>
+          <View style={styles.brandRow}>
+            <Image source={MOBILE_BRAND_ICON} style={styles.brandLogo} resizeMode="cover" alt="" />
+            <View style={styles.heroTextBlock}>
+              <Text style={styles.brand}>BFZoom</Text>
+              <Text style={styles.brandHint}>{ui.brandSignature}</Text>
+            </View>
           </View>
-          <LanguageSwitcher compact />
         </View>
-            <Text style={styles.subtitle}>{isGuestMode ? ui.heroSubtitleGuest : ui.heroSubtitle}</Text>
+        <Text style={styles.title}>{ui.welcome(displayName)}</Text>
+        <Text style={styles.subtitle}>{isGuestMode ? ui.heroSubtitleGuest : ui.heroSubtitle}</Text>
+        <Text style={styles.buildText}>{buildLabel}</Text>
         <View style={styles.statusBanner}>
           <Text style={styles.statusBannerText}>{translationStatusLabel}</Text>
         </View>
@@ -520,7 +643,12 @@ export function DashboardScreen({
             {ui.account(isGuestMode ? ui.guest : isPremiumPlan ? ui.premium : ui.standard)}
           </Text>
         </View>
-        {creditsError ? <Text style={styles.errorText}>{ui.creditsError(creditsError)}</Text> : null}
+        {creditsNotice ? (
+          <View style={styles.noticeCard}>
+            <Text style={styles.noticeTitle}>{creditsNotice.title}</Text>
+            <Text style={styles.noticeBody}>{creditsNotice.body}</Text>
+          </View>
+        ) : null}
         {isGuestMode ? (
           <Pressable style={[styles.actionButton, styles.secondaryButton]} onPress={onOpenLogin}>
             <Text style={styles.secondaryButtonText}>{ui.createAccount}</Text>
@@ -535,8 +663,16 @@ export function DashboardScreen({
           </View>
         ) : null}
 
-        {availableIapPacks.map((pack) => {
-          const disabled = Boolean(iapBusyProductId) || !iapNativeReady || !pack.hasNativeProduct;
+        {catalogNotice ? (
+          <View style={styles.noticeCard}>
+            <Text style={styles.noticeTitle}>{catalogNotice.title}</Text>
+            <Text style={styles.noticeBody}>{catalogNotice.body}</Text>
+          </View>
+        ) : null}
+
+        {displayedIapPacks.map((pack) => {
+          const canPurchase = iapNativeReady && pack.hasNativeProduct;
+          const disabled = Boolean(iapBusyProductId) || !canPurchase;
           const presentation = describePack(pack.minutes);
           return (
             <Pressable
@@ -564,6 +700,10 @@ export function DashboardScreen({
               <View style={styles.packMeta}>
                 <Text style={styles.packTitle}>{pack.title || ui.packMinutes(pack.minutes)}</Text>
                 <Text style={styles.packSummary}>{pack.description || presentation.summary}</Text>
+                <Text style={styles.packPrice}>{pack.price}</Text>
+                {!canPurchase ? (
+                  <Text style={styles.packHint}>{ui.packUnavailableHint}</Text>
+                ) : null}
               </View>
               <View
                 style={[styles.actionButton, styles.actionPrimary, disabled && styles.buttonDisabled]}
@@ -572,7 +712,9 @@ export function DashboardScreen({
                 {iapBusyProductId === pack.productId ? (
                   <ActivityIndicator size="small" color="#ffffff" />
                 ) : (
-                  <Text style={styles.actionButtonText}>{ui.buyInIos}</Text>
+                  <Text style={styles.actionButtonText}>
+                    {canPurchase ? ui.buyInIos : ui.packUnavailableShort}
+                  </Text>
                 )}
               </View>
             </Pressable>
@@ -582,11 +724,16 @@ export function DashboardScreen({
         {!iapNativeReady ? (
           <Text style={styles.infoText}>{ui.iapUnavailableBuild}</Text>
         ) : null}
-        {iapNativeReady && !iapLoading && availableIapPacks.length === 0 ? (
+        {iapNativeReady && !iapLoading && displayedIapPacks.length === 0 ? (
           <Text style={styles.infoText}>{ui.unavailableCatalog}</Text>
         ) : null}
         {iapInfo ? <Text style={styles.successText}>{iapInfo}</Text> : null}
-        {iapError ? <Text style={styles.errorText}>{iapError}</Text> : null}
+        {iapNotice ? (
+          <View style={[styles.noticeCard, styles.noticeCardWarm]}>
+            <Text style={styles.noticeTitle}>{iapNotice.title}</Text>
+            <Text style={styles.noticeBody}>{iapNotice.body}</Text>
+          </View>
+        ) : null}
       </DashboardAccordion>
 
       <DashboardAccordion
@@ -629,20 +776,32 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   heroHeader: {
-    flexDirection: "row",
     alignItems: "flex-start",
-    justifyContent: "space-between",
-    gap: 12,
   },
   heroTextBlock: {
-    flex: 1,
     gap: 4,
   },
-  kicker: {
+  brandRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  brandLogo: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+  },
+  brand: {
+    color: "#f8fafc",
+    fontSize: 30,
+    fontWeight: "900",
+    letterSpacing: 0.2,
+  },
+  brandHint: {
     color: "#38bdf8",
-    fontSize: 11,
-    fontWeight: "800",
-    letterSpacing: 1,
+    fontSize: 12,
+    fontWeight: "700",
+    letterSpacing: 0.4,
   },
   title: {
     color: "#e2e8f0",
@@ -829,6 +988,16 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 17,
   },
+  packPrice: {
+    color: "#7dd3fc",
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  packHint: {
+    color: "#94a3b8",
+    fontSize: 11,
+    lineHeight: 16,
+  },
   buttonDisabled: {
     opacity: 0.55,
   },
@@ -838,11 +1007,29 @@ const styles = StyleSheet.create({
     lineHeight: 17,
     fontWeight: "700",
   },
-  errorText: {
-    color: "#fca5a5",
+  noticeCard: {
+    borderWidth: 1,
+    borderColor: "#1e3a8a",
+    borderRadius: 12,
+    backgroundColor: "#0f172a",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 4,
+  },
+  noticeCardWarm: {
+    borderColor: "#7c2d12",
+    backgroundColor: "#1c1917",
+  },
+  noticeTitle: {
+    color: "#e2e8f0",
     fontSize: 12,
     lineHeight: 17,
-    fontWeight: "700",
+    fontWeight: "800",
+  },
+  noticeBody: {
+    color: "#cbd5e1",
+    fontSize: 12,
+    lineHeight: 17,
   },
   logoutButton: {
     borderRadius: 12,

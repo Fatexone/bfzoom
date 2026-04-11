@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { doc, deleteField, updateDoc } from "firebase/firestore";
+import { doc, deleteField, updateDoc, collection, addDoc } from "firebase/firestore";
 import { db } from "@/lib/firebaseConfig";
 import type { Chat } from "@/types/Chat";
 import type { Contact } from "@/types/Contact";
@@ -85,6 +85,25 @@ export default function ChatSidebar({
   onMarkMissedRead?: (callIds: string[]) => void;
 }) {
   const [openQuickMenu, setOpenQuickMenu] = useState<string | null>(null);
+  const [addingContactId, setAddingContactId] = useState<string | null>(null);
+    // Ajout d'un contact Firestore depuis une discussion
+    const addContactFromDiscussion = async (contact: Contact) => {
+      if (!currentUserId || !contact.id) return;
+      setAddingContactId(contact.id);
+      try {
+        const contactRef = collection(db, `contacts/${currentUserId}/list`);
+        await addDoc(contactRef, {
+          uid: contact.id,
+          email: contact.email,
+          addedAt: new Date(),
+        });
+        alert("Contact ajouté !");
+      } catch (e) {
+        alert("Erreur lors de l'ajout du contact.");
+      } finally {
+        setAddingContactId(null);
+      }
+    };
   const [showMissedCalls, setShowMissedCalls] = useState(false);
 
   const [editingContactId, setEditingContactId] = useState<string | null>(null);
@@ -533,6 +552,8 @@ export default function ChatSidebar({
                 contact.name ||
                 contact.email ||
                 "Contact";
+              // Affiche la source
+              const isFromDiscussion = (contact as any).fromDiscussion;
               return (
                 <div key={contact.id} className="space-y-2">
                   <div
@@ -554,32 +575,51 @@ export default function ChatSidebar({
                       <p className="text-xs text-gray-300 truncate">
                         {contact.email}
                       </p>
+                      <span className={`text-[11px] ${isFromDiscussion ? "text-amber-300" : "text-emerald-300"}`}>
+                        {isFromDiscussion ? "Discussion" : "Contact"}
+                      </span>
                     </div>
                     <div className="flex items-center gap-1.5">
-                      <button
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          openAliasEditor(contact);
-                        }}
-                        className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] font-semibold text-white transition hover:bg-white/10"
-                      >
-                        ✏️
-                      </button>
-                      <button
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void removeContact(contact);
-                        }}
-                        disabled={deletingContactId === (contact.contactDocId ?? contact.id)}
-                        className="rounded-full border border-red-400/40 bg-red-500/10 px-3 py-1 text-[10px] font-semibold text-red-100 transition hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        {deletingContactId === (contact.contactDocId ?? contact.id)
-                          ? "..."
-                          : "🗑️"}
-                      </button>
+                      {!isFromDiscussion && (
+                        <button
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openAliasEditor(contact);
+                          }}
+                          className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] font-semibold text-white transition hover:bg-white/10"
+                        >
+                          ✏️
+                        </button>
+                      )}
+                      {!isFromDiscussion && (
+                        <button
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void removeContact(contact);
+                          }}
+                          disabled={deletingContactId === (contact.contactDocId ?? contact.id)}
+                          className="rounded-full border border-red-400/40 bg-red-500/10 px-3 py-1 text-[10px] font-semibold text-red-100 transition hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {deletingContactId === (contact.contactDocId ?? contact.id)
+                            ? "..."
+                            : "🗑️"}
+                        </button>
+                      )}
+                      {isFromDiscussion && (
+                        <button
+                          onClick={async (event) => {
+                            event.stopPropagation();
+                            await addContactFromDiscussion(contact);
+                          }}
+                          disabled={addingContactId === contact.id}
+                          className="rounded-full border border-emerald-400/40 bg-emerald-500/10 px-3 py-1 text-[10px] font-semibold text-emerald-100 transition hover:bg-emerald-500/20 disabled:opacity-60"
+                        >
+                          {addingContactId === contact.id ? "Ajout..." : "➕ Ajouter comme contact"}
+                        </button>
+                      )}
                     </div>
                   </div>
-                  {editingContactId === (contact.contactDocId ?? contact.id) && (
+                  {editingContactId === (contact.contactDocId ?? contact.id) && !isFromDiscussion && (
                     <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-gray-100">
                       <label className="text-[11px] text-gray-400">
                         Alias personnel

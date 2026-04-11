@@ -13,12 +13,15 @@ import { LandingScreen } from "./src/screens/LandingScreen";
 import { LoginOtpScreen } from "./src/screens/LoginOtpScreen";
 import { PocketInterpreterScreen } from "./src/screens/PocketInterpreterScreen";
 import type { MobileCallSession } from "./src/types/session";
+import { useAdaptiveLayout } from "./src/utils/layout";
+import { extractLivekitInviteId } from "./src/utils/livekitInviteLinks";
 
 type ActiveModule = "home" | "login" | "dashboard" | "conference" | "interpreter";
 type AppTargetModule = Exclude<ActiveModule, "login">;
 
 function AppShell() {
   const { language } = useI18n();
+  const { isTabletLayout, isLargeTabletLayout } = useAdaptiveLayout();
   const [session, setSession] = useState<MobileCallSession | null>(null);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [activeModule, setActiveModule] = useState<ActiveModule>("home");
@@ -192,37 +195,7 @@ function AppShell() {
       }
     };
 
-    const parseJoinTokenFromUrl = (value: string) => {
-      const raw = value.trim();
-      if (!raw) return "";
-
-      try {
-        const url = new URL(raw);
-        const inviteQuery = (url.searchParams.get("invite") || "").trim();
-        if (inviteQuery) return inviteQuery;
-
-        const host = url.hostname.trim().toLowerCase();
-        const segments = url.pathname.split("/").filter(Boolean);
-        if (host === "join" && segments[0]) {
-          return decodeURIComponent(segments[0]);
-        }
-        const joinIndex = segments.findIndex((segment) => segment === "join");
-        if (joinIndex >= 0 && segments[joinIndex + 1]) {
-          return decodeURIComponent(segments[joinIndex + 1]);
-        }
-      } catch {
-        const match = raw.match(/\/join\/([^/?#]+)/i);
-        if (match?.[1]) {
-          return decodeURIComponent(match[1]);
-        }
-        const inviteQueryMatch = raw.match(/[?&]invite=([^&#]+)/i);
-        if (inviteQueryMatch?.[1]) {
-          return decodeURIComponent(inviteQueryMatch[1]);
-        }
-      }
-
-      return "";
-    };
+    const parseJoinTokenFromUrl = (value: string) => extractLivekitInviteId(value);
 
     const handleDeepLink = (url: string) => {
       const joinToken = parseJoinTokenFromUrl(url);
@@ -274,7 +247,6 @@ function AppShell() {
     if (!hasRegisteredUser) {
       return [
         { id: "home" as const, label: language === "fr" ? "Accueil" : "Home" },
-        { id: "dashboard" as const, label: language === "fr" ? "Packs" : "Packs" },
         { id: "login" as const, label: language === "fr" ? "Connexion" : "Sign in" },
       ];
     }
@@ -287,6 +259,11 @@ function AppShell() {
     ];
   }, [hasRegisteredUser, language]);
 
+  const showTabBar =
+    hasRegisteredUser || (activeModule !== "home" && activeModule !== "login");
+  const shellMaxWidth = isLargeTabletLayout ? 1180 : isTabletLayout ? 980 : undefined;
+  const tabBarMaxWidth = isTabletLayout ? 760 : undefined;
+
   const renderModule = () => {
     switch (activeModule) {
       case "home":
@@ -297,20 +274,6 @@ function AppShell() {
               setLoginTargetModule("dashboard");
               setActiveModule("login");
             }}
-            onOpenDashboard={() => {
-              console.log("[BFZoom][nav] landing_onOpenDashboard");
-              setActiveModule("dashboard");
-            }}
-            onOpenConference={() => {
-              console.log(`[BFZoom][nav] landing_onOpenConference hasUser=${Boolean(hasRegisteredUser)}`);
-              if (hasRegisteredUser) {
-                setConferenceCreateIntent(true);
-                setActiveModule("conference");
-                return;
-              }
-              setLoginTargetModule("conference");
-              setActiveModule("login");
-            }}
           />
         );
       case "login":
@@ -319,13 +282,6 @@ function AppShell() {
             onLoggedIn={() => {
               setActiveModule(loginTargetModule);
             }}
-            onContinueAsGuestForPacks={
-              loginTargetModule === "dashboard"
-                ? () => {
-                    setActiveModule("dashboard");
-                  }
-                : undefined
-            }
             onBack={() => setActiveModule("home")}
           />
         );
@@ -417,12 +373,6 @@ function AppShell() {
             onOpenDashboard={() => {
               setActiveModule("dashboard");
             }}
-            onOpenConference={() => {
-              setConferenceCreateIntent(true);
-              setDeepLinkJoinToken("");
-              setDeepLinkAutoJoinGuest(false);
-              setActiveModule("conference");
-            }}
           />
         );
       case "conference":
@@ -480,35 +430,62 @@ function AppShell() {
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="light" />
       <View style={styles.root}>
-        <View style={styles.topBar}>
-          <LanguageSwitcher compact />
+        <View style={styles.topBarShell}>
+          <View
+            style={[
+              styles.topBar,
+              isTabletLayout && styles.topBarTablet,
+              shellMaxWidth ? { maxWidth: shellMaxWidth } : null,
+            ]}
+          >
+            <LanguageSwitcher compact />
+          </View>
         </View>
-        <View style={styles.content}>{renderModule()}</View>
-        <View style={styles.tabBar}>
-          {tabItems.map((item) => {
-            const selected = activeModule === item.id;
-            return (
-              <Pressable
-                key={item.id}
-                onPress={() => {
-                  console.log(`[BFZoom][nav] tab_press target=${item.id}`);
-                  if (item.id === "login") {
-                    setLoginTargetModule("dashboard");
-                  }
-                  if (item.id === "conference") {
-                    setConferenceCreateIntent(false);
-                  }
-                  setActiveModule(item.id);
-                }}
-                style={[styles.tab, selected && styles.tabActive]}
-              >
-                <Text style={[styles.tabText, selected && styles.tabTextActive]}>
-                  {item.label}
-                </Text>
-              </Pressable>
-            );
-          })}
+        <View style={styles.contentShell}>
+          <View
+            style={[
+              styles.content,
+              shellMaxWidth ? { maxWidth: shellMaxWidth } : null,
+            ]}
+          >
+            {renderModule()}
+          </View>
         </View>
+        {showTabBar ? (
+          <View style={styles.tabBarShell}>
+            <View
+              style={[
+                styles.tabBar,
+                isTabletLayout && styles.tabBarTablet,
+                tabBarMaxWidth ? { maxWidth: tabBarMaxWidth } : null,
+              ]}
+            >
+              {tabItems.map((item) => {
+                const selected = activeModule === item.id;
+                return (
+                  <Pressable
+                    key={item.id}
+                    onPress={() => {
+                      console.log(`[BFZoom][nav] tab_press target=${item.id}`);
+                      if (item.id === "login") {
+                        setLoginTargetModule("dashboard");
+                      }
+                      if (item.id === "conference") {
+                        setConferenceCreateIntent(false);
+                      }
+                      setActiveModule(item.id);
+                    }}
+                    style={[styles.tab, selected && styles.tabActive]}
+                  >
+                    <Text style={[styles.tabText, selected && styles.tabTextActive]}>
+                      {item.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+        ) : null}
       </View>
     </SafeAreaView>
   );
@@ -575,13 +552,29 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   topBar: {
+    width: "100%",
     paddingHorizontal: 12,
     paddingTop: 10,
     paddingBottom: 6,
     alignItems: "flex-end",
     backgroundColor: "#020617",
   },
+  topBarShell: {
+    width: "100%",
+    alignItems: "center",
+  },
+  topBarTablet: {
+    paddingHorizontal: 24,
+    paddingTop: 14,
+    paddingBottom: 10,
+  },
+  contentShell: {
+    flex: 1,
+    width: "100%",
+    alignItems: "center",
+  },
   tabBar: {
+    width: "100%",
     flexDirection: "row",
     borderTopWidth: 1,
     borderColor: "#1e293b",
@@ -589,6 +582,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 8,
     gap: 8,
+  },
+  tabBarShell: {
+    width: "100%",
+    alignItems: "center",
+  },
+  tabBarTablet: {
+    paddingHorizontal: 0,
+    paddingVertical: 12,
   },
   tab: {
     flex: 1,

@@ -1,0 +1,43 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="BFZoom logo">
+  <defs>
+    <linearGradient id="bfz-bg" x1="128" y1="96" x2="896" y2="928" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#081433"/>
+      <stop offset="0.52" stop-color="#0C2A70"/>
+      <stop offset="1" stop-color="#14B8FF"/>
+    </linearGradient>
+    <linearGradient id="bfz-card" x1="256" y1="224" x2="768" y2="768" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#EAF6FF"/>
+    </linearGradient>
+    <linearGradient id="bfz-accent" x1="432" y1="416" x2="768" y2="768" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#89E6FF"/>
+      <stop offset="1" stop-color="#38BDF8"/>
+    </linearGradient>
+    <filter id="bfz-shadow" x="164" y="168" width="696" height="700" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+      <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
+      <feOffset dy="24"/>
+      <feGaussianBlur stdDeviation="16"/>
+      <feComposite in2="hardAlpha" operator="out"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.0157 0 0 0 0 0.0902 0 0 0 0 0.2471 0 0 0 0.33 0"/>
+      <feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow"/>
+      <feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow" result="shape"/>
+    </filter>
+  </defs>
+
+  <rect x="64" y="64" width="896" height="896" rx="220" fill="url(#bfz-bg)"/>
+  <circle cx="786" cy="236" r="86" fill="white" fill-opacity="0.09"/>
+  <circle cx="224" cy="804" r="108" fill="white" fill-opacity="0.08"/>
+
+  <g filter="url(#bfz-shadow)">
+    <rect x="196" y="188" width="632" height="426" rx="156" fill="url(#bfz-card)"/>
+    <path d="M324 596L288 740L424 628L324 596Z" fill="#F2FAFF"/>
+    <rect x="344" y="418" width="442" height="294" rx="122" fill="url(#bfz-accent)"/>
+    <path d="M634 694L704 816L754 686L634 694Z" fill="#67D7FF"/>
+    <path d="M410 350V730" stroke="#0A2666" stroke-width="52" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M410 350H522C576 350 616 390 616 440C616 490 576 530 522 530H410" stroke="#0A2666" stroke-width="52" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M410 530H544C608 530 656 576 656 636C656 696 608 742 544 742H410" stroke="#0A2666" stroke-width="52" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <path d="M808 262L824 310L872 326L824 342L808 390L792 342L744 326L792 310L808 262Z" fill="#E8F9FF"/>
+</svg>

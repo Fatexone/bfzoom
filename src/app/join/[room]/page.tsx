@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import { isLivekitInviteId } from "@/lib/livekitInviteLinks";
 import JoinGuestNameGate from "../JoinGuestNameGate";
 
 type JoinRoomPageProps = {
@@ -6,7 +7,6 @@ type JoinRoomPageProps = {
     room: string;
   }>;
   searchParams?: Promise<{
-    host?: string | string[];
     name?: string | string[];
     guest?: string | string[];
   }>;
@@ -19,25 +19,15 @@ export default async function JoinRoomPage({ params, searchParams }: JoinRoomPag
   const resolvedParams = await params;
   const resolvedSearch = searchParams ? await searchParams : undefined;
 
-  const room = decodeURIComponent(resolvedParams.room || "").trim();
-  if (!room) {
+  const joinToken = decodeURIComponent(resolvedParams.room || "").trim();
+  if (!isLivekitInviteId(joinToken)) {
     redirect("/videoconference");
   }
 
-  const query = new URLSearchParams({ room });
-  if (asSingle(resolvedSearch?.host) === "1") {
-    query.set("host", "1");
-  }
   const inviteName =
     (asSingle(resolvedSearch?.name) || asSingle(resolvedSearch?.guest) || "")
       .trim()
       .slice(0, 80);
-  if (inviteName) {
-    query.set("name", inviteName);
-  }
-  if (asSingle(resolvedSearch?.host) === "1") {
-    redirect(`/videoconference?${query.toString()}`);
-  }
 
-  return <JoinGuestNameGate room={room} initialName={inviteName} />;
+  return <JoinGuestNameGate joinToken={joinToken} initialName={inviteName} />;
 }

@@ -6,23 +6,26 @@ import { addCorsHeaders, getAllowedOrigin } from "@/lib/cors";
 import { buildTranslatorMetadata, isTranslatorIdentity } from "@/lib/livekitTranslator";
 import { createGuestTtsToken } from "@/lib/guestTtsToken";
 import { upsertLivekitRoomHost } from "@/lib/livekitRoomRegistry";
-import { checkRateLimit, getClientIp } from "@/lib/rateLimit";
 
 export const runtime = "nodejs";
-
-const GUEST_TOKEN_RATE_LIMIT = 30;
-const GUEST_TOKEN_RATE_WINDOW_MS = 60_000;
 
 type TokenRequest = {
   room: string;
   identity: string;
   name?: string;
   role?: "host" | "guest" | "translator";
+  sessionMode?: "conference" | "chat";
   sourceLanguage?: string;
   targetLanguage?: string;
   voice?: string;
   includeGuestTtsToken?: boolean;
 };
+
+const buildHumanParticipantMetadata = (role: "host" | "guest", room: string) =>
+  JSON.stringify({
+    role,
+    room,
+  });
 
 const isWebOrigin = (value: string) => {
   try {
@@ -106,31 +109,34 @@ export async function POST(req: Request) {
   }
 
   const requestedRole = body.role || "guest";
-  const hasAuthorization = Boolean((req.headers.get("authorization") || "").trim());
+  const sessionMode = body.sessionMode === "chat" ? "chat" : "conference";
+  let verifiedUser:
+    | {
+        uid: string;
+        email: string;
+      }
+    | null = null;
 
-  if (requestedRole === "guest" && !hasAuthorization) {
-    const ip = getClientIp(req);
-    const roomKey = room.trim().toLowerCase().slice(0, 64);
-    const verdict = checkRateLimit(
-      `livekit:guest-token:${ip}:${roomKey}`,
-      GUEST_TOKEN_RATE_LIMIT,
-      GUEST_TOKEN_RATE_WINDOW_MS
-    );
-    if (!verdict.ok) {
+  if (requestedRole === "guest") {
+    if (sessionMode !== "chat") {
       const response = NextResponse.json(
-        { error: "Too many guest token requests. Retry later." },
-        {
-          status: 429,
-          headers: {
-            "Retry-After": String(verdict.retryAfter),
-          },
-        }
+        { error: "Guests must join with a BFZoom invite." },
+        { status: 403 }
       );
       if (origin) {
         addCorsHeaders(response.headers, origin);
       }
       return response;
     }
+    const user = await getVerifiedUser(req);
+    if (!user.ok) {
+      const response = NextResponse.json({ error: user.error }, { status: user.status });
+      if (origin) {
+        addCorsHeaders(response.headers, origin);
+      }
+      return response;
+    }
+    verifiedUser = { uid: user.uid, email: user.email };
   }
 
   const workerSecret = (process.env.TRANSLATOR_WORKER_SECRET || "").trim();
@@ -138,12 +144,6 @@ export async function POST(req: Request) {
     requestedRole === "translator" &&
     Boolean(workerSecret) &&
     (req.headers.get("x-translator-worker-secret") || "").trim() === workerSecret;
-  let verifiedUser:
-    | {
-        uid: string;
-        email: string;
-      }
-    | null = null;
 
   if (requestedRole === "host" || (requestedRole === "translator" && !workerAuthorized)) {
     const user = await getVerifiedUser(req);
@@ -179,7 +179,7 @@ export async function POST(req: Request) {
             voice: body.voice,
           })
         )
-      : undefined;
+      : buildHumanParticipantMetadata(requestedRole === "host" ? "host" : "guest", room);
 
   const token = new AccessToken(apiKey, apiSecret, {
     identity,

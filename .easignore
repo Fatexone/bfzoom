@@ -1,0 +1,15 @@
+node_modules
+.next
+.next-corrupt-*
+.next-reset-*
+.vercel
+
+mobile/node_modules
+mobile/.expo
+mobile/.crash_now
+mobile/ios/Pods
+mobile/ios/build
+mobile/ios/.xcode.env.local
+
+*.log
+*.p8

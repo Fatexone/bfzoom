@@ -66,13 +66,31 @@ import {
   isNativeRealtimePcmAvailable,
   type RealtimePcmBridge,
 } from "../services/realtimePcm";
-import { phoneticText, transcribeAudio, translateText } from "../services/translation";
+import {
+  fetchTtsAudio,
+  phoneticText,
+  transcribeAudio,
+  translateText,
+} from "../services/translation";
 import type { MobileCallSession } from "../types/session";
+import { detectTabletLayout } from "../utils/layout";
+import { buildCanonicalLivekitInviteUrl } from "../utils/livekitInviteLinks";
+import {
+  buildAiTtsInstructions,
+  getVoicesForLanguage,
+  selectPreferredDeviceVoiceId,
+  selectPreferredEnhancedDeviceVoiceId,
+  shouldPreferNativeTtsLanguage,
+  shouldWarnAboutMissingNativeTtsVoice,
+} from "../utils/ttsPolicy";
+
+const MOBILE_BRAND_ICON = require("../../assets/icon.png");
 
 const LANGUAGE_OPTIONS = [
   { code: "en", label: "English", speechLocale: "en-US" },
   { code: "fr", label: "Français", speechLocale: "fr-FR" },
   { code: "ar", label: "العربية", speechLocale: "ar-SA" },
+  { code: "ar-ma", label: "الدارجة", speechLocale: "ar-MA" },
   { code: "zh", label: "中文", speechLocale: "zh-CN" },
   { code: "pt", label: "Português", speechLocale: "pt-PT" },
   { code: "pt-br", label: "Português (Brasil)", speechLocale: "pt-BR" },
@@ -98,7 +116,7 @@ const REALTIME_MAX_QUEUE = 4;
 const REALTIME_MIN_SEGMENT_BYTES = 1300;
 const MANUAL_MIN_RECORDING_MS = 600;
 const MANUAL_MIN_SEGMENT_BYTES = 1200;
-const MANUAL_POST_STOP_SETTLE_MS = Platform.OS === "ios" ? 180 : 240;
+const MANUAL_POST_STOP_SETTLE_MS = Platform.OS === "ios" ? 80 : 240;
 // On iOS, toggling the LiveKit room mic around recorder start is unstable and
 // can lead to silent captures ("No speech detected"). Keep the room mic lifecycle
 // unchanged during talkie until we implement a safer isolation strategy.
@@ -123,17 +141,27 @@ const IOS_REMOTE_AUDIO_VOLUME_DUCKED_FOR_TTS = 0.62;
 const TALKIE_REMOTE_AUDIO_MUTED_VOLUME = 0;
 const MEDIA_ERROR_AUTO_LEAVE_GRACE_MS = 30_000;
 const ROOM_RECOVERY_RETRY_DELAYS_MS = [900, 1800, 3200] as const;
+const ROOM_CONNECT_TIMEOUT_MS = 12_000;
+const ROOM_HEARTBEAT_INTERVAL_MS = 30_000;
+const ROOM_HEARTBEAT_TIMEOUT_MS = 8_000;
 const IOS_VISIO_BALANCED_VIDEO_RESOLUTION = VideoPresets.h540.resolution;
 const IOS_VISIO_LOW_SIGNAL_VIDEO_RESOLUTION = VideoPresets.h360.resolution;
+const IOS_CAMERA_FOREGROUND_RECOVERY_DELAY_MS = 260;
+const IOS_CAMERA_FOREGROUND_RECOVERY_COOLDOWN_MS = 1_500;
+const IOS_CAMERA_HEALTH_RECOVERY_DELAY_MS = 420;
+const IOS_CAMERA_HEALTH_RECOVERY_COOLDOWN_MS = 2_500;
 const IOS_PREVIEW_CARD_WIDTH = 110;
 const IOS_PREVIEW_CARD_HEIGHT = 160;
 const IOS_PREVIEW_CARD_WIDTH_COMPACT = 96;
 const IOS_PREVIEW_CARD_HEIGHT_COMPACT = 136;
+const IOS_PREVIEW_CARD_WIDTH_TABLET = 148;
+const IOS_PREVIEW_CARD_HEIGHT_TABLET = 210;
 const IOS_PREVIEW_CARD_MARGIN = 10;
 const IOS_PREVIEW_DEFAULT_CORNER: PreviewCorner = "topRight";
 const IOS_PREVIEW_DOUBLE_TAP_DELAY_MS = 220;
 const TALKIE_LOCK_TOPIC = "bfzoom-ptt-lock";
 const TALKIE_LOCK_TIMEOUT_MS = 10_000;
+const TALKIE_LOCK_RELEASE_GRACE_MS = 4_000;
 const TALKIE_LOCK_HEARTBEAT_MS = 2_500;
 const CALL_KEEP_AWAKE_TAG = "bfzoom-call-room";
 const CALL_PREFS_STORAGE_KEY_PREFIX = "bfzoom.call.prefs";
@@ -205,6 +233,7 @@ const LANGUAGE_PROMPT_NAMES: Record<LanguageCode, string> = {
   en: "English",
   fr: "French",
   ar: "Arabic",
+  "ar-ma": "Darija (Maghreb)",
   zh: "Chinese",
   pt: "Portuguese",
   "pt-br": "Portuguese (Brazil)",
@@ -268,7 +297,26 @@ const logTtsEvent = (
   }
   console.info(message);
 };
-const RTL_LANGUAGE_CODES = new Set(["ar", "fa", "he"]);
+
+const logCallLatencyEvent = (
+  event: string,
+  details: Record<string, unknown> = {},
+  level: "info" | "warn" = "info"
+) => {
+  const suffix = Object.entries(details)
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .map(([key, value]) => `${key}=${formatTtsLogValue(value)}`)
+    .join(" ");
+  const message = suffix
+    ? `[BFZoom][CALL][LATENCY] ${event} ${suffix}`
+    : `[BFZoom][CALL][LATENCY] ${event}`;
+  if (level === "warn") {
+    console.warn(message);
+    return;
+  }
+  console.info(message);
+};
+const RTL_LANGUAGE_CODES = new Set(["ar", "ar-ma", "fa", "he"]);
 
 type CaptionPayload = {
   id?: string;
@@ -288,6 +336,11 @@ const estimateCaptionUsageSeconds = (payload: CaptionPayload) => {
   if (!source) return 1;
   const wordCount = source.split(/\s+/).filter(Boolean).length;
   return Math.max(1, Math.min(30, Math.ceil(wordCount / 3)));
+};
+
+const estimateTalkieUsageSeconds = (startedAt: number, endedAt: number) => {
+  const elapsedMs = Math.max(0, endedAt - startedAt);
+  return Math.max(1, Math.min(300, Math.ceil(elapsedMs / 1000) || 1));
 };
 
 type RoomParticipantRole = "host" | "guest" | "translator" | null;
@@ -339,6 +392,32 @@ type RealtimeSegment = {
   sourceLang: LanguageCode;
 };
 
+type ManualDraftLatencyState = {
+  traceId: string;
+  stopStartedAt: number;
+  reviewOpenedAt: number;
+  draftReadyMs: number;
+  transcribeMs: number;
+  recordingMs: number;
+  usageSeconds: number;
+  sourceLang: LanguageCode;
+  targetLang: LanguageCode;
+  draftChars: number;
+};
+
+type ProcessTranscriptTrace = {
+  traceId?: string;
+  path: "manual_send" | "realtime";
+  stopStartedAt?: number;
+  reviewOpenedAt?: number;
+  confirmStartedAt?: number;
+  consumeMs?: number;
+  lockClaimMs?: number;
+  transcribeMs?: number;
+  draftReadyMs?: number;
+  segmentCapturedAt?: number;
+};
+
 type CallScreenProps = {
   session: MobileCallSession;
   onLeave: (reason?: string) => void;
@@ -383,6 +462,55 @@ const getTranslatorTargetLanguageFromIdentity = (identity: string): LanguageCode
   const lang = normalized.slice(TRANSLATOR_IDENTITY_PREFIX.length).split("-")[0]?.trim() || "";
   return isLanguageCode(lang) ? lang : null;
 };
+
+type InspectableVideoTrack = {
+  isMuted?: boolean;
+  mediaStreamTrack?: {
+    readyState?: string;
+    enabled?: boolean;
+    muted?: boolean;
+  } | null;
+  mediaStream?: {
+    getVideoTracks?: () => ArrayLike<unknown>;
+  } | null;
+} | null;
+
+const isUsableVideoTrack = (track?: InspectableVideoTrack) => {
+  if (!track || track.isMuted) return false;
+
+  const mediaStreamTrack = track.mediaStreamTrack;
+  if (!mediaStreamTrack) return false;
+
+  const readyState = String(mediaStreamTrack.readyState || "").trim().toLowerCase();
+  if (readyState && readyState !== "live") return false;
+  if (mediaStreamTrack.enabled === false) return false;
+  if (mediaStreamTrack.muted === true) return false;
+
+  const mediaStream = track.mediaStream;
+  if (mediaStream && typeof mediaStream.getVideoTracks === "function") {
+    const videoTracks = Array.from(mediaStream.getVideoTracks());
+    if (!videoTracks.length) return false;
+  }
+
+  return true;
+};
+
+const isUsableVideoPublication = (
+  publication?:
+    | {
+        kind?: Track.Kind;
+        isMuted?: boolean;
+        videoTrack?: InspectableVideoTrack;
+        track?: InspectableVideoTrack;
+      }
+    | null
+) => {
+  if (!publication || publication.kind !== Track.Kind.Video || publication.isMuted) return false;
+  return isUsableVideoTrack(publication.videoTrack || publication.track);
+};
+
+const isRenderableTrackReference = (trackRef?: TrackReference | null) =>
+  isUsableVideoPublication(trackRef?.publication);
 
 const normalizeTranslationEntitlement = (
   payload: unknown
@@ -509,6 +637,20 @@ const readHttpError = async (response: Response) => {
   }
 };
 
+const shouldFallbackToLocalLeave = (message: string) => {
+  const trimmed = message.trim();
+  if (!trimmed) return true;
+  return (
+    /^<!doctype html/i.test(trimmed) ||
+    /^<html/i.test(trimmed) ||
+    /<head[\s>]/i.test(trimmed) ||
+    /<body[\s>]/i.test(trimmed) ||
+    /\b404\b/i.test(trimmed) ||
+    /not found/i.test(trimmed) ||
+    /page introuvable/i.test(trimmed)
+  );
+};
+
 const normalizeToken = (value: string) =>
   value
     .toLowerCase()
@@ -561,10 +703,13 @@ const isLikelyLowSignalTranscript = (text: string, sourceLang: LanguageCode) => 
   const trimmed = text.trim();
   if (!trimmed) return true;
   if (sourceLang === "en") return false;
+  if (!/[\p{L}\p{N}]/u.test(trimmed)) return true;
   const words = splitWords(trimmed);
   if (words.length !== 1) return false;
+  const scriptPattern = LANGUAGE_SCRIPT_PATTERNS[sourceLang];
+  if (scriptPattern?.test(trimmed)) return false;
   const token = normalizeToken(words[0] || "");
-  if (!token) return true;
+  if (!token) return false;
   return LOW_SIGNAL_TOKENS.has(token);
 };
 
@@ -620,20 +765,10 @@ const extractIncrementalSpeech = (previous: string, current: string) => {
   return current.trim();
 };
 
-const getVoicesForLanguage = (voices: Voice[], languageCode: LanguageCode, locale: string) => {
-  const exactLocale = locale.toLowerCase();
-  const prefix = languageCode.toLowerCase();
-  return [...voices]
-    .filter((voice) => {
-      const lang = (voice.language || "").toLowerCase();
-      return lang === exactLocale || lang.startsWith(`${prefix}-`) || lang === prefix;
-    })
-    .sort((a, b) => a.name.localeCompare(b.name));
-};
-
 export function CallScreen({ session, onLeave }: CallScreenProps) {
   const { language } = useI18n();
   const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
+  const isTabletLayout = detectTabletLayout(viewportWidth, viewportHeight);
   const [sessionError, setSessionError] = useState("");
   const [connected, setConnected] = useState(false);
   const [immersiveMode, setImmersiveMode] = useState(false);
@@ -731,9 +866,10 @@ export function CallScreen({ session, onLeave }: CallScreenProps) {
         : "Unable to start the audio session.";
   }, [language]);
   const roleModeLabel = isHostSession ? ui.hostMode : ui.guestMode;
-  const isCompactPhone = viewportWidth <= 430;
-  const isVeryCompactPhone = viewportWidth <= 380 || viewportHeight <= 760;
-  const useCenteredTabletTopBar = Platform.OS === "ios" && Boolean(Platform.isPad);
+  const isCompactPhone = !isTabletLayout && viewportWidth <= 430;
+  const isVeryCompactPhone =
+    !isTabletLayout && (viewportWidth <= 380 || viewportHeight <= 760);
+  const useCenteredTabletTopBar = isTabletLayout;
   const preferSpeakerOnCallStart = Platform.OS === "ios";
   const leaveButtonLabel = isHostSession
     ? isCompactPhone
@@ -871,13 +1007,17 @@ export function CallScreen({ session, onLeave }: CallScreenProps) {
         body: JSON.stringify({ room: roomId }),
       });
       if (!response.ok) {
-        const raw = await response.text().catch(() => "");
-        throw new Error(raw || ui.endRoomFailed);
+        const message = await readHttpError(response);
+        throw new Error(message || ui.endRoomFailed);
       }
       handleLeaveRequest("host_room_ended");
     } catch (error) {
       roomEndForAllInFlightRef.current = false;
       const message = error instanceof Error && error.message.trim() ? error.message : ui.endRoomFailed;
+      if (shouldFallbackToLocalLeave(message)) {
+        handleLeaveRequest("leave");
+        return;
+      }
       setSessionError(message);
     } finally {
       setLeavePending(false);
@@ -1000,9 +1140,25 @@ export function CallScreen({ session, onLeave }: CallScreenProps) {
       try {
         expectedRoomDisconnectRef.current = false;
         roomConnectStartedRef.current = true;
-        await liveKitRoom.connect(session.livekitUrl, session.livekitToken);
+        let timeoutId: ReturnType<typeof setTimeout> | null = null;
+        try {
+          await Promise.race([
+            liveKitRoom.connect(session.livekitUrl, session.livekitToken),
+            new Promise<never>((_, reject) => {
+              timeoutId = setTimeout(() => {
+                reject(new Error(ui.roomReconnectFailed));
+              }, ROOM_CONNECT_TIMEOUT_MS);
+            }),
+          ]);
+        } finally {
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+          }
+        }
       } catch (error) {
         roomConnectStartedRef.current = false;
+        expectedRoomDisconnectRef.current = true;
+        await liveKitRoom.disconnect().catch(() => {});
         if (cancelled) return;
         const nextError =
           error instanceof Error ? error : new Error(liveKitErrorFallbackRef.current);
@@ -1034,19 +1190,12 @@ export function CallScreen({ session, onLeave }: CallScreenProps) {
     liveKitRoom,
     session.livekitToken,
     session.livekitUrl,
+    ui.roomReconnectFailed,
   ]);
 
   const [shareInviteUrl, setShareInviteUrl] = useState("");
 
-  const publicJoinBaseUrl = useMemo(() => {
-    const rawBase = session.apiBaseUrl.trim().replace(/\/+$/, "");
-    if (!rawBase) {
-      return "https://www.bfzoom.fr";
-    }
-    const looksLocal =
-      /(^https?:\/\/localhost)|(^https?:\/\/127\.)|(^https?:\/\/0\.0\.0\.0)/i.test(rawBase);
-    return looksLocal ? "https://www.bfzoom.fr" : rawBase;
-  }, [session.apiBaseUrl]);
+  const publicJoinBaseUrl = env.publicJoinBaseUrl;
 
   const shareRoomAccess = useCallback(async () => {
     try {
@@ -1065,7 +1214,7 @@ export function CallScreen({ session, onLeave }: CallScreenProps) {
           room: session.roomId,
           bearerToken,
         });
-        nextShareUrl = `${publicJoinBaseUrl}/join/${encodeURIComponent(invite.inviteId)}`;
+        nextShareUrl = buildCanonicalLivekitInviteUrl(invite.inviteId, publicJoinBaseUrl);
         setShareInviteUrl(nextShareUrl);
       }
       await Share.share({
@@ -1183,24 +1332,19 @@ export function CallScreen({ session, onLeave }: CallScreenProps) {
                 useCenteredTabletTopBar && styles.topIdentityTablet,
               ]}
             >
-              <Text
-                style={[
-                  styles.topTitle,
-                  isCompactPhone && styles.topTitleCompact,
-                ]}
-              >
-                BFZoom
-              </Text>
-              <Text
-                style={[
-                  styles.topSubtitle,
-                  isCompactPhone && styles.topSubtitleCompact,
-                ]}
-                numberOfLines={1}
-                ellipsizeMode="tail"
-              >
-                {`${session.role.toUpperCase()} · ${session.displayName}`}
-              </Text>
+              <View style={styles.topIdentityHeader}>
+                <Image source={MOBILE_BRAND_ICON} style={styles.topBrandLogo} resizeMode="cover" />
+                <Text
+                  style={[
+                    styles.topTitle,
+                    isCompactPhone && styles.topTitleCompact,
+                  ]}
+                  numberOfLines={1}
+                  ellipsizeMode="tail"
+                >
+                  {session.displayName || "BFZoom"}
+                </Text>
+              </View>
               <Text
                 style={[
                   styles.modeBadge,
@@ -1212,11 +1356,26 @@ export function CallScreen({ session, onLeave }: CallScreenProps) {
             </View>
             <View
               style={[
-                styles.topActions,
-                isCompactPhone && styles.topActionsCompact,
-                useCenteredTabletTopBar && styles.topActionsTablet,
+                styles.topMetaActions,
+                isCompactPhone && styles.topMetaActionsCompact,
+                useCenteredTabletTopBar && styles.topMetaActionsTablet,
               ]}
             >
+              <View
+                style={[
+                  styles.topLocaleRow,
+                  isCompactPhone && styles.topLocaleRowCompact,
+                ]}
+              >
+                <LanguageSwitcher compact inverted />
+              </View>
+              <View
+                style={[
+                  styles.topActions,
+                  isCompactPhone && styles.topActionsCompact,
+                  useCenteredTabletTopBar && styles.topActionsTablet,
+                ]}
+              >
               {isHostSession ? (
                 <Pressable
                   onPress={shareRoomAccess}
@@ -1236,6 +1395,7 @@ export function CallScreen({ session, onLeave }: CallScreenProps) {
               >
                 <Text style={styles.leaveText}>{leaveButtonLabel}</Text>
               </Pressable>
+              </View>
             </View>
           </View>
         </View>
@@ -1283,8 +1443,10 @@ function RoomView({
   const { language } = useI18n();
   const insets = useSafeAreaInsets();
   const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
-  const isCompactPhone = viewportWidth <= 430;
-  const isVeryCompactPhone = viewportWidth <= 380 || viewportHeight <= 760;
+  const isTabletLayout = detectTabletLayout(viewportWidth, viewportHeight);
+  const isCompactPhone = !isTabletLayout && viewportWidth <= 430;
+  const isVeryCompactPhone =
+    !isTabletLayout && (viewportWidth <= 380 || viewportHeight <= 760);
   const immersiveControlsTopOffset = Math.max(insets.top, 0) + 10;
   const immersiveSubtitleTopOffset = immersiveControlsTopOffset + 54;
   const preferSpeakerForCall = Platform.OS === "ios";
@@ -1355,6 +1517,7 @@ function RoomView({
             translation: "Traduction",
             languageYouSpeak: "Langue que tu parles",
             receptionLanguage: "Langue de reception",
+            swap: "Inverser",
             hostTranslationRemaining: (value: string) => `Temps traduction restant (hote): ${value}`,
             stable: "Stable",
             reconnecting: "Reconnexion...",
@@ -1399,7 +1562,7 @@ function RoomView({
               `Appel a ${count} participants: au-dela de 4, l'experience traduction iPhone peut se degrader.`,
             checkingCredits: "Verification des minutes de traduction...",
             translatedVoiceUnavailable: (languageLabel: string) =>
-              `Voix traduite: aucune voix ${languageLabel} installee sur cet iPhone. Installe-la dans Reglages > Accessibilite > Contenu enonce > Voix.`,
+              `Voix native ${languageLabel} haute qualite absente sur cet iPhone. BFZoom utilisera la voix IA pour un rendu plus naturel. Pour mieux faire: Reglages > Accessibilite > Contenu enonce > Voix.`,
             verifyTextBeforeSend: "Verifie ton texte avant envoi",
             closeKeyboard: "Fermer clavier",
             retranslateBusy: "Retraduction...",
@@ -1480,6 +1643,7 @@ function RoomView({
             translation: "Translation",
             languageYouSpeak: "Language you speak",
             receptionLanguage: "Reception language",
+            swap: "Swap",
             hostTranslationRemaining: (value: string) => `Host translation time left: ${value}`,
             stable: "Stable",
             reconnecting: "Reconnecting...",
@@ -1523,7 +1687,7 @@ function RoomView({
               `Call with ${count} participants: beyond 4, the iPhone translation experience may degrade.`,
             checkingCredits: "Checking translation minutes...",
             translatedVoiceUnavailable: (languageLabel: string) =>
-              `Translated voice: no ${languageLabel} voice is installed on this iPhone. Install it in Settings > Accessibility > Spoken Content > Voices.`,
+              `No high-quality native ${languageLabel} voice is installed on this iPhone. BFZoom will use the AI voice for a more natural result. For the best result: Settings > Accessibility > Spoken Content > Voices.`,
             verifyTextBeforeSend: "Review your text before sending",
             closeKeyboard: "Hide keyboard",
             retranslateBusy: "Retranslating...",
@@ -1591,6 +1755,8 @@ function RoomView({
     (session.bearerToken || "").trim()
   );
   const appStateRef = useRef(AppState.currentState);
+  const roomHeartbeatInFlightRef = useRef(false);
+  const roomHeartbeatAbortControllerRef = useRef<AbortController | null>(null);
   const callAudioOwnerKey = useMemo(
     () => `${session.roomId}:${session.identity}:${session.role}`,
     [session.identity, session.role, session.roomId]
@@ -1712,6 +1878,7 @@ function RoomView({
   const translationConsumeQueueRef = useRef<Promise<boolean>>(Promise.resolve(true));
   const sourceTextLanguageRef = useRef<LanguageCode>("fr");
   const incomingTranslationSeqRef = useRef(0);
+  const manualDraftLatencyRef = useRef<ManualDraftLatencyState | null>(null);
   const captionPhoneticSeqRef = useRef(0);
   const captionPhoneticQueueTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingCaptionPhoneticRef = useRef<CaptionPhoneticJob | null>(null);
@@ -1732,8 +1899,13 @@ function RoomView({
   const ttsVoiceLoadedKeyRef = useRef("");
   const cameraAutoStartedRef = useRef(false);
   const cameraAutoStartInFlightRef = useRef(false);
+  const cameraForegroundRecoveryInFlightRef = useRef(false);
+  const cameraHealthRecoveryInFlightRef = useRef(false);
+  const lastCameraForegroundRecoveryAtRef = useRef(0);
+  const lastCameraHealthRecoveryAtRef = useRef(0);
   const previousRemoteTrackCountRef = useRef(0);
   const lastAppliedVideoCaptureProfileRef = useRef<"balanced" | "low">("balanced");
+  const applyVirtualBackgroundEffectRef = useRef<(() => Promise<boolean>) | null>(null);
   const autoMicEnsuredRef = useRef(false);
   const manualRecordingStartedAtRef = useRef(0);
   const manualPushToTalkPressedRef = useRef(false);
@@ -1748,6 +1920,10 @@ function RoomView({
   const talkieLockClaimedAtRef = useRef(0);
   const talkieLockLastSettledAtRef = useRef(0);
   const talkieLockCaptionConsumedRef = useRef(false);
+  const talkieLockLastReleasedHolderRef = useRef("");
+  const talkieLockLastReleasedAtRef = useRef(0);
+  const talkieLockLastReleasedClaimStartedAtRef = useRef(0);
+  const talkieLockLastReleaseCaptionConsumedRef = useRef(false);
   const talkieLockTimestampRef = useRef(0);
   const talkieLockExpiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const talkiePulseOpacityRef = useRef(new Animated.Value(1));
@@ -1829,6 +2005,62 @@ function RoomView({
     }),
     [cameraFacingMode, videoCaptureProfile]
   );
+  const recoverCameraAfterForeground = useCallback(async () => {
+    if (Platform.OS !== "ios") return;
+    if (!connected || isAudioOnlyCall || !startWithCamera) return;
+    if (!localParticipant || !isCameraEnabled) return;
+    if (cameraAutoStartInFlightRef.current) return;
+
+    const now = Date.now();
+    if (
+      cameraForegroundRecoveryInFlightRef.current ||
+      now - lastCameraForegroundRecoveryAtRef.current < IOS_CAMERA_FOREGROUND_RECOVERY_COOLDOWN_MS
+    ) {
+      return;
+    }
+
+    cameraForegroundRecoveryInFlightRef.current = true;
+    try {
+      await wait(IOS_CAMERA_FOREGROUND_RECOVERY_DELAY_MS);
+      if (appStateRef.current !== "active") return;
+
+      const publication = localParticipant.getTrackPublication(Track.Source.Camera);
+      const videoTrack = publication?.videoTrack;
+      lastAppliedVideoCaptureProfileRef.current = videoCaptureProfile;
+      if (videoTrack) {
+        await videoTrack.restartTrack(desiredCameraCaptureOptions);
+      } else {
+        await localParticipant.setCameraEnabled(true, desiredCameraCaptureOptions);
+      }
+
+      cameraAutoStartedRef.current = true;
+      lastCameraForegroundRecoveryAtRef.current = Date.now();
+      setTranslationError((current) => (/camera/i.test(current) ? "" : current));
+      const reapplyVirtualBackground = applyVirtualBackgroundEffectRef.current;
+      if (reapplyVirtualBackground) {
+        await reapplyVirtualBackground().catch(() => false);
+      }
+    } catch (err) {
+      setTranslationError(
+        err instanceof Error
+          ? err.message
+          : language === "fr"
+            ? "Echec reprise camera apres retour au premier plan."
+            : "Camera recovery after returning to foreground failed."
+      );
+    } finally {
+      cameraForegroundRecoveryInFlightRef.current = false;
+    }
+  }, [
+    connected,
+    desiredCameraCaptureOptions,
+    isAudioOnlyCall,
+    isCameraEnabled,
+    language,
+    localParticipant,
+    startWithCamera,
+    videoCaptureProfile,
+  ]);
   const effectiveTranslationEnabled = isHostSession
     ? translationEntitlement.enabled
     : roomTranslationEnabled;
@@ -1865,6 +2097,11 @@ function RoomView({
           : ui.topUpRequired;
   const translationControlsDisabled = !effectiveTranslationEnabled;
   const languagePairSummary = `${sourceLanguage.toUpperCase()} → ${targetLanguage.toUpperCase()}`;
+  const swapLanguages = useCallback(() => {
+    const previousSourceLanguage = sourceLanguage;
+    setSourceLanguage(targetLanguage);
+    setTargetLanguage(previousSourceLanguage);
+  }, [sourceLanguage, targetLanguage]);
   const topStatusBadgeLabel = translationRemainingLabel
     ? ui.hostTranslationRemaining(translationRemainingLabel)
     : isHostSession
@@ -1892,6 +2129,89 @@ function RoomView({
     },
     [currentBearerToken, session.bearerToken]
   );
+
+  const sendRoomHeartbeat = useCallback(async () => {
+    if (!isHostSession || session.originModule === "chat") return;
+    if (!connected) return;
+    if (appStateRef.current !== "active") return;
+    if (
+      room.state !== ConnectionState.Connected &&
+      room.state !== ConnectionState.Reconnecting &&
+      room.state !== ConnectionState.SignalReconnecting
+    ) {
+      return;
+    }
+    if (roomHeartbeatInFlightRef.current) return;
+    const apiBaseUrl = session.apiBaseUrl.trim().replace(/\/+$/, "");
+    const roomId = session.roomId.trim();
+    if (!apiBaseUrl || !roomId) return;
+
+    const bearerToken = (await refreshBearerToken()).trim();
+    if (!bearerToken) return;
+
+    roomHeartbeatInFlightRef.current = true;
+    const controller = typeof AbortController === "undefined" ? null : new AbortController();
+    roomHeartbeatAbortControllerRef.current?.abort();
+    roomHeartbeatAbortControllerRef.current = controller;
+    const timeoutId = setTimeout(() => {
+      controller?.abort();
+    }, ROOM_HEARTBEAT_TIMEOUT_MS);
+
+    try {
+      await fetch(`${apiBaseUrl}/api/livekit/room/heartbeat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${bearerToken}`,
+        },
+        body: JSON.stringify({ room: roomId }),
+        signal: controller?.signal,
+      });
+    } catch {
+      // Heartbeat failure should not disrupt the active call UI.
+    } finally {
+      clearTimeout(timeoutId);
+      if (roomHeartbeatAbortControllerRef.current === controller) {
+        roomHeartbeatAbortControllerRef.current = null;
+      }
+      roomHeartbeatInFlightRef.current = false;
+    }
+  }, [
+    connected,
+    isHostSession,
+    refreshBearerToken,
+    room,
+    session.apiBaseUrl,
+    session.originModule,
+    session.roomId,
+  ]);
+
+  useEffect(() => {
+    if (!isHostSession || session.originModule === "chat" || !connected) return;
+    void sendRoomHeartbeat();
+    const intervalId = setInterval(() => {
+      void sendRoomHeartbeat();
+    }, ROOM_HEARTBEAT_INTERVAL_MS);
+    return () => clearInterval(intervalId);
+  }, [connected, isHostSession, sendRoomHeartbeat, session.originModule]);
+
+  useEffect(() => {
+    if (!isHostSession || session.originModule === "chat" || !connected) return;
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") {
+        void sendRoomHeartbeat();
+      }
+    });
+    return () => subscription.remove();
+  }, [connected, isHostSession, sendRoomHeartbeat, session.originModule]);
+
+  useEffect(() => {
+    return () => {
+      roomHeartbeatAbortControllerRef.current?.abort();
+      roomHeartbeatAbortControllerRef.current = null;
+      roomHeartbeatInFlightRef.current = false;
+    };
+  }, []);
 
   const isAuthRetryableError = useCallback((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error || "");
@@ -2077,6 +2397,13 @@ function RoomView({
     if (!isHostSession) return;
     void broadcastRoomTranslationAccess();
   }, [broadcastRoomTranslationAccess, isHostSession, remoteParticipantCount]);
+  useEffect(() => {
+    if (!isHostSession || !connected || !localParticipant) return;
+    const syncTimer = setInterval(() => {
+      void broadcastRoomTranslationAccess();
+    }, 1500);
+    return () => clearInterval(syncTimer);
+  }, [broadcastRoomTranslationAccess, connected, isHostSession, localParticipant]);
 
   useEffect(() => {
     if (!translationControlsDisabled) return;
@@ -2186,21 +2513,48 @@ function RoomView({
     return count;
   }, [room]);
 
+  const clearRecentTalkieRelease = useCallback(() => {
+    talkieLockLastReleasedHolderRef.current = "";
+    talkieLockLastReleasedAtRef.current = 0;
+    talkieLockLastReleasedClaimStartedAtRef.current = 0;
+    talkieLockLastReleaseCaptionConsumedRef.current = false;
+  }, []);
+
   const estimateVerifiedRemoteUsageSeconds = useCallback((senderIdentity: string) => {
     const normalizedSenderIdentity = senderIdentity.trim();
     if (!normalizedSenderIdentity) return null;
-    if (normalizedSenderIdentity !== talkieLockHolderRef.current) return null;
-    if (talkieLockExpiresAtRef.current <= Date.now()) return null;
-    if (talkieLockCaptionConsumedRef.current) return null;
-    const claimStartedAt = talkieLockClaimedAtRef.current || Date.now();
-    const settledAt = talkieLockLastSettledAtRef.current || claimStartedAt;
     const now = Date.now();
-    const elapsedMs = Math.max(0, now - Math.max(claimStartedAt, settledAt));
-    talkieLockLastSettledAtRef.current = now;
-    const seconds = Math.max(1, Math.min(300, Math.ceil(elapsedMs / 1000) || 1));
-    talkieLockCaptionConsumedRef.current = true;
-    return seconds;
-  }, []);
+    if (
+      normalizedSenderIdentity === talkieLockHolderRef.current &&
+      talkieLockExpiresAtRef.current > now &&
+      !talkieLockCaptionConsumedRef.current
+    ) {
+      const claimStartedAt = talkieLockClaimedAtRef.current || now;
+      const settledAt = talkieLockLastSettledAtRef.current || claimStartedAt;
+      talkieLockLastSettledAtRef.current = now;
+      talkieLockCaptionConsumedRef.current = true;
+      return estimateTalkieUsageSeconds(Math.max(claimStartedAt, settledAt), now);
+    }
+
+    const releasedAt = talkieLockLastReleasedAtRef.current;
+    if (
+      normalizedSenderIdentity !== talkieLockLastReleasedHolderRef.current ||
+      releasedAt <= 0 ||
+      now - releasedAt > TALKIE_LOCK_RELEASE_GRACE_MS ||
+      talkieLockLastReleaseCaptionConsumedRef.current
+    ) {
+      if (releasedAt > 0 && now - releasedAt > TALKIE_LOCK_RELEASE_GRACE_MS) {
+        clearRecentTalkieRelease();
+      }
+      return null;
+    }
+
+    talkieLockLastReleaseCaptionConsumedRef.current = true;
+    return estimateTalkieUsageSeconds(
+      talkieLockLastReleasedClaimStartedAtRef.current || releasedAt,
+      releasedAt
+    );
+  }, [clearRecentTalkieRelease]);
 
   useEffect(() => {
     const animatedOpacity = talkiePulseOpacityRef.current;
@@ -2284,11 +2638,21 @@ function RoomView({
       talkieLockTimestampRef.current = nextTimestamp;
       if (action === "release") {
         if (!holder || holder === talkieLockHolderRef.current) {
+          if (talkieLockHolderRef.current) {
+            talkieLockLastReleasedHolderRef.current = talkieLockHolderRef.current;
+            talkieLockLastReleasedAtRef.current = nextTimestamp;
+            talkieLockLastReleasedClaimStartedAtRef.current =
+              talkieLockClaimedAtRef.current || nextTimestamp;
+            talkieLockLastReleaseCaptionConsumedRef.current = false;
+          } else {
+            clearRecentTalkieRelease();
+          }
           clearTalkieLock();
         }
         return;
       }
       if (!holder) return;
+      clearRecentTalkieRelease();
       const expiresAt = normalizedSenderIdentity
         ? Date.now() + TALKIE_LOCK_TIMEOUT_MS
         : typeof payload.expiresAt === "number"
@@ -2320,6 +2684,7 @@ function RoomView({
     },
     [
       armTalkieLockExpiry,
+      clearRecentTalkieRelease,
       clearTalkieLock,
       getRemoteParticipantByIdentity,
       isTrustedHumanParticipantIdentity,
@@ -2906,6 +3271,7 @@ function RoomView({
       void syncCallKeepAwake(nextState);
       if (!wasActive && isActive) {
         void refreshTranslationEntitlement();
+        void recoverCameraAfterForeground();
         return;
       }
       if (!wasActive || isActive) return;
@@ -2944,6 +3310,7 @@ function RoomView({
     realtimeEnabled,
     realtimeSessionIdRef,
     refreshTranslationEntitlement,
+    recoverCameraAfterForeground,
     releaseExpoAudioActivity,
     manualStopRequestIdRef,
     recorder,
@@ -3013,6 +3380,7 @@ function RoomView({
   const stabilizeRecordedAudioUri = useCallback(async (rawUri: string, minBytes: number) => {
     let stableUri = rawUri;
     const cacheDir = FileSystemLegacy.cacheDirectory;
+    let copiedToCache = false;
     if (cacheDir) {
       const ext = buildSegmentExtension(rawUri);
       const nextUri =
@@ -3020,15 +3388,20 @@ function RoomView({
       try {
         await FileSystemLegacy.copyAsync({ from: rawUri, to: nextUri });
         stableUri = nextUri;
+        copiedToCache = true;
       } catch {
         stableUri = rawUri;
       }
     }
 
+    let currentSize = await getAudioFileSize(stableUri);
+    if (copiedToCache && currentSize >= minBytes) {
+      return { uri: stableUri, size: currentSize };
+    }
+
     const deadline = Date.now() + 1500;
     let lastSize = -1;
     let stableRounds = 0;
-    let currentSize = await getAudioFileSize(stableUri);
 
     while (Date.now() < deadline) {
       currentSize = await getAudioFileSize(stableUri);
@@ -3084,13 +3457,14 @@ function RoomView({
     () => getVoicesForLanguage(availableVoices, targetLanguage, targetSpeechLocale),
     [availableVoices, targetLanguage, targetSpeechLocale]
   );
+  const preferredTargetVoiceId = useMemo(
+    () => selectPreferredEnhancedDeviceVoiceId(availableVoices, targetLanguage, targetSpeechLocale),
+    [availableVoices, targetLanguage, targetSpeechLocale]
+  );
   const targetVoiceLikelyUnavailable =
     ttsEnabled &&
-    voiceOptions.length === 0 &&
-    (targetLanguage === "ar" ||
-      targetLanguage === "fa" ||
-      targetLanguage === "he" ||
-      targetLanguage === "zh");
+    shouldWarnAboutMissingNativeTtsVoice(targetLanguage) &&
+    !preferredTargetVoiceId;
 
   useEffect(() => {
     let cancelled = false;
@@ -3262,23 +3636,34 @@ function RoomView({
     void AsyncStorage.setItem(ttsVoiceStorageKey, voiceId).catch(() => {});
   }, [ttsVoiceStorageKey, voiceId]);
 
-  const localCameraTrack = useMemo<TrackReference | null>(() => {
+  const localCameraPublication = useMemo(() => {
     if (!localParticipant) return null;
-    const publication = localParticipant.getTrackPublication(Track.Source.Camera);
-    if (!publication) return null;
+    return localParticipant.getTrackPublication(Track.Source.Camera) || null;
+  }, [connected, isCameraEnabled, localParticipant, roomLifecycleTick]);
+
+  const hasUsableLocalCameraTrack = useMemo(
+    () => isUsableVideoPublication(localCameraPublication),
+    [localCameraPublication]
+  );
+
+  const localCameraTrack = useMemo<TrackReference | null>(() => {
+    const publication = localCameraPublication;
+    if (!localParticipant || !publication?.videoTrack) return null;
     return {
       participant: localParticipant,
       publication,
       source: publication.source,
     };
-  }, [localParticipant, isCameraEnabled]);
+  }, [localCameraPublication, localParticipant]);
 
   const fallbackRemoteVideoTracks = useMemo<TrackReference[]>(() => {
     if (!room) return [];
     const tracks: TrackReference[] = [];
     room.remoteParticipants.forEach((participant) => {
       const publications = Array.from(participant.trackPublications.values());
-      const videoPublications = publications.filter((publication) => publication.kind === Track.Kind.Video);
+      const videoPublications = publications.filter((publication) =>
+        isUsableVideoPublication(publication)
+      );
       if (!videoPublications.length) return;
 
       const preferredPublication =
@@ -3294,10 +3679,15 @@ function RoomView({
       });
     });
     return tracks;
-  }, [remoteParticipantCount, room]);
+  }, [remoteParticipantCount, room, roomLifecycleTick]);
+
+  const renderableCameraTracks = useMemo(
+    () => cameraTracks.filter((track) => isRenderableTrackReference(track)),
+    [cameraTracks, roomLifecycleTick]
+  );
 
   const renderedTracks = useMemo(() => {
-    const merged = [...cameraTracks];
+    const merged = [...renderableCameraTracks];
     fallbackRemoteVideoTracks.forEach((track) => {
       const exists = merged.some(
         (entry) =>
@@ -3323,7 +3713,7 @@ function RoomView({
       next.unshift(localCameraTrack);
     }
     return next;
-  }, [cameraTracks, fallbackRemoteVideoTracks, localCameraTrack]);
+  }, [fallbackRemoteVideoTracks, localCameraTrack, renderableCameraTracks]);
 
   const trackKey = useCallback((track: TrackReference) => {
     const source = String(track.source ?? "camera");
@@ -3338,11 +3728,21 @@ function RoomView({
   const allowMovablePreview = Platform.OS === "ios" && !Boolean(Platform.isPad);
   const previewCardSize = useMemo(
     () => ({
-      width: isVeryCompactPhone ? IOS_PREVIEW_CARD_WIDTH_COMPACT : IOS_PREVIEW_CARD_WIDTH,
-      height: isVeryCompactPhone ? IOS_PREVIEW_CARD_HEIGHT_COMPACT : IOS_PREVIEW_CARD_HEIGHT,
+      width: isTabletLayout
+        ? IOS_PREVIEW_CARD_WIDTH_TABLET
+        : isVeryCompactPhone
+          ? IOS_PREVIEW_CARD_WIDTH_COMPACT
+          : IOS_PREVIEW_CARD_WIDTH,
+      height: isTabletLayout
+        ? IOS_PREVIEW_CARD_HEIGHT_TABLET
+        : isVeryCompactPhone
+          ? IOS_PREVIEW_CARD_HEIGHT_COMPACT
+          : IOS_PREVIEW_CARD_HEIGHT,
     }),
-    [isVeryCompactPhone]
+    [isTabletLayout, isVeryCompactPhone]
   );
+  const tabletPanelWidth = viewportWidth >= 1180 ? 360 : 332;
+  const useTabletSplitLayout = isTabletLayout && !immersiveMode;
   const [focusedVideoLayout, setFocusedVideoLayout] = useState({ width: 0, height: 0 });
   const previewPositionReady = focusedVideoLayout.width > 0 && focusedVideoLayout.height > 0;
   const previewPosition = useRef(new Animated.ValueXY({ x: IOS_PREVIEW_CARD_MARGIN, y: IOS_PREVIEW_CARD_MARGIN }))
@@ -3649,6 +4049,28 @@ function RoomView({
   const exceedsRecommendedParticipantCount = totalParticipantCount > 4;
   const hadRemoteParticipantRef = useRef(false);
   useEffect(() => {
+    if (!room) return;
+    const syncRoomLifecycle = () => {
+      setRoomLifecycleTick((current) => current + 1);
+    };
+    room.on(RoomEvent.LocalTrackPublished, syncRoomLifecycle);
+    room.on(RoomEvent.LocalTrackUnpublished, syncRoomLifecycle);
+    room.on(RoomEvent.TrackSubscribed, syncRoomLifecycle);
+    room.on(RoomEvent.TrackUnsubscribed, syncRoomLifecycle);
+    room.on(RoomEvent.TrackMuted, syncRoomLifecycle);
+    room.on(RoomEvent.TrackUnmuted, syncRoomLifecycle);
+    room.on(RoomEvent.Reconnected, syncRoomLifecycle);
+    return () => {
+      room.off(RoomEvent.LocalTrackPublished, syncRoomLifecycle);
+      room.off(RoomEvent.LocalTrackUnpublished, syncRoomLifecycle);
+      room.off(RoomEvent.TrackSubscribed, syncRoomLifecycle);
+      room.off(RoomEvent.TrackUnsubscribed, syncRoomLifecycle);
+      room.off(RoomEvent.TrackMuted, syncRoomLifecycle);
+      room.off(RoomEvent.TrackUnmuted, syncRoomLifecycle);
+      room.off(RoomEvent.Reconnected, syncRoomLifecycle);
+    };
+  }, [room]);
+  useEffect(() => {
     if (!room) {
       setRemoteParticipantCount(0);
       return;
@@ -3816,6 +4238,10 @@ function RoomView({
 
   useEffect(() => {
     if (isAudioOnlyCall || !startWithCamera) {
+      setVideoCaptureProfile("balanced");
+      return;
+    }
+    if (Platform.OS === "ios") {
       setVideoCaptureProfile("balanced");
       return;
     }
@@ -4031,11 +4457,16 @@ function RoomView({
     if (!connected) {
       cameraAutoStartedRef.current = false;
       cameraAutoStartInFlightRef.current = false;
+      cameraHealthRecoveryInFlightRef.current = false;
       return;
     }
     if (!startWithCamera) return;
-    if (!localParticipant || cameraAutoStartedRef.current || cameraAutoStartInFlightRef.current) return;
-    if (isCameraEnabled) return;
+    if (!localParticipant || cameraAutoStartInFlightRef.current) return;
+    if (hasUsableLocalCameraTrack) {
+      cameraAutoStartedRef.current = true;
+      return;
+    }
+    if (cameraAutoStartedRef.current && isCameraEnabled) return;
     cameraAutoStartInFlightRef.current = true;
 
     let cancelled = false;
@@ -4081,10 +4512,97 @@ function RoomView({
       cancelled = true;
       cameraAutoStartInFlightRef.current = false;
     };
-  }, [connected, desiredCameraCaptureOptions, isCameraEnabled, language, localParticipant, startWithCamera, videoCaptureProfile]);
+  }, [
+    connected,
+    desiredCameraCaptureOptions,
+    hasUsableLocalCameraTrack,
+    isCameraEnabled,
+    language,
+    localParticipant,
+    startWithCamera,
+    videoCaptureProfile,
+  ]);
+
+  useEffect(() => {
+    if (Platform.OS !== "ios") return;
+    if (!connected || isAudioOnlyCall || !startWithCamera) return;
+    if (!localParticipant || !isCameraEnabled || hasUsableLocalCameraTrack) return;
+    if (cameraAutoStartInFlightRef.current || cameraForegroundRecoveryInFlightRef.current) return;
+
+    const now = Date.now();
+    if (
+      cameraHealthRecoveryInFlightRef.current ||
+      now - lastCameraHealthRecoveryAtRef.current < IOS_CAMERA_HEALTH_RECOVERY_COOLDOWN_MS
+    ) {
+      return;
+    }
+
+    cameraHealthRecoveryInFlightRef.current = true;
+    let cancelled = false;
+
+    const recoverMissingCameraTrack = async () => {
+      try {
+        await wait(IOS_CAMERA_HEALTH_RECOVERY_DELAY_MS);
+        if (cancelled || appStateRef.current !== "active") return;
+
+        const publication = localParticipant.getTrackPublication(Track.Source.Camera);
+        const videoTrack = publication?.videoTrack;
+        lastAppliedVideoCaptureProfileRef.current = videoCaptureProfile;
+
+        if (videoTrack) {
+          await videoTrack.restartTrack(desiredCameraCaptureOptions);
+        } else {
+          cameraAutoStartedRef.current = false;
+          await localParticipant.setCameraEnabled(false).catch(() => {});
+          await wait(120);
+          await localParticipant.setCameraEnabled(true, desiredCameraCaptureOptions);
+        }
+
+        if (cancelled) return;
+        cameraAutoStartedRef.current = true;
+        lastCameraHealthRecoveryAtRef.current = Date.now();
+        setTranslationError((current) => (/camera/i.test(current) ? "" : current));
+        const reapplyVirtualBackground = applyVirtualBackgroundEffectRef.current;
+        if (reapplyVirtualBackground) {
+          await reapplyVirtualBackground().catch(() => false);
+        }
+      } catch (err) {
+        if (cancelled) return;
+        setTranslationError(
+          err instanceof Error
+            ? err.message
+            : language === "fr"
+              ? "Echec restauration camera iOS."
+              : "iOS camera recovery failed."
+        );
+      } finally {
+        cameraHealthRecoveryInFlightRef.current = false;
+      }
+    };
+
+    void recoverMissingCameraTrack();
+    return () => {
+      cancelled = true;
+      cameraHealthRecoveryInFlightRef.current = false;
+    };
+  }, [
+    connected,
+    desiredCameraCaptureOptions,
+    hasUsableLocalCameraTrack,
+    isAudioOnlyCall,
+    isCameraEnabled,
+    language,
+    localParticipant,
+    startWithCamera,
+    videoCaptureProfile,
+  ]);
 
   useEffect(() => {
     if (!connected || isAudioOnlyCall) return;
+    if (Platform.OS === "ios") {
+      lastAppliedVideoCaptureProfileRef.current = videoCaptureProfile;
+      return;
+    }
     if (!localParticipant || !isCameraEnabled) return;
     if (lastAppliedVideoCaptureProfileRef.current === videoCaptureProfile) return;
 
@@ -4228,6 +4746,29 @@ function RoomView({
         LANGUAGE_OPTIONS.find((opt) => opt.code === effectiveLanguage)?.speechLocale ||
         targetSpeechLocale;
       const useSelectedVoice = !languageOverride || languageOverride === targetLanguage;
+      const effectiveVoiceOptions = getVoicesForLanguage(
+        availableVoices,
+        effectiveLanguage,
+        effectiveLocale
+      );
+      const preferredDeviceVoiceId = selectPreferredDeviceVoiceId(
+        effectiveVoiceOptions,
+        effectiveLanguage,
+        effectiveLocale
+      );
+      const preferredNaturalDeviceVoiceId = selectPreferredEnhancedDeviceVoiceId(
+        effectiveVoiceOptions,
+        effectiveLanguage,
+        effectiveLocale
+      );
+      const autoSelectedDeviceVoiceId =
+        preferredNaturalDeviceVoiceId || preferredDeviceVoiceId;
+      const preferDeviceVoice =
+        shouldPreferNativeTtsLanguage(effectiveLanguage) && Boolean(preferredNaturalDeviceVoiceId);
+      const aiTtsInstructions = buildAiTtsInstructions({
+        languageCode: effectiveLanguage,
+        languageLabel: getPromptLanguageName(effectiveLanguage),
+      });
 
       const textToSpeak = text.trim().slice(0, AI_TTS_MAX_CHARS);
       const ttsSessionId = ++ttsPlaybackSessionRef.current;
@@ -4241,15 +4782,13 @@ function RoomView({
         void restoreRemoteAudioAfterTts(sessionId);
       };
       const speakWithDeviceVoice = (fallback: boolean) => {
-        const locale = fallback
-          ? (effectiveLanguage || "en").trim().toLowerCase() || "en"
-          : effectiveLocale;
+        const locale = effectiveLocale;
         const selectedVoice = fallback
           ? undefined
           : !useSelectedVoice
-            ? undefined
+            ? autoSelectedDeviceVoiceId
             : voiceId === AUTO_VOICE_ID
-            ? undefined
+            ? autoSelectedDeviceVoiceId
             : voiceId;
         const startedAt = Date.now();
         logTtsEvent("device_start", {
@@ -4354,6 +4893,18 @@ function RoomView({
         }
         ttsLockRef.current = true;
         setTranslationError("");
+        if (preferDeviceVoice) {
+          logTtsEvent("device_preferred", {
+            sessionId: ttsSessionId,
+            trigger,
+            language: effectiveLanguage,
+            locale: effectiveLocale,
+            selectedVoice: preferredNaturalDeviceVoiceId || "auto",
+            textChars: textToSpeak.length,
+          });
+          speakWithDeviceVoice(false);
+          return;
+        }
         if (AI_TTS_ENABLED && publicApiBase) {
           const requestSeq = ++ttsRequestSeqRef.current;
           try {
@@ -4375,32 +4926,23 @@ function RoomView({
                 playbackPrepMs: playbackSessionPrepMs,
                 textChars: textToSpeak.length,
                 language: effectiveLanguage,
+                locale: effectiveLocale,
                 guestTts: Boolean(session.guestTtsToken?.trim()),
               });
               try {
-                const response = await fetch(`${publicApiBase}/api/tts`, {
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    ...(activeBearerToken
-                      ? { Authorization: `Bearer ${activeBearerToken}` }
-                      : {}),
-                    ...(session.guestTtsToken?.trim()
-                      ? { "x-bfzoom-guest-tts-token": session.guestTtsToken.trim() }
-                      : {}),
-                  },
-                  body: JSON.stringify({
-                    text: textToSpeak,
-                    voice: AI_TTS_DEFAULT_VOICE,
-                    format,
-                  }),
+                const audioBlob = await fetchTtsAudio({
+                  apiBaseUrl: publicApiBase,
+                  bearerToken: activeBearerToken || undefined,
+                  guestTtsToken: session.guestTtsToken,
+                  text: textToSpeak,
+                  voice: AI_TTS_DEFAULT_VOICE,
+                  format,
+                  language: effectiveLanguage,
+                  locale: effectiveLocale,
+                  instructions: aiTtsInstructions,
                 });
-                const responseReceivedAt = Date.now();
-                if (!response.ok) {
-                  throw new Error(await readHttpError(response));
-                }
-                const audioBlob = await response.blob();
                 const blobReadyAt = Date.now();
+                const responseReceivedAt = blobReadyAt;
                 const audioBase64 = await blobToBase64(audioBlob);
                 const base64ReadyAt = Date.now();
                 const tempUri = `${cacheBase}bfzoom-tts-${Date.now()}-${Math.random()
@@ -4573,11 +5115,13 @@ function RoomView({
       prepareTtsPlayback,
       duckRemoteAudioForTts,
       stopTtsPlayer,
+      availableVoices,
       targetLanguage,
       targetSpeechLocale,
       ttsEnabled,
       voiceId,
       clearTtsPlaybackWatchdog,
+      getPromptLanguageName,
       queueCaptionPhoneticFlush,
       waitForTtsPlaybackStart,
     ]
@@ -4629,24 +5173,28 @@ function RoomView({
 
       const sourceLang = sourceTextLanguageRef.current || sourceLanguage;
       let translated = "";
-      try {
-        translated = await withFreshBearerToken((activeBearerToken) =>
-          translateText({
-            apiBaseUrl: publicApiBase,
-            bearerToken: activeBearerToken,
-            guestTtsToken: session.guestTtsToken,
-            text: cleanSource,
-            fromLanguage: getPromptLanguageName(sourceLang),
-            toLanguage: getPromptLanguageName(targetLanguage),
-          })
-        );
-      } catch (error) {
-        const message = error instanceof Error ? error.message : ui.translationUnavailableError;
-        setTranslationError(
-          /forbidden|403|acces refuse|accès refusé/i.test(message)
-            ? ui.translationForbidden
-            : ui.translationFallback(message)
-        );
+      if (sourceLang === targetLanguage) {
+        translated = cleanSource;
+      } else {
+        try {
+          translated = await withFreshBearerToken((activeBearerToken) =>
+            translateText({
+              apiBaseUrl: publicApiBase,
+              bearerToken: activeBearerToken,
+              guestTtsToken: session.guestTtsToken,
+              text: cleanSource,
+              fromLanguage: getPromptLanguageName(sourceLang),
+              toLanguage: getPromptLanguageName(targetLanguage),
+            })
+          );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : ui.translationUnavailableError;
+          setTranslationError(
+            /forbidden|403|acces refuse|accès refusé/i.test(message)
+              ? ui.translationForbidden
+              : ui.translationFallback(message)
+          );
+        }
       }
 
       const finalCaption = translated.trim() || cleanSource;
@@ -4696,6 +5244,7 @@ function RoomView({
 
   const handleIncomingCaption = useCallback(
     (payload: CaptionPayload, senderIdentity?: string | null) => {
+      const receivedAt = Date.now();
       const normalizedSenderIdentity = String(senderIdentity || "").trim();
       if (!normalizedSenderIdentity) return;
       if (!isTrustedHumanParticipantIdentity(normalizedSenderIdentity)) return;
@@ -4705,6 +5254,7 @@ function RoomView({
         return;
       }
       const resolvedFrom = normalizedSenderIdentity;
+      const traceId = String(payload.id || "").trim() || `incoming-${resolvedFrom}-${receivedAt}`;
       const fallbackSource = (payload.sourceText || payload.text || "").trim();
       const fallbackCaption = (payload.text || fallbackSource).trim();
       if (!fallbackCaption) return;
@@ -4732,15 +5282,49 @@ function RoomView({
       }
 
       void (async () => {
+        let consumeMs = 0;
         if (isHostSession) {
+          const consumeStartedAt = Date.now();
           const consumed = await consumeTranslationSeconds(verifiedRemoteUsageSeconds, "remote");
+          consumeMs = Date.now() - consumeStartedAt;
           if (!consumed) {
+            logCallLatencyEvent(
+              "incoming_caption_blocked",
+              {
+                traceId,
+                from: resolvedFrom,
+                sourceLang: payload.sourceLang,
+                payloadTargetLang: payload.targetLang,
+                targetLang: targetLanguage,
+                consumeMs,
+                payloadAgeMs:
+                  typeof payload.timestamp === "number"
+                    ? Math.max(0, receivedAt - payload.timestamp)
+                    : undefined,
+              },
+              "warn"
+            );
             setTranslationError(effectiveTranslationLockMessage || ui.translationUnlockHint);
             return;
           }
         }
 
         if (!payload.sourceText || !payload.sourceLang || payload.targetLang === targetLanguage) {
+          logCallLatencyEvent("incoming_caption_ready", {
+            traceId,
+            mode: "direct_payload",
+            from: resolvedFrom,
+            sourceLang: payload.sourceLang,
+            payloadTargetLang: payload.targetLang,
+            targetLang: targetLanguage,
+            consumeMs,
+            payloadAgeMs:
+              typeof payload.timestamp === "number"
+                ? Math.max(0, receivedAt - payload.timestamp)
+                : undefined,
+            totalMs: Date.now() - receivedAt,
+            captionChars: fallbackCaption.length,
+          });
           setCaptionText(fallbackCaption);
           setTranslationError("");
           autoSpeakTranslatedText(fallbackCaption);
@@ -4749,14 +5333,53 @@ function RoomView({
 
         const sourceLangCode = payload.sourceLang;
         if (!isLanguageCode(sourceLangCode)) {
+          logCallLatencyEvent("incoming_caption_ready", {
+            traceId,
+            mode: "invalid_source_lang_fallback",
+            from: resolvedFrom,
+            payloadTargetLang: payload.targetLang,
+            targetLang: targetLanguage,
+            consumeMs,
+            payloadAgeMs:
+              typeof payload.timestamp === "number"
+                ? Math.max(0, receivedAt - payload.timestamp)
+                : undefined,
+            totalMs: Date.now() - receivedAt,
+            captionChars: fallbackCaption.length,
+          });
           setCaptionText(fallbackCaption);
           setTranslationError("");
           autoSpeakTranslatedText(fallbackCaption);
           return;
         }
 
+        if (sourceLangCode === targetLanguage) {
+          const sameLanguageCaption =
+            (payload.sourceText || fallbackSource || fallbackCaption).trim() || fallbackCaption;
+          logCallLatencyEvent("incoming_caption_ready", {
+            traceId,
+            mode: "source_same_language_bypass",
+            from: resolvedFrom,
+            sourceLang: sourceLangCode,
+            payloadTargetLang: payload.targetLang,
+            targetLang: targetLanguage,
+            consumeMs,
+            payloadAgeMs:
+              typeof payload.timestamp === "number"
+                ? Math.max(0, receivedAt - payload.timestamp)
+                : undefined,
+            totalMs: Date.now() - receivedAt,
+            captionChars: sameLanguageCaption.length,
+          });
+          setCaptionText(sameLanguageCaption);
+          setTranslationError("");
+          autoSpeakTranslatedText(sameLanguageCaption);
+          return;
+        }
+
         const sequence = ++incomingTranslationSeqRef.current;
         try {
+          const translateStartedAt = Date.now();
           const personalized = await withFreshBearerToken((activeBearerToken) =>
             translateText({
               apiBaseUrl: publicApiBase,
@@ -4769,11 +5392,46 @@ function RoomView({
           );
           if (sequence !== incomingTranslationSeqRef.current) return;
           const caption = personalized.trim() || fallbackCaption;
+          logCallLatencyEvent("incoming_caption_ready", {
+            traceId,
+            mode: "personalized_translation",
+            from: resolvedFrom,
+            sourceLang: sourceLangCode,
+            payloadTargetLang: payload.targetLang,
+            targetLang: targetLanguage,
+            consumeMs,
+            translateMs: Date.now() - translateStartedAt,
+            payloadAgeMs:
+              typeof payload.timestamp === "number"
+                ? Math.max(0, receivedAt - payload.timestamp)
+                : undefined,
+            totalMs: Date.now() - receivedAt,
+            captionChars: caption.length,
+          });
           setCaptionText(caption);
           setTranslationError("");
           autoSpeakTranslatedText(caption);
         } catch {
           if (sequence !== incomingTranslationSeqRef.current) return;
+          logCallLatencyEvent(
+            "incoming_caption_ready",
+            {
+              traceId,
+              mode: "translation_fallback",
+              from: resolvedFrom,
+              sourceLang: sourceLangCode,
+              payloadTargetLang: payload.targetLang,
+              targetLang: targetLanguage,
+              consumeMs,
+              payloadAgeMs:
+                typeof payload.timestamp === "number"
+                  ? Math.max(0, receivedAt - payload.timestamp)
+                  : undefined,
+              totalMs: Date.now() - receivedAt,
+              captionChars: fallbackCaption.length,
+            },
+            "warn"
+          );
           setCaptionText(fallbackCaption);
           autoSpeakTranslatedText(fallbackCaption);
         }
@@ -4825,7 +5483,8 @@ function RoomView({
           if (!senderIdentity) return;
           const parsed = JSON.parse(raw) as TranslationAccessPayload;
           if (parsed.from && parsed.from.trim() && parsed.from.trim() !== senderIdentity) return;
-          if (getParticipantRole(senderIdentity) !== "host") return;
+          if (isTranslatorIdentity(senderIdentity)) return;
+          if (getParticipantRoleFromMetadata(participant?.metadata) === "translator") return;
           if (parsed.roomId && parsed.roomId !== session.roomId) return;
           setRoomTranslationEnabled(Boolean(parsed.enabled));
           const normalizedReason = String(parsed.reason || "").trim();
@@ -4847,7 +5506,6 @@ function RoomView({
     };
   }, [
     applyTalkieLockPayload,
-    getParticipantRole,
     handleIncomingCaption,
     isHostSession,
     room,
@@ -5121,29 +5779,42 @@ function RoomView({
     async (
       transcribedText: string,
       sourceLang: LanguageCode = sourceLanguage,
-      durationSeconds = 1
+      durationSeconds = 1,
+      trace?: ProcessTranscriptTrace
     ) => {
       const clean = transcribedText.trim();
       if (!clean) return;
+      const processStartedAt = Date.now();
+      const traceId = trace?.traceId || `${trace?.path || "direct"}-${processStartedAt}`;
       sourceTextLanguageRef.current = sourceLang;
       setSourceText(clean);
       setSubtitleSpeakerLabel(`${session.displayName || session.identity || "BFZoom"}${ui.meSuffix}`);
       setTranslationError("");
 
       let translated = "";
+      let translationMode: "api" | "same_language_bypass" | "fallback_source" = "api";
+      let translateMs = 0;
       try {
-        translated = await withFreshBearerToken((activeBearerToken) =>
-          translateText({
-            apiBaseUrl: publicApiBase,
-            bearerToken: activeBearerToken,
-            guestTtsToken: session.guestTtsToken,
-            text: clean,
-            fromLanguage: getPromptLanguageName(sourceLang),
-            toLanguage: getPromptLanguageName(targetLanguage),
-          })
-        );
+        if (sourceLang === targetLanguage) {
+          translated = clean;
+          translationMode = "same_language_bypass";
+        } else {
+          const translateStartedAt = Date.now();
+          translated = await withFreshBearerToken((activeBearerToken) =>
+            translateText({
+              apiBaseUrl: publicApiBase,
+              bearerToken: activeBearerToken,
+              guestTtsToken: session.guestTtsToken,
+              text: clean,
+              fromLanguage: getPromptLanguageName(sourceLang),
+              toLanguage: getPromptLanguageName(targetLanguage),
+            })
+          );
+          translateMs = Date.now() - translateStartedAt;
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : ui.translationUnavailableError;
+        translationMode = "fallback_source";
         setTranslationError(
           /forbidden|403|acces refuse|accès refusé/i.test(message)
             ? ui.translationForbidden
@@ -5158,8 +5829,10 @@ function RoomView({
       setCaptionText(finalCaption);
       setTranslationError("");
       autoSpeakTranslatedText(finalCaption);
+      let publishMs = 0;
       if (captionsEnabled) {
-        void publishCaption({
+        const publishStartedAt = Date.now();
+        await publishCaption({
           id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           roomId: session.roomId,
           from: session.identity,
@@ -5171,7 +5844,37 @@ function RoomView({
           durationSeconds: Math.max(1, Math.min(300, Math.floor(durationSeconds || 1))),
           timestamp: Date.now(),
         }).catch(() => {});
+        publishMs = Date.now() - publishStartedAt;
       }
+      const completedAt = Date.now();
+      logCallLatencyEvent("transcript_ready", {
+        traceId,
+        path: trace?.path || "direct",
+        sourceLang,
+        targetLang: targetLanguage,
+        translationMode,
+        transcribeMs: trace?.transcribeMs,
+        draftReadyMs: trace?.draftReadyMs,
+        reviewToConfirmMs:
+          typeof trace?.reviewOpenedAt === "number" && typeof trace?.confirmStartedAt === "number"
+            ? Math.max(0, trace.confirmStartedAt - trace.reviewOpenedAt)
+            : undefined,
+        consumeMs: trace?.consumeMs,
+        lockClaimMs: trace?.lockClaimMs,
+        translateMs,
+        publishMs,
+        processMs: completedAt - processStartedAt,
+        flowMs:
+          typeof trace?.stopStartedAt === "number"
+            ? Math.max(0, completedAt - trace.stopStartedAt)
+            : undefined,
+        capturedToCaptionMs:
+          typeof trace?.segmentCapturedAt === "number"
+            ? Math.max(0, completedAt - trace.segmentCapturedAt)
+            : undefined,
+        textChars: clean.length,
+        captionChars: finalCaption.length,
+      });
     },
     [
       captionsEnabled,
@@ -5269,6 +5972,8 @@ function RoomView({
     stopTranslateInFlightRef.current = true;
     manualStopRequestIdRef.current += 1;
     const stopRequestId = manualStopRequestIdRef.current;
+    const stopStartedAt = Date.now();
+    const traceId = `manual-${stopRequestId}-${stopStartedAt}`;
     const abortController = typeof AbortController === "undefined" ? null : new AbortController();
     activeTranscriptionAbortControllerRef.current?.abort();
     activeTranscriptionAbortControllerRef.current = abortController;
@@ -5342,6 +6047,7 @@ function RoomView({
         throw new Error(ui.audioTooShort);
       }
 
+      const transcribeStartedAt = Date.now();
       const transcribed = await transcribeWithFallbackLanguage(
         stable.uri,
         sourceLanguage,
@@ -5357,6 +6063,7 @@ function RoomView({
           signal: abortController?.signal,
         }
       );
+      const transcribeMs = Date.now() - transcribeStartedAt;
       if (!transcribed || isLikelyLowSignalTranscript(transcribed, sourceLanguage)) {
         throw new Error("No speech detected.");
       }
@@ -5379,11 +6086,40 @@ function RoomView({
       setManualDraftVisible(true);
       setTranslationPanelOpen(true);
       setTranslationError("");
+      const reviewOpenedAt = Date.now();
+      const draftReadyMs = reviewOpenedAt - stopStartedAt;
+      manualDraftLatencyRef.current = {
+        traceId,
+        stopStartedAt,
+        reviewOpenedAt,
+        draftReadyMs,
+        transcribeMs,
+        recordingMs: durationMs,
+        usageSeconds,
+        sourceLang: sourceLanguage,
+        targetLang: targetLanguage,
+        draftChars: draft.length,
+      };
+      logCallLatencyEvent("manual_review_ready", {
+        traceId,
+        sourceLang: sourceLanguage,
+        targetLang: targetLanguage,
+        recordingMs: durationMs,
+        recorderStopMs,
+        postStopSettleMs,
+        resolveUriMs,
+        stabilizeMs,
+        transcribeMs,
+        draftReadyMs,
+        usageSeconds,
+        draftChars: draft.length,
+      });
     } catch (err) {
       if (!isStopRequestActive() && appStateRef.current !== "active") {
         return;
       }
       const raw = err instanceof Error ? err.message : String(err || "");
+      manualDraftLatencyRef.current = null;
       if (/no speech detected/i.test(raw)) {
         setSourceText("");
         sourceTextLanguageRef.current = sourceLanguage;
@@ -5395,6 +6131,17 @@ function RoomView({
         setManualDraftSourceLanguage(sourceLanguage);
         setManualDraftSending(false);
       }
+      logCallLatencyEvent(
+        "manual_review_failed",
+        {
+          traceId,
+          sourceLang: sourceLanguage,
+          targetLang: targetLanguage,
+          totalMs: Date.now() - stopStartedAt,
+          message: raw || "unknown",
+        },
+        "warn"
+      );
       setTranslationError(toFriendlyAudioError(err, language));
     } finally {
       if (activeTranscriptionAbortControllerRef.current === abortController) {
@@ -5440,9 +6187,11 @@ function RoomView({
     ui.audioTooShort,
     ui.meSuffix,
     ui.speakAtLeastOneSecond,
+    targetLanguage,
   ]);
 
   const cancelManualDraft = useCallback(() => {
+    manualDraftLatencyRef.current = null;
     setManualDraftVisible(false);
     setManualDraftText("");
     setManualDraftDurationSeconds(1);
@@ -5460,15 +6209,37 @@ function RoomView({
       return;
     }
     const usageSeconds = Math.max(1, Math.min(300, Math.floor(manualDraftDurationSeconds || 1)));
+    const confirmStartedAt = Date.now();
+    const manualDraftLatency = manualDraftLatencyRef.current;
+    const traceId = manualDraftLatency?.traceId || `manual-send-${confirmStartedAt}`;
 
     setManualDraftSending(true);
     setTranslationBusy(true);
     setTranslationError("");
     let shouldRestoreRoomMic = false;
     let talkieLockClaimed = false;
+    let sendCompleted = false;
+    let draftDismissed = false;
     try {
+      const consumeStartedAt = Date.now();
       const consumed = await consumeTranslationSeconds(usageSeconds, "local");
+      const consumeMs = Date.now() - consumeStartedAt;
       if (!consumed) {
+        logCallLatencyEvent(
+          "manual_send_blocked",
+          {
+            traceId,
+            sourceLang: manualDraftSourceLanguage,
+            targetLang: targetLanguage,
+            reviewToConfirmMs:
+              typeof manualDraftLatency?.reviewOpenedAt === "number"
+                ? Math.max(0, confirmStartedAt - manualDraftLatency.reviewOpenedAt)
+                : undefined,
+            consumeMs,
+            usageSeconds,
+          },
+          "warn"
+        );
         setTranslationError(effectiveTranslationLockMessage || ui.translationUnlockHint);
         return;
       }
@@ -5480,11 +6251,37 @@ function RoomView({
       setManualDraftDurationSeconds(1);
       setManualDraftSourceLanguage(sourceLanguage);
       setTalkieUiState("idle");
+      draftDismissed = true;
       shouldRestoreRoomMic = true;
+      const lockClaimStartedAt = Date.now();
       await publishTalkieLock("claim");
+      const lockClaimMs = Date.now() - lockClaimStartedAt;
       talkieLockClaimed = true;
-      await processTranscript(draft, manualDraftSourceLanguage, usageSeconds);
+      await processTranscript(draft, manualDraftSourceLanguage, usageSeconds, {
+        path: "manual_send",
+        traceId,
+        stopStartedAt: manualDraftLatency?.stopStartedAt,
+        reviewOpenedAt: manualDraftLatency?.reviewOpenedAt,
+        confirmStartedAt,
+        consumeMs,
+        lockClaimMs,
+        transcribeMs: manualDraftLatency?.transcribeMs,
+        draftReadyMs: manualDraftLatency?.draftReadyMs,
+      });
+      sendCompleted = true;
+      manualDraftLatencyRef.current = null;
     } catch (err) {
+      logCallLatencyEvent(
+        "manual_send_failed",
+        {
+          traceId,
+          sourceLang: manualDraftSourceLanguage,
+          targetLang: targetLanguage,
+          totalMs: Date.now() - confirmStartedAt,
+          message: err instanceof Error ? err.message : String(err || "unknown"),
+        },
+        "warn"
+      );
       setTranslationError(toFriendlyAudioError(err, language));
     } finally {
       if (talkieLockClaimed) {
@@ -5495,6 +6292,9 @@ function RoomView({
       }
       setManualDraftSending(false);
       setTranslationBusy(false);
+      if (!sendCompleted && draftDismissed) {
+        manualDraftLatencyRef.current = null;
+      }
     }
   }, [
     consumeTranslationSeconds,
@@ -5510,6 +6310,7 @@ function RoomView({
     session.displayName,
     session.identity,
     sourceLanguage,
+    targetLanguage,
     translationControlsDisabled,
     ui.meSuffix,
     ui.translationUnlockHint,
@@ -5560,6 +6361,7 @@ function RoomView({
     setManualDraftDurationSeconds(1);
     setManualDraftSourceLanguage(sourceLanguage);
     setManualDraftSending(false);
+    manualDraftLatencyRef.current = null;
     manualPushToTalkPressedRef.current = true;
     pendingStopAfterStartRef.current = false;
     manualStartInFlightRef.current = true;
@@ -5731,6 +6533,7 @@ function RoomView({
         try {
           activeTranscriptionAbortControllerRef.current?.abort();
           activeTranscriptionAbortControllerRef.current = abortController;
+          const transcribeStartedAt = Date.now();
           const transcribed = await transcribeWithFallbackLanguage(
             segment.uri,
             segment.sourceLang,
@@ -5739,6 +6542,7 @@ function RoomView({
               signal: abortController?.signal,
             }
           );
+          const transcribeMs = Date.now() - transcribeStartedAt;
           if (!isRealtimeSessionActive()) return;
           const clean = transcribed.trim();
           if (!clean) continue;
@@ -5746,8 +6550,11 @@ function RoomView({
           lastTranscriptRef.current = clean;
           if (!incremental) continue;
 
+          let consumeMs = 0;
           if (isHostSession) {
+            const consumeStartedAt = Date.now();
             const consumed = await consumeTranslationSeconds(1, "local");
+            consumeMs = Date.now() - consumeStartedAt;
             if (!isRealtimeSessionActive()) return;
             if (!consumed) {
               setTranslationError(effectiveTranslationLockMessage || ui.translationUnlockHint);
@@ -5755,7 +6562,13 @@ function RoomView({
               break;
             }
           }
-          await processTranscript(incremental, segment.sourceLang, 1);
+          await processTranscript(incremental, segment.sourceLang, 1, {
+            path: "realtime",
+            traceId: `realtime-${segment.id}`,
+            transcribeMs,
+            consumeMs,
+            segmentCapturedAt: segment.capturedAt,
+          });
           if (!isRealtimeSessionActive()) return;
           setRealtimeLatencyMs(Date.now() - segment.capturedAt);
           setRealtimeStatus("running");
@@ -6210,6 +7023,13 @@ function RoomView({
   }, [aiBackgroundUrl, backgroundMode, localParticipant]);
 
   useEffect(() => {
+    applyVirtualBackgroundEffectRef.current = applyVirtualBackgroundEffect;
+    return () => {
+      applyVirtualBackgroundEffectRef.current = null;
+    };
+  }, [applyVirtualBackgroundEffect]);
+
+  useEffect(() => {
     let cancelled = false;
 
     const run = async () => {
@@ -6529,6 +7349,7 @@ function RoomView({
             <Pressable
               style={({ pressed }) => [
                 styles.talkieButton,
+                isTabletLayout && styles.talkieButtonTablet,
                 isCompactPhone && styles.talkieButtonCompact,
                 talkieUiState === "starting" && styles.talkieButtonStarting,
                 talkieLooksRecording && styles.talkieButtonRecording,
@@ -6549,6 +7370,7 @@ function RoomView({
               style={[
                 styles.talkieButton,
                 styles.talkieButtonPassive,
+                isTabletLayout && styles.talkieButtonTablet,
                 isCompactPhone && styles.talkieButtonCompact,
                 (talkieUiState === "starting" ||
                   talkieUiState === "review" ||
@@ -6584,7 +7406,7 @@ function RoomView({
     </>
   );
   const renderSubtitleContent = (lineClamp: { source: number; target: number }) => (
-    <View style={styles.subtitleStack}>
+    <View style={[styles.subtitleStack, isTabletLayout && styles.subtitleStackTablet]}>
       {shouldShowSourceSubtitle ? (
         <Pressable
           style={({ pressed }) => [
@@ -6645,6 +7467,20 @@ function RoomView({
   const renderLanguageSettings = (prefix: string) => (
     <>
       <View style={styles.controlSettingGroup}>
+        <View style={styles.languageSettingsHeader}>
+          <Text style={styles.langSelectorLabel}>{languagePairSummary}</Text>
+          <Pressable
+            onPress={swapLanguages}
+            style={({ pressed }) => [
+              styles.languageSwapButton,
+              pressed && styles.languageSwapButtonPressed,
+            ]}
+          >
+            <Text style={styles.languageSwapButtonText}>{ui.swap}</Text>
+          </Pressable>
+        </View>
+      </View>
+      <View style={styles.controlSettingGroup}>
         <Text style={styles.langSelectorLabel}>{ui.languageYouSpeak}: {sourceLanguageLabel}</Text>
         <ScrollView
           horizontal
@@ -6698,8 +7534,8 @@ function RoomView({
     return (
       <View style={styles.roomRoot}>
         {renderRoomAlert()}
-        <View style={styles.audioCallStage}>
-          <View style={styles.audioCallCard}>
+        <View style={[styles.audioCallStage, isTabletLayout && styles.audioCallStageTablet]}>
+          <View style={[styles.audioCallCard, isTabletLayout && styles.audioCallCardTablet]}>
             <Text style={styles.audioCallTitle}>{ui.audioCallTitle}</Text>
             <Text style={styles.audioCallSubtitle}>
               {connected ? ui.connected : ui.connecting} · Q:{qualityLabel}
@@ -6836,7 +7672,13 @@ function RoomView({
     <View style={styles.roomRoot}>
       {renderRoomAlert()}
       {!immersiveMode ? (
-        <View style={[styles.connectionBadge, videoFullscreen && styles.connectionBadgeFloating]}>
+        <View
+          style={[
+            styles.connectionBadge,
+            videoFullscreen && !useTabletSplitLayout && styles.connectionBadgeFloating,
+            isTabletLayout && styles.connectionBadgeTablet,
+          ]}
+        >
           <View style={styles.connectionRow}>
             <View style={styles.connectionBadgeSummary}>
               {topStatusBadgeLabel ? (
@@ -6866,6 +7708,512 @@ function RoomView({
         </View>
       ) : null}
 
+      {useTabletSplitLayout ? (
+        <View style={styles.roomSplitLayout}>
+          <View style={styles.roomSplitStageColumn}>
+            <View
+              style={[
+                styles.videoStage,
+                videoFullscreen && styles.videoStageFullscreen,
+                immersiveMode && styles.videoStageImmersive,
+                isVeryCompactPhone && styles.videoStageCompact,
+              ]}
+            >
+              {renderImmersiveControls()}
+              <View
+                style={[
+                  styles.stageBackgroundLayer,
+                  { backgroundColor: selectedBackgroundPreset.color },
+                ]}
+              >
+                {backgroundMode === "ai" && aiBackgroundUrl ? (
+                  <Image
+                    source={{ uri: aiBackgroundUrl }}
+                    style={styles.stageBackgroundImage}
+                    resizeMode="cover"
+                  />
+                ) : null}
+              </View>
+
+              {focusedTrack ? (
+                <View
+                  style={[styles.focusedVideoCard, immersiveMode && styles.focusedVideoCardImmersive]}
+                  onLayout={({ nativeEvent }) => {
+                    const { width, height } = nativeEvent.layout;
+                    handleFocusedVideoLayout(width, height);
+                  }}
+                >
+                  <Pressable
+                    style={styles.focusedVideoPressable}
+                    onPress={() => {
+                      setFocusedTrackKey(trackKey(focusedTrack));
+                      setImmersiveMode((value) => !value);
+                    }}
+                    onLongPress={() => {
+                      const key = trackKey(focusedTrack);
+                      setPinnedTrackKey((current) => (current === key ? null : key));
+                    }}
+                  >
+                    <VideoTrack
+                      trackRef={focusedTrack}
+                      style={isVeryCompactPhone ? styles.focusedVideoTrackCompact : styles.focusedVideoTrack}
+                      mirror={focusedTrack.participant.isLocal}
+                    />
+                  </Pressable>
+
+                  {previewTrack && !immersiveMode ? (
+                    <Animated.View
+                      style={[
+                        styles.localPreviewCard,
+                        !previewPositionReady && styles.localPreviewCardDefaultPosition,
+                        previewPositionReady && {
+                          left: previewPosition.x,
+                          top: previewPosition.y,
+                        },
+                        {
+                          width: previewCardSize.width,
+                          height: previewCardSize.height,
+                        },
+                      ]}
+                      {...(previewPanResponder ? previewPanResponder.panHandlers : {})}
+                    >
+                      <Pressable
+                        style={[
+                          styles.localPreviewPressable,
+                          activeSpeakerIdentity === previewTrack.participant.identity &&
+                            styles.trackCardActiveSpeaker,
+                          pinnedTrackKey === trackKey(previewTrack) && styles.trackCardPinned,
+                        ]}
+                        onPress={() => handlePreviewTap(previewTrack)}
+                        onLongPress={() => {
+                          const key = trackKey(previewTrack);
+                          setPinnedTrackKey((current) => (current === key ? null : key));
+                        }}
+                      >
+                        <VideoTrack
+                          trackRef={previewTrack}
+                          style={styles.localPreviewTrack}
+                          mirror={previewTrack.participant.isLocal}
+                        />
+                      </Pressable>
+                    </Animated.View>
+                  ) : null}
+                </View>
+              ) : (
+                <View style={styles.videoPlaceholder}>
+                  <Text style={styles.placeholderText}>{ui.noCameraTrack}</Text>
+                </View>
+              )}
+
+              {hasVisibleSubtitle && (
+                <View
+                  pointerEvents="box-none"
+                  style={[
+                    styles.subtitleOverlay,
+                    videoFullscreen && !immersiveMode && styles.subtitleOverlayFullscreen,
+                    immersiveMode && styles.subtitleOverlayImmersive,
+                    immersiveMode && { top: immersiveSubtitleTopOffset },
+                  ]}
+                >
+                  {renderSubtitleContent({
+                    source: immersiveMode ? 3 : 2,
+                    target: immersiveMode ? 4 : 3,
+                  })}
+                </View>
+              )}
+
+              <View
+                pointerEvents="box-none"
+                style={[
+                  styles.talkieOverlay,
+                  styles.talkieOverlayTablet,
+                  isCompactPhone && styles.talkieOverlayCompact,
+                  immersiveMode && styles.talkieOverlayImmersive,
+                ]}
+              >
+                {renderTalkieControl()}
+              </View>
+            </View>
+          </View>
+
+          {!immersiveMode ? (
+            <View style={[styles.roomSplitPanelColumn, { width: tabletPanelWidth }]}>
+              <View style={[styles.panelDock, styles.panelDockTablet]}>
+      {switchTracks.length ? (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.quickStrip}
+          contentContainerStyle={styles.quickStripRow}
+        >
+          {switchTracks.map((item) => {
+            const key = trackKey(item);
+            return (
+              <Pressable
+                key={`quick-${key}`}
+                style={[
+                  styles.quickThumbCard,
+                  activeSpeakerIdentity === item.participant.identity &&
+                    styles.trackCardActiveSpeaker,
+                  pinnedTrackKey === key && styles.trackCardPinned,
+                ]}
+                onPress={() => focusTrackManually(item)}
+                onLongPress={() =>
+                  setPinnedTrackKey((current) => (current === key ? null : key))
+                }
+              >
+                <VideoTrack
+                  trackRef={item}
+                  style={styles.quickThumbTrack}
+                  mirror={item.participant.isLocal}
+                />
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+      ) : null}
+
+      {shouldShowAccordionPanel("controls") ? (
+      <View style={styles.accordionCard}>
+        <Pressable
+          style={styles.accordionHeader}
+          onPress={() => toggleAccordionPanel("controls")}
+        >
+          <View style={styles.accordionHeaderText}>
+            <Text style={styles.accordionTitle}>{ui.controls}</Text>
+            <Text style={styles.accordionMeta}>
+              {`${isMicrophoneEnabled ? ui.micOn : ui.micOff} · ${isCameraEnabled ? ui.cameraOn : ui.cameraOff} · ${
+                cameraFacingMode === "user" ? ui.frontCamera : ui.backCamera
+              } · ${languagePairSummary}`}
+            </Text>
+          </View>
+          <Text style={styles.accordionIcon}>{controlsOpen ? "−" : "+"}</Text>
+        </Pressable>
+
+        {controlsOpen ? (
+          <View style={styles.controls}>
+            <Pressable style={styles.controlButton} onPress={toggleMicrophone}>
+              <Text style={styles.controlButtonText}>{isMicrophoneEnabled ? ui.micOn : ui.micOff}</Text>
+            </Pressable>
+            <Pressable style={styles.controlButton} onPress={toggleCamera}>
+              <Text style={styles.controlButtonText}>{isCameraEnabled ? ui.cameraOn : ui.cameraOff}</Text>
+            </Pressable>
+            <Pressable style={styles.controlButton} onPress={toggleCameraFacing}>
+              <Text style={styles.controlButtonText}>
+                {cameraFacingMode === "user" ? ui.frontCamera : ui.backCamera}
+              </Text>
+            </Pressable>
+            <Pressable
+              style={[styles.controlButton, followActiveSpeaker && styles.realtimeButton]}
+              onPress={() => setFollowActiveSpeaker((value) => !value)}
+            >
+              <Text style={styles.controlButtonText}>{ui.autoSpeakerToggle(followActiveSpeaker)}</Text>
+            </Pressable>
+            {focusedTrack ? (
+              <Pressable
+                style={[styles.controlButton, pinnedTrackKey && styles.realtimeButton]}
+                onPress={() => {
+                  const key = trackKey(focusedTrack);
+                  setPinnedTrackKey((current) => (current === key ? null : key));
+                }}
+              >
+                <Text style={styles.controlButtonText}>
+                  {pinnedTrackKey === trackKey(focusedTrack) ? ui.unpinFocus : ui.pinFocus}
+                </Text>
+              </Pressable>
+            ) : null}
+            <View style={styles.controlSettingGroup}>
+              <Text style={styles.langSelectorLabel}>{ui.subtitleLayout}</Text>
+              <View style={styles.row}>
+                <Pressable
+                  style={[
+                    styles.toggleChip,
+                    subtitleDisplayMode === "dual" && styles.toggleChipActive,
+                  ]}
+                  onPress={() => setSubtitleDisplayMode("dual")}
+                >
+                  <Text
+                    style={[
+                      styles.toggleChipText,
+                      subtitleDisplayMode === "dual" && styles.toggleChipTextActive,
+                    ]}
+                  >
+                    {ui.subtitleLayoutDual}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  style={[
+                    styles.toggleChip,
+                    subtitleDisplayMode === "translationOnly" && styles.toggleChipActive,
+                  ]}
+                  onPress={() => setSubtitleDisplayMode("translationOnly")}
+                >
+                  <Text
+                    style={[
+                      styles.toggleChipText,
+                      subtitleDisplayMode === "translationOnly" &&
+                        styles.toggleChipTextActive,
+                    ]}
+                  >
+                    {ui.subtitleLayoutTranslationOnly}
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+            <View style={styles.controlSettingGroup}>
+              <Text style={styles.langSelectorLabel}>{ui.translatedVoiceSetting}</Text>
+              <View style={styles.row}>
+                <Pressable
+                  style={[styles.toggleChip, translatedVoiceEnabled && styles.toggleChipActive]}
+                  onPress={() => setTtsEnabled(true)}
+                >
+                  <Text
+                    style={[
+                      styles.toggleChipText,
+                      translatedVoiceEnabled && styles.toggleChipTextActive,
+                    ]}
+                  >
+                    {ui.translatedVoiceOn}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.toggleChip, !translatedVoiceEnabled && styles.toggleChipActive]}
+                  onPress={() => setTtsEnabled(false)}
+                >
+                  <Text
+                    style={[
+                      styles.toggleChipText,
+                      !translatedVoiceEnabled && styles.toggleChipTextActive,
+                    ]}
+                  >
+                    {ui.translatedVoiceOff}
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+            <View style={styles.controlSettingGroup}>
+              <Text style={styles.langSelectorLabel}>{ui.fullTranslationSetting}</Text>
+              <Pressable
+                style={[
+                  styles.controlButton,
+                  styles.controlButtonSecondary,
+                  !visibleTargetSubtitleText && styles.controlButtonDisabled,
+                ]}
+                onPress={() => openExpandedSubtitle("target")}
+                disabled={!visibleTargetSubtitleText}
+              >
+                <Text style={styles.controlButtonText}>{ui.viewFullTranslation}</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
+      </View>
+      ) : null}
+
+      {shouldShowAccordionPanel("translation") ? (
+      <View style={styles.accordionCard}>
+          <Pressable
+            style={styles.accordionHeader}
+            onPress={() => toggleAccordionPanel("translation")}
+          >
+            <View style={styles.accordionHeaderText}>
+              <Text style={styles.accordionTitle}>{ui.translation}</Text>
+              {topStatusBadgeLabel ? (
+                <Text style={styles.accordionMeta}>
+                  {topStatusBadgeLabel}
+                </Text>
+              ) : null}
+            </View>
+            <Text style={styles.accordionIcon}>{translationPanelOpen ? "−" : "+"}</Text>
+          </Pressable>
+
+        {translationPanelOpen ? (
+          <ScrollView
+            style={[styles.translationPanelScroll, styles.translationPanelScrollTablet]}
+            contentContainerStyle={styles.translationPanel}
+            nestedScrollEnabled
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator
+          >
+            {renderLanguageSettings("translation")}
+
+            {isHostSession ? (
+              <>
+                {translationEntitlement.loading ? (
+                  <Text style={styles.realtimeStatus}>{ui.checkingCredits}</Text>
+                ) : null}
+                {translationRemainingLabel ? (
+                  <Text style={styles.realtimeStatus}>
+                    {ui.hostTranslationRemaining(translationRemainingLabel)}
+                  </Text>
+                ) : null}
+                {!effectiveTranslationEnabled ? (
+                  <Text style={styles.translationLockNotice}>
+                    {effectiveTranslationLockMessage || ui.translationUnlockHint}
+                  </Text>
+                ) : null}
+                {renderInCallTopUpCta()}
+
+              </>
+            ) : (
+              <>
+                {translationRemainingLabel ? (
+                  <Text style={styles.realtimeStatus}>
+                    {ui.hostTranslationRemaining(translationRemainingLabel)}
+                  </Text>
+                ) : null}
+                {!effectiveTranslationEnabled ? (
+                  <Text style={styles.translationLockNotice}>
+                    {effectiveTranslationLockMessage || ui.translationWaitHostHint}
+                  </Text>
+                ) : null}
+                {renderInCallTopUpCta()}
+              </>
+            )}
+
+            {targetVoiceLikelyUnavailable ? (
+              <Text style={styles.realtimeStatus}>
+                {ui.translatedVoiceUnavailable(targetLanguageLabel)}
+              </Text>
+            ) : null}
+
+            {manualDraftVisible && !useManualDraftFullscreen ? (
+              <View style={styles.manualDraftCard}>
+                <Text style={styles.realtimeStatus}>{ui.verifyTextBeforeSend}</Text>
+                <TextInput
+                  style={[styles.aiPromptInput, styles.manualDraftInput]}
+                  value={manualDraftText}
+                  onChangeText={setManualDraftText}
+                  editable={!manualDraftSending}
+                  multiline
+                  textAlignVertical="top"
+                  placeholder={ui.correctTextPlaceholder}
+                  placeholderTextColor="#64748b"
+                  returnKeyType="done"
+                  blurOnSubmit
+                  onSubmitEditing={dismissKeyboard}
+                />
+                <View style={styles.row}>
+                  {keyboardVisible ? (
+                    <Pressable style={styles.controlButton} onPress={dismissKeyboard}>
+                      <Text style={styles.controlButtonText}>{ui.closeKeyboard}</Text>
+                    </Pressable>
+                  ) : null}
+                  <Pressable
+                    style={[styles.controlButton, manualDraftSending && styles.controlButtonDisabled]}
+                    onPress={cancelManualDraft}
+                    disabled={manualDraftSending}
+                  >
+                    <Text style={styles.controlButtonText}>{ui.cancel}</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[
+                      styles.controlButton,
+                      styles.realtimeButton,
+                      (!manualDraftText.trim() || manualDraftSending) && styles.controlButtonDisabled,
+                    ]}
+                    onPress={() => {
+                      void confirmManualDraftSend();
+                    }}
+                    disabled={!manualDraftText.trim() || manualDraftSending}
+                  >
+                    {manualDraftSending ? (
+                      <ActivityIndicator size="small" color="#ffffff" />
+                    ) : (
+                      <Text style={styles.controlButtonText}>{ui.send}</Text>
+                    )}
+                  </Pressable>
+                </View>
+              </View>
+            ) : null}
+
+            {sourceText ? (
+              <View style={styles.infoStack}>
+                <Text style={styles.realtimeStatus}>{ui.source} ({sourceLanguageLabel})</Text>
+                <Text style={[styles.sourceLine, sourceLanguageIsRtl && styles.rtlText]}>{sourceText}</Text>
+              </View>
+            ) : null}
+            {captionText ? (
+              <View style={styles.infoStack}>
+                <Text style={styles.realtimeStatus}>{ui.translation} ({targetLanguageLabel})</Text>
+                <Text style={[styles.captionLine, targetLanguageIsRtl && styles.rtlText]}>
+                  {captionText}
+                </Text>
+                <View style={styles.rowSplit}>
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.controlButton,
+                      styles.controlButtonSplit,
+                      isCompactPhone && styles.controlButtonSplitStack,
+                      styles.realtimeButton,
+                      retranslateButtonActive && styles.controlButtonPrimaryActive,
+                      pressed && styles.controlButtonPrimaryPressed,
+                      (translationBusy || !sourceText.trim()) && styles.controlButtonDisabled,
+                    ]}
+                    onPress={triggerRetranslate}
+                    disabled={translationBusy || !sourceText.trim()}
+                  >
+                    <View style={styles.controlButtonContent}>
+                      <View style={styles.controlButtonSpinnerSlot}>
+                        {(translationBusy || retranslateButtonActive) ? (
+                          <ActivityIndicator size="small" color="#ffffff" />
+                        ) : null}
+                      </View>
+                      <Text style={styles.controlButtonText} numberOfLines={1}>
+                        {translationBusy || retranslateButtonActive
+                          ? ui.retranslateBusy
+                          : ui.retranslate}
+                      </Text>
+                    </View>
+                  </Pressable>
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.controlButton,
+                      styles.controlButtonSplit,
+                      isCompactPhone && styles.controlButtonSplitStack,
+                      styles.controlButtonSecondary,
+                      replayButtonActive && styles.controlButtonActive,
+                      pressed && styles.controlButtonPressed,
+                      (!translatedVoiceEnabled ||
+                        translationBusy ||
+                        !captionText.trim()) &&
+                        styles.controlButtonDisabled,
+                    ]}
+                    onPress={replayCaption}
+                    disabled={!translatedVoiceEnabled || translationBusy || !captionText.trim()}
+                  >
+                    <View style={styles.controlButtonContent}>
+                      <View style={styles.controlButtonSpinnerSlot}>
+                        {replayButtonActive ? (
+                          <ActivityIndicator size="small" color="#ffffff" />
+                        ) : null}
+                      </View>
+                      <Text style={styles.controlButtonText} numberOfLines={1}>
+                        {replayButtonActive ? ui.replayBusy : ui.replay}
+                      </Text>
+                    </View>
+                  </Pressable>
+                </View>
+                {captionPhoneticBusy ? (
+                  <Text style={styles.captionPhoneticLine}>{ui.phoneticLoading}</Text>
+                ) : captionPhoneticText ? (
+                  <Text style={styles.captionPhoneticLine}>{ui.phonetic(captionPhoneticText)}</Text>
+                ) : null}
+              </View>
+            ) : null}
+            {recordingError ? <Text style={styles.error}>{recordingError}</Text> : null}
+            {translationError ? <Text style={styles.error}>{translationError}</Text> : null}
+            {voiceLoadError ? <Text style={styles.error}>{voiceLoadError}</Text> : null}
+          </ScrollView>
+        ) : null}
+      </View>
+      ) : null}
+              </View>
+            </View>
+          ) : null}
+        </View>
+      ) : (
+        <>
         <View
           style={[
             styles.videoStage,
@@ -7067,12 +8415,6 @@ function RoomView({
                   {cameraFacingMode === "user" ? ui.frontCamera : ui.backCamera}
                 </Text>
               </Pressable>
-              <View style={styles.controlSettingGroup}>
-                <Text style={styles.langSelectorLabel}>FR / EN</Text>
-                <View style={styles.row}>
-                  <LanguageSwitcher compact inverted />
-                </View>
-              </View>
               <Pressable
                 style={[styles.controlButton, followActiveSpeaker && styles.realtimeButton]}
                 onPress={() => setFollowActiveSpeaker((value) => !value)}
@@ -7380,6 +8722,8 @@ function RoomView({
         ) : null}
       </View>
       ) : null}
+        </>
+      )}
       {renderExpandedSubtitleModal()}
       {renderManualDraftFullscreenModal()}
     </View>
@@ -7426,6 +8770,12 @@ const styles = StyleSheet.create({
     minWidth: 0,
     paddingRight: 10,
   },
+  topIdentityHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    minWidth: 0,
+  },
   topIdentityCompact: {
     width: "100%",
     paddingRight: 0,
@@ -7436,10 +8786,32 @@ const styles = StyleSheet.create({
     maxWidth: 640,
     paddingRight: 16,
   },
+  topMetaActions: {
+    alignItems: "flex-end",
+    gap: 8,
+    flexShrink: 0,
+  },
+  topMetaActionsCompact: {
+    width: "100%",
+    gap: 6,
+  },
+  topMetaActionsTablet: {
+    gap: 10,
+    flexShrink: 0,
+  },
+  topLocaleRow: {
+    alignSelf: "flex-end",
+  },
+  topLocaleRowCompact: {
+    width: "100%",
+    alignItems: "flex-end",
+  },
   topActions: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
+    justifyContent: "flex-end",
+    flexWrap: "wrap",
   },
   topActionsCompact: {
     gap: 6,
@@ -7453,10 +8825,17 @@ const styles = StyleSheet.create({
     gap: 10,
     flexShrink: 0,
   },
+  topBrandLogo: {
+    width: 30,
+    height: 30,
+    borderRadius: 9,
+    flexShrink: 0,
+  },
   topTitle: {
     color: "#e2e8f0",
     fontSize: 16,
     fontWeight: "700",
+    flexShrink: 1,
   },
   topTitleCompact: {
     fontSize: 15,
@@ -7549,6 +8928,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     gap: 14,
   },
+  audioCallStageTablet: {
+    paddingHorizontal: 32,
+  },
   audioCallCard: {
     width: "100%",
     borderWidth: 1,
@@ -7558,6 +8940,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 16,
     gap: 8,
+  },
+  audioCallCardTablet: {
+    maxWidth: 720,
+    paddingHorizontal: 24,
+    paddingVertical: 24,
   },
   audioCallTitle: {
     color: "#e2e8f0",
@@ -7650,6 +9037,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 8,
     zIndex: 30,
+  },
+  connectionBadgeTablet: {
+    width: "100%",
+    maxWidth: 1220,
+    alignSelf: "center",
+    paddingHorizontal: 16,
+    paddingTop: 12,
   },
   connectionBadgeFloating: {
     position: "absolute",
@@ -7797,6 +9191,9 @@ const styles = StyleSheet.create({
     width: "100%",
     maxWidth: 280,
     gap: 6,
+  },
+  subtitleStackTablet: {
+    maxWidth: 520,
   },
   subtitleSpeakerBadge: {
     alignSelf: "center",
@@ -8013,6 +9410,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingBottom: 8,
   },
+  panelDockTablet: {
+    flex: 1,
+    gap: 10,
+    paddingHorizontal: 0,
+    paddingBottom: 0,
+  },
   panelDockCompact: {
     gap: 6,
     paddingHorizontal: 8,
@@ -8181,6 +9584,12 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 3 },
     elevation: 3,
   },
+  talkieButtonTablet: {
+    minWidth: 0,
+    width: "100%",
+    maxWidth: 420,
+    minHeight: 54,
+  },
   talkieButtonCompact: {
     width: "100%",
     minWidth: 0,
@@ -8219,6 +9628,9 @@ const styles = StyleSheet.create({
     right: 16,
     bottom: 18,
     zIndex: 18,
+  },
+  talkieOverlayTablet: {
+    alignItems: "center",
   },
   talkieOverlayCompact: {
     left: 12,
@@ -8313,6 +9725,9 @@ const styles = StyleSheet.create({
   translationPanelScroll: {
     maxHeight: 380,
   },
+  translationPanelScrollTablet: {
+    maxHeight: 560,
+  },
   panelTitle: {
     color: "#e2e8f0",
     fontSize: 14,
@@ -8334,6 +9749,22 @@ const styles = StyleSheet.create({
     gap: 8,
     width: "100%",
   },
+  roomSplitLayout: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "stretch",
+    gap: 12,
+    paddingHorizontal: 12,
+    paddingBottom: 12,
+  },
+  roomSplitStageColumn: {
+    flex: 1,
+    minWidth: 0,
+  },
+  roomSplitPanelColumn: {
+    alignSelf: "stretch",
+    minWidth: 0,
+  },
   langScroller: {
     maxHeight: 48,
   },
@@ -8343,6 +9774,29 @@ const styles = StyleSheet.create({
   },
   langSelectorLabel: {
     color: "#cbd5e1",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  languageSettingsHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  languageSwapButton: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "#38bdf8",
+    backgroundColor: "#082f49",
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  languageSwapButtonPressed: {
+    backgroundColor: "#0c4a6e",
+    borderColor: "#67e8f9",
+  },
+  languageSwapButtonText: {
+    color: "#e0f2fe",
     fontSize: 12,
     fontWeight: "700",
   },

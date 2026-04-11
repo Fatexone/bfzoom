@@ -6,6 +6,22 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function isSelf(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function forbiddenUserProfileKeys() {
+      return [
+        "isPremium",
+        "plan",
+        "stripeCustomerId",
+        "stripeSubscriptionId",
+        "role",
+        "entitlements",
+        "billing",
+      ];
+    }
+
     function chatExists(chatId) {
       return exists(/databases/$(database)/documents/chats/$(chatId));
     }
@@ -24,25 +40,28 @@ service cloud.firestore {
     // 👤 Profils utilisateurs
     match /users/{userId} {
       allow read: if request.auth != null;
-      allow create, update, delete: if request.auth != null && request.auth.uid == userId;
+      allow create: if isSelf(userId) &&
+        !request.resource.data.keys().hasAny(forbiddenUserProfileKeys());
+      allow update: if isSelf(userId) &&
+        !request.resource.data.diff(resource.data).changedKeys().hasAny(forbiddenUserProfileKeys());
+      allow delete: if isSelf(userId);
     }
 
-    match /users/{userId}/{subPath=**} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+    match /users/{userId}/chatPreferences/{chatId} {
+      allow read, create, update, delete: if isSelf(userId);
     }
 
     // 🔋 Wallet tokens + logs
     match /users/{userId}/tokens {
-      allow read: if request.auth != null && request.auth.uid == userId;
-      allow create: if request.auth != null &&
-        request.auth.uid == userId &&
+      allow read: if isSelf(userId);
+      allow create: if isSelf(userId) &&
         request.resource.data.balance == 0 &&
-        request.resource.data.tier in ["free", "premium"];
+        request.resource.data.tier == "free";
       allow update, delete: if false;
     }
 
     match /users/{userId}/usage_logs/{logId} {
-      allow read: if request.auth != null && request.auth.uid == userId;
+      allow read: if isSelf(userId);
       allow write: if false;
     }
 

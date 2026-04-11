@@ -3,12 +3,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   AppState,
+  Image,
   Modal,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   Vibration,
   View,
 } from "react-native";
@@ -25,6 +27,7 @@ import {
   useAudioRecorderState,
 } from "expo-audio";
 import * as Speech from "expo-speech";
+import type { Voice } from "expo-speech";
 import { AudioSession } from "@livekit/react-native";
 import { env } from "../config/env";
 import { useTranslationCredits } from "../hooks/useTranslationCredits";
@@ -36,17 +39,30 @@ import {
   transcribeAudio,
   translateText,
 } from "../services/translation";
+import {
+  isPocketProcessFallbackError,
+  processPocketAudio,
+} from "../services/pocketProcess";
+import {
+  buildAiTtsInstructions,
+  getVoicesForLanguage,
+  selectPreferredDeviceVoiceId,
+  selectPreferredEnhancedDeviceVoiceId,
+  shouldPreferNativeTtsLanguage,
+} from "../utils/ttsPolicy";
 
 type PocketInterpreterScreenProps = {
   user: User;
   onOpenDashboard: () => void;
-  onOpenConference: () => void;
 };
+
+const MOBILE_BRAND_ICON = require("../../assets/icon.png");
 
 const LANGUAGE_OPTIONS = [
   { code: "en", label: "English", speechLocale: "en-US" },
   { code: "fr", label: "Français", speechLocale: "fr-FR" },
   { code: "ar", label: "العربية", speechLocale: "ar-SA" },
+  { code: "ar-ma", label: "الدارجة", speechLocale: "ar-MA" },
   { code: "zh", label: "中文", speechLocale: "zh-CN" },
   { code: "pt", label: "Português", speechLocale: "pt-PT" },
   { code: "pt-br", label: "Português (Brasil)", speechLocale: "pt-BR" },
@@ -75,6 +91,7 @@ type PocketHistoryItem = {
   sourceLanguage: LanguageCode;
   targetLanguage: LanguageCode;
   favorite: boolean;
+  sourceAudioUri?: string | null;
   audioUri?: string | null;
 };
 type PocketTtsCacheEntry = {
@@ -87,6 +104,7 @@ const LANGUAGE_PROMPT_NAMES: Record<LanguageCode, string> = {
   en: "English",
   fr: "French",
   ar: "Arabic",
+  "ar-ma": "Darija (Maghreb)",
   zh: "Chinese",
   pt: "Portuguese",
   "pt-br": "Portuguese (Brazil)",
@@ -109,6 +127,7 @@ const LANGUAGE_UI_LABELS: Record<LanguageCode, { fr: string; en: string }> = {
   en: { fr: "Anglais", en: "English" },
   fr: { fr: "Francais", en: "French" },
   ar: { fr: "Arabe", en: "Arabic" },
+  "ar-ma": { fr: "Darija (Maghreb)", en: "Darija (Maghreb)" },
   zh: { fr: "Chinois", en: "Chinese" },
   pt: { fr: "Portugais", en: "Portuguese" },
   "pt-br": { fr: "Portugais (Bresil)", en: "Portuguese (Brazil)" },
@@ -127,7 +146,7 @@ const LANGUAGE_UI_LABELS: Record<LanguageCode, { fr: string; en: string }> = {
   la: { fr: "Latin", en: "Latin" },
 };
 
-const RTL_LANGUAGE_CODES = new Set<LanguageCode>(["ar", "fa", "he"]);
+const RTL_LANGUAGE_CODES = new Set<LanguageCode>(["ar", "ar-ma", "fa", "he"]);
 const POCKET_PREFS_STORAGE_KEY = "bfzoom.pocket-interpreter.prefs";
 const POCKET_HISTORY_STORAGE_KEY = "bfzoom.pocket-interpreter.history";
 const POCKET_HISTORY_AUDIO_DIR = "bfzoom-pocket-history-audio";
@@ -143,6 +162,7 @@ const IOS_AI_TTS_FORMAT_PREFERENCE: ReadonlyArray<"wav" | "mp3"> = ["mp3", "wav"
 const DEFAULT_AI_TTS_FORMAT: "mp3" = "mp3";
 const IOS_AI_TTS_PLAYBACK_START_TIMEOUT_MS = 1800;
 const POCKET_SLOW_REPLAY_PLAYBACK_RATE = 0.72;
+const POCKET_FAVORITES_PLAYBACK_PAUSE_MS = 260;
 
 const wait = (durationMs: number) =>
   new Promise<void>((resolve) => {
@@ -215,6 +235,10 @@ const normalizeHistoryItem = (value: unknown): PocketHistoryItem | null => {
     sourceLanguage,
     targetLanguage,
     favorite: item.favorite === true,
+    sourceAudioUri:
+      typeof item.sourceAudioUri === "string" && item.sourceAudioUri.trim()
+        ? item.sourceAudioUri.trim()
+        : null,
     audioUri: typeof item.audioUri === "string" && item.audioUri.trim() ? item.audioUri.trim() : null,
   };
 };
@@ -285,11 +309,21 @@ const logPocket = (event: string, details?: Record<string, unknown>) => {
 export function PocketInterpreterScreen({
   user,
   onOpenDashboard,
-  onOpenConference,
 }: PocketInterpreterScreenProps) {
   const { language } = useI18n();
   const apiBaseUrl = useMemo(() => env.apiBaseUrl.trim().replace(/\/+$/, ""), []);
-  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const recorderPreset = useMemo(() => {
+    if (Platform.OS !== "ios") return RecordingPresets.HIGH_QUALITY;
+    // Keep Pocket capture close to the visio talkie preset to reduce upload size
+    // without dropping below speech-friendly quality on iPhone.
+    return {
+      ...RecordingPresets.HIGH_QUALITY,
+      numberOfChannels: 1,
+      sampleRate: 24_000,
+      bitRate: 64_000,
+    };
+  }, []);
+  const recorder = useAudioRecorder(recorderPreset);
   const recorderState = useAudioRecorderState(recorder, 200);
 
   const [bearerToken, setBearerToken] = useState<string | undefined>(undefined);
@@ -307,6 +341,20 @@ export function PocketInterpreterScreen({
   const [faceModeVisible, setFaceModeVisible] = useState(false);
   const [historyModalVisible, setHistoryModalVisible] = useState(false);
   const [historyFavoritesOnly, setHistoryFavoritesOnly] = useState(false);
+  const [languagesPanelOpen, setLanguagesPanelOpen] = useState(false);
+  const [favoritesPanelOpen, setFavoritesPanelOpen] = useState(false);
+  const [recentHistoryOpen, setRecentHistoryOpen] = useState(false);
+  const [favoritesPlaybackActive, setFavoritesPlaybackActive] = useState(false);
+  const [favoritesPlaybackIndex, setFavoritesPlaybackIndex] = useState<number | null>(null);
+  const [favoritesPlaybackTotal, setFavoritesPlaybackTotal] = useState(0);
+  const [favoritesPlaybackEntryId, setFavoritesPlaybackEntryId] = useState<string | null>(null);
+  const [sourceEditModalVisible, setSourceEditModalVisible] = useState(false);
+  const [sourceEditDraft, setSourceEditDraft] = useState("");
+  const [sourceEditBusy, setSourceEditBusy] = useState(false);
+  const [sourceEditError, setSourceEditError] = useState("");
+  const [currentExchangeEntryId, setCurrentExchangeEntryId] = useState<string | null>(null);
+  const [currentExchangeRetranslatable, setCurrentExchangeRetranslatable] = useState(false);
+  const [availableVoices, setAvailableVoices] = useState<Voice[]>([]);
 
   const startInFlightRef = useRef(false);
   const pendingStopAfterStartRef = useRef(false);
@@ -325,6 +373,7 @@ export function PocketInterpreterScreen({
   const ttsAbortControllerRef = useRef<AbortController | null>(null);
   const ttsPlayerRef = useRef<ReturnType<typeof createAudioPlayer> | null>(null);
   const ttsPlayerMonitorRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const ttsPlayerStatusSubscriptionRef = useRef<{ remove: () => void } | null>(null);
   const ttsTempFileRef = useRef("");
   const ttsTempFileOwnedRef = useRef(false);
   const ttsPlaybackEndHandlerRef = useRef<null | (() => void)>(null);
@@ -332,6 +381,25 @@ export function PocketInterpreterScreen({
   const appStateRef = useRef(AppState.currentState);
   const previousHistoryRef = useRef<PocketHistoryItem[]>([]);
   const pendingStopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const favoritesPlaybackRunRef = useRef(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadVoices = async () => {
+      try {
+        const voices = await Speech.getAvailableVoicesAsync();
+        if (!cancelled) {
+          setAvailableVoices(voices);
+        }
+      } catch {}
+    };
+    void loadVoices();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const favoritesPlaybackActiveRef = useRef(false);
+  const favoritesPlaybackMediaSessionIdRef = useRef<number | null>(null);
 
   const ui = useMemo(
     () =>
@@ -341,9 +409,10 @@ export function PocketInterpreterScreen({
             title: "Interprete de poche",
             subtitle:
               "Parle a quelqu'un en face-a-face. Maintiens, parle, puis laisse BFZoom afficher et lire la traduction.",
-            rooms: "Rooms",
+            brandSignature: "by Beyond Frontiers",
             sharedMinutes: "Minutes BFZoom partagees avec le web",
             languagesTitle: "Langues",
+            languagesSummary: (source: string, target: string) => `${source} → ${target}`,
             sourceLanguage: "Je parle",
             targetLanguage: "Ils entendent",
             swap: "Inverser",
@@ -362,6 +431,16 @@ export function PocketInterpreterScreen({
             statusSpeaking: "Je lis la traduction...",
             sourceCard: "Ce que tu as dit",
             translationCard: "Traduction",
+            editSource: "Corriger le texte",
+            editSourceTitle: "Corriger le texte capte",
+            editSourceHint:
+              "Ajuste la phrase si la capture s'est trompee, puis relance la traduction.",
+            editSourcePlaceholder: "Modifie la phrase avant de retraduire.",
+            retranslate: "Retraduire",
+            retranslateBusy: "Nouvelle traduction...",
+            cancel: "Annuler",
+            correctionExpired: "La fenetre de correction a expire. Refais un court enregistrement.",
+            emptyEditSource: "Le texte a retraduire est vide.",
             replay: "Relire",
             replaySlow: "Relire lentement",
             faceMode: "Mode face",
@@ -370,18 +449,31 @@ export function PocketInterpreterScreen({
             closeFaceMode: "Fermer",
             recent: "Derniers echanges",
             recentPhrases: "Phrases recentes",
+            recentSummary: (count: number) =>
+              `${count} phrase${count > 1 ? "s" : ""} recente${count > 1 ? "s" : ""}`,
+            favoritePhrases: "Phrases favorites",
+            favoritesSummary: (count: number) => `${count} favori${count > 1 ? "s" : ""}`,
             historyHint: "Retrouve, rejoue et reutilise tes dernieres traductions.",
+            listenFavorites: "Ecouter les favoris",
+            stopFavorites: "Arreter l'ecoute",
+            favoritesPlaybackHint: "Lecture en chaine : phrase puis traduction.",
+            favoritesPlaybackProgress: (current: number, total: number) =>
+              `Lecture ${current}/${total}`,
+            favoritesPlayingNow: "En ecoute",
             viewAll: "Voir tout",
             showAll: "Tout",
             favoritesOnly: "Favoris",
             usePhrase: "Afficher",
             favorite: "Favori",
             unfavorite: "Retirer",
+            favoriteAction: "Ajouter favori",
+            unfavoriteAction: "Retirer favori",
             delete: "Supprimer",
             offlineAudioReady: "Audio disponible hors ligne",
             offlineTextOnly: "Texte disponible. Aucun audio enregistre pour cette phrase.",
             favoritesLimit: "Maximum 20 favoris.",
             noHistory: "Aucun echange pour l'instant.",
+            noFavorites: "Aucune phrase favorite pour l'instant.",
             keepSpeaking: "Parle au moins 1 seconde avant de relacher.",
             noSpeech: "Aucune voix detectee. Maintiens le bouton puis parle clairement.",
             translationEmpty: "Traduction vide. Reessaie.",
@@ -390,6 +482,7 @@ export function PocketInterpreterScreen({
             accessPending: "Verification de l'acces...",
             retryAccess: "Relancer l'acces",
             playbackFailed: "Lecture audio indisponible. Reessaie.",
+            creditsIssue: "Impossible de verifier tes minutes pour le moment.",
             processingBusy: "Attends la fin de la traduction en cours.",
           }
         : {
@@ -397,9 +490,10 @@ export function PocketInterpreterScreen({
             title: "Pocket Interpreter",
             subtitle:
               "Speak face-to-face with someone nearby. Hold, speak, then let BFZoom show and read the translation aloud.",
-            rooms: "Rooms",
+            brandSignature: "by Beyond Frontiers",
             sharedMinutes: "BFZoom minutes shared with the web",
             languagesTitle: "Languages",
+            languagesSummary: (source: string, target: string) => `${source} → ${target}`,
             sourceLanguage: "I speak",
             targetLanguage: "They hear",
             swap: "Swap",
@@ -418,6 +512,15 @@ export function PocketInterpreterScreen({
             statusSpeaking: "Playing translation...",
             sourceCard: "What you said",
             translationCard: "Translation",
+            editSource: "Edit text",
+            editSourceTitle: "Edit captured text",
+            editSourceHint: "Adjust the sentence if the capture was wrong, then run the translation again.",
+            editSourcePlaceholder: "Update the sentence before retranslating.",
+            retranslate: "Retranslate",
+            retranslateBusy: "Refreshing translation...",
+            cancel: "Cancel",
+            correctionExpired: "The correction window expired. Record a short phrase again.",
+            emptyEditSource: "There is no text to retranslate.",
             replay: "Replay",
             replaySlow: "Replay slowly",
             faceMode: "Face mode",
@@ -426,18 +529,31 @@ export function PocketInterpreterScreen({
             closeFaceMode: "Close",
             recent: "Recent exchanges",
             recentPhrases: "Recent phrases",
+            recentSummary: (count: number) =>
+              `${count} recent phrase${count > 1 ? "s" : ""}`,
+            favoritePhrases: "Favorite phrases",
+            favoritesSummary: (count: number) => `${count} favorite${count > 1 ? "s" : ""}`,
             historyHint: "Find, replay, and reuse your latest translations.",
+            listenFavorites: "Play favorites",
+            stopFavorites: "Stop playback",
+            favoritesPlaybackHint: "Queued playback: source phrase then translation.",
+            favoritesPlaybackProgress: (current: number, total: number) =>
+              `Playing ${current}/${total}`,
+            favoritesPlayingNow: "Now playing",
             viewAll: "View all",
             showAll: "All",
             favoritesOnly: "Favorites",
             usePhrase: "Show",
             favorite: "Favorite",
             unfavorite: "Remove",
+            favoriteAction: "Add favorite",
+            unfavoriteAction: "Remove favorite",
             delete: "Delete",
             offlineAudioReady: "Offline audio available",
             offlineTextOnly: "Text available. No saved audio for this phrase.",
             favoritesLimit: "Maximum 20 favorites.",
             noHistory: "No exchange yet.",
+            noFavorites: "No favorite phrase yet.",
             keepSpeaking: "Speak for at least 1 second before releasing.",
             noSpeech: "No speech detected. Hold the button and speak clearly.",
             translationEmpty: "Empty translation. Try again.",
@@ -446,6 +562,7 @@ export function PocketInterpreterScreen({
             accessPending: "Checking access...",
             retryAccess: "Retry access",
             playbackFailed: "Audio playback unavailable. Try again.",
+            creditsIssue: "Unable to verify your minutes right now.",
             processingBusy: "Wait for the current translation to finish.",
           },
     [language]
@@ -482,7 +599,7 @@ export function PocketInterpreterScreen({
     return () => {
       cancelled = true;
     };
-  }, [user.uid]);
+  }, [user]);
 
   const refreshBearerToken = useCallback(async () => {
     const currentToken = (bearerToken || "").trim();
@@ -513,7 +630,11 @@ export function PocketInterpreterScreen({
 
   const deleteHistoryAudioUris = useCallback((entries: PocketHistoryItem[]) => {
     for (const entry of entries) {
+      const sourceAudioUri = (entry.sourceAudioUri || "").trim();
       const uri = (entry.audioUri || "").trim();
+      if (sourceAudioUri) {
+        void FileSystemLegacy.deleteAsync(sourceAudioUri, { idempotent: true }).catch(() => {});
+      }
       if (!uri) continue;
       void FileSystemLegacy.deleteAsync(uri, { idempotent: true }).catch(() => {});
     }
@@ -530,14 +651,14 @@ export function PocketInterpreterScreen({
   }, []);
 
   const persistHistoryAudioUri = useCallback(
-    async (sourceUri: string, entryId: string) => {
+    async (sourceUri: string, entryId: string, kind: "source" | "translation") => {
       const cleanSourceUri = sourceUri.trim();
       const cleanEntryId = entryId.trim();
       if (!cleanSourceUri || !cleanEntryId) return null;
       const historyDir = await getHistoryAudioDirectory();
       if (!historyDir) return null;
       const extension = buildSegmentExtension(cleanSourceUri) || "mp3";
-      const destination = `${historyDir}${cleanEntryId}.${extension}`;
+      const destination = `${historyDir}${cleanEntryId}-${kind}.${extension}`;
       try {
         await FileSystemLegacy.deleteAsync(destination, { idempotent: true }).catch(() => {});
         await FileSystemLegacy.copyAsync({ from: cleanSourceUri, to: destination });
@@ -629,17 +750,19 @@ export function PocketInterpreterScreen({
     () => getLanguageUiLabel(targetLanguage, language),
     [language, targetLanguage]
   );
-  const favoriteHistoryCount = useMemo(
-    () => history.filter((entry) => entry.favorite).length,
-    [history]
+  const favoriteHistory = useMemo(() => history.filter((entry) => entry.favorite), [history]);
+  const favoriteHistoryCount = favoriteHistory.length;
+  const previewFavoriteHistory = useMemo(
+    () => favoriteHistory.slice(0, MAX_HISTORY_PREVIEW_ITEMS),
+    [favoriteHistory]
   );
   const previewHistory = useMemo(
     () => history.slice(0, MAX_HISTORY_PREVIEW_ITEMS),
     [history]
   );
   const visibleHistory = useMemo(
-    () => (historyFavoritesOnly ? history.filter((entry) => entry.favorite) : history),
-    [history, historyFavoritesOnly]
+    () => (historyFavoritesOnly ? favoriteHistory : history),
+    [favoriteHistory, history, historyFavoritesOnly]
   );
 
   const fallbackRemainingSeconds =
@@ -659,6 +782,27 @@ export function PocketInterpreterScreen({
     hasBearerToken && !tokenLoading && !creditsLoading && !effectiveCreditsError && Boolean(credits);
   const showAccessRetry = Boolean(effectiveCreditsError || (!tokenLoading && !hasBearerToken));
   const languageControlsDisabled = status === "recording" || status === "processing";
+  const currentExchangeCanEdit =
+    currentExchangeRetranslatable
+    && Boolean(sourceText.trim())
+    && Boolean(translatedText.trim())
+    && status !== "recording"
+    && status !== "processing"
+    && !sourceEditBusy;
+  const currentExchangeFavorite = useMemo(() => {
+    const entryId = (currentExchangeEntryId || "").trim();
+    if (!entryId) return false;
+    return history.some((entry) => entry.id === entryId && entry.favorite);
+  }, [currentExchangeEntryId, history]);
+  const currentExchangeCanFavorite =
+    Boolean((currentExchangeEntryId || "").trim())
+    && Boolean(translatedText.trim())
+    && status !== "recording"
+    && status !== "processing";
+  const currentExchangeCanDelete =
+    Boolean((currentExchangeEntryId || "").trim())
+    && status !== "recording"
+    && status !== "processing";
 
   const statusLabel = useMemo(() => {
     if (status === "recording") return ui.statusRecording;
@@ -684,12 +828,87 @@ export function PocketInterpreterScreen({
     );
   }, []);
 
+  const updateHistoryEntrySourceAudio = useCallback(
+    (entryId: string, nextSourceAudioUri: string | null) => {
+      const cleanId = entryId.trim();
+      if (!cleanId) return;
+      setHistory((previous) =>
+        previous.map((entry) =>
+          entry.id === cleanId
+            ? {
+                ...entry,
+                sourceAudioUri: nextSourceAudioUri,
+              }
+            : entry
+        )
+      );
+    },
+    []
+  );
+
   const addHistoryEntry = useCallback((entry: PocketHistoryItem) => {
     setHistory((previous) => [entry, ...previous].slice(0, MAX_HISTORY_ITEMS));
   }, []);
 
+  const replaceHistoryEntryExchange = useCallback(
+    (entryId: string, nextSourceText: string, nextTranslatedText: string) => {
+      const cleanId = entryId.trim();
+      if (!cleanId) return;
+      let previousSourceAudioUri = "";
+      let previousAudioUri = "";
+      setHistory((previous) =>
+        previous.map((entry) => {
+          if (entry.id !== cleanId) return entry;
+          previousSourceAudioUri = (entry.sourceAudioUri || "").trim();
+          previousAudioUri = (entry.audioUri || "").trim();
+          return {
+            ...entry,
+            sourceText: nextSourceText,
+            translatedText: nextTranslatedText,
+            sourceAudioUri: null,
+            audioUri: null,
+          };
+        })
+      );
+      if (previousSourceAudioUri) {
+        void FileSystemLegacy.deleteAsync(previousSourceAudioUri, { idempotent: true }).catch(() => {});
+      }
+      if (previousAudioUri) {
+        void FileSystemLegacy.deleteAsync(previousAudioUri, { idempotent: true }).catch(() => {});
+      }
+    },
+    []
+  );
+
+  const closeSourceEditModal = useCallback(() => {
+    if (sourceEditBusy) return;
+    setSourceEditModalVisible(false);
+    setSourceEditDraft("");
+    setSourceEditError("");
+  }, [sourceEditBusy]);
+
+  const clearFavoritesPlaybackState = useCallback(() => {
+    favoritesPlaybackActiveRef.current = false;
+    setFavoritesPlaybackActive(false);
+    setFavoritesPlaybackIndex(null);
+    setFavoritesPlaybackTotal(0);
+    setFavoritesPlaybackEntryId(null);
+  }, []);
+
+  const isBackgroundPlaybackAllowed = useCallback(
+    () => Platform.OS === "ios" && favoritesPlaybackActiveRef.current,
+    []
+  );
+
+  const isPlaybackAllowedInCurrentAppState = useCallback(
+    () => appStateRef.current === "active" || isBackgroundPlaybackAllowed(),
+    [isBackgroundPlaybackAllowed]
+  );
+
   const toggleHistoryFavorite = useCallback(
     (entryId: string) => {
+      favoritesPlaybackRunRef.current += 1;
+      clearFavoritesPlaybackState();
       let blocked = false;
       setHistory((previous) =>
         previous.map((entry) => {
@@ -708,13 +927,18 @@ export function PocketInterpreterScreen({
         setError(ui.favoritesLimit);
       }
     },
-    [favoriteHistoryCount, ui.favoritesLimit]
+    [clearFavoritesPlaybackState, favoriteHistoryCount, ui.favoritesLimit]
   );
 
-  const removeHistoryEntry = useCallback((entryId: string) => {
-    logPocket("history_remove", { entryId });
-    setHistory((previous) => previous.filter((entry) => entry.id !== entryId));
-  }, []);
+  const removeHistoryEntry = useCallback(
+    (entryId: string) => {
+      favoritesPlaybackRunRef.current += 1;
+      clearFavoritesPlaybackState();
+      logPocket("history_remove", { entryId });
+      setHistory((previous) => previous.filter((entry) => entry.id !== entryId));
+    },
+    [clearFavoritesPlaybackState]
+  );
 
   const triggerHaptic = useCallback((kind: "start" | "stop" | "speak" | "error") => {
     if (Platform.OS !== "ios") return;
@@ -761,6 +985,12 @@ export function PocketInterpreterScreen({
       if (typeof mediaSessionId === "number" && mediaSessionRef.current !== mediaSessionId) {
         return;
       }
+      if (
+        typeof mediaSessionId === "number" &&
+        favoritesPlaybackMediaSessionIdRef.current === mediaSessionId
+      ) {
+        favoritesPlaybackMediaSessionIdRef.current = null;
+      }
       await setIsAudioActiveAsync(false).catch(() => {});
       if (typeof mediaSessionId === "number" && mediaSessionRef.current !== mediaSessionId) {
         return;
@@ -776,6 +1006,11 @@ export function PocketInterpreterScreen({
     if (!ttsPlayerMonitorRef.current) return;
     clearInterval(ttsPlayerMonitorRef.current);
     ttsPlayerMonitorRef.current = null;
+  }, []);
+
+  const clearTtsPlayerStatusSubscription = useCallback(() => {
+    ttsPlayerStatusSubscriptionRef.current?.remove();
+    ttsPlayerStatusSubscriptionRef.current = null;
   }, []);
 
   const clearCachedTts = useCallback(() => {
@@ -799,10 +1034,14 @@ export function PocketInterpreterScreen({
   const stopTtsPlayer = useCallback(
     (options?: { notifyEnded?: boolean }) => {
       clearTtsPlayerMonitor();
+      clearTtsPlayerStatusSubscription();
       const onEnded = options?.notifyEnded ? ttsPlaybackEndHandlerRef.current : null;
       ttsPlaybackEndHandlerRef.current = null;
       const player = ttsPlayerRef.current;
       if (player) {
+        try {
+          player.clearLockScreenControls();
+        } catch {}
         try {
           player.pause();
         } catch {}
@@ -820,8 +1059,77 @@ export function PocketInterpreterScreen({
       }
       onEnded?.();
     },
-    [clearTtsPlayerMonitor]
+    [clearTtsPlayerMonitor, clearTtsPlayerStatusSubscription]
   );
+
+  const releaseFavoritesPlaybackSession = useCallback(
+    async (expectedMediaSessionId?: number) => {
+      const activeMediaSessionId = favoritesPlaybackMediaSessionIdRef.current;
+      if (activeMediaSessionId === null) {
+        return;
+      }
+      if (
+        typeof expectedMediaSessionId === "number" &&
+        activeMediaSessionId !== expectedMediaSessionId
+      ) {
+        return;
+      }
+      favoritesPlaybackMediaSessionIdRef.current = null;
+      await releasePocketAudioSession(activeMediaSessionId);
+    },
+    [releasePocketAudioSession]
+  );
+
+  const stopFavoritesPlayback = useCallback(
+    (options?: { bumpInteraction?: boolean; stopAudio?: boolean }) => {
+      favoritesPlaybackRunRef.current += 1;
+      clearFavoritesPlaybackState();
+      if (options?.bumpInteraction !== false) {
+        interactionSessionRef.current += 1;
+      }
+      if (options?.stopAudio === false) {
+        return;
+      }
+      speechSessionRef.current += 1;
+      ttsPlaybackSessionRef.current += 1;
+      abortTtsRequests();
+      void Speech.stop().catch(() => {});
+      stopTtsPlayer({ notifyEnded: true });
+      setStatus((current) => (current === "speaking" ? "idle" : current));
+      void releaseFavoritesPlaybackSession();
+    },
+    [
+      abortTtsRequests,
+      clearFavoritesPlaybackState,
+      releaseFavoritesPlaybackSession,
+      stopTtsPlayer,
+    ]
+  );
+
+  const openSourceEditModal = useCallback(() => {
+    if (!currentExchangeCanEdit) return;
+    interactionSessionRef.current += 1;
+    stopFavoritesPlayback({ bumpInteraction: false, stopAudio: false });
+    speechSessionRef.current += 1;
+    abortTtsRequests();
+    void Speech.stop();
+    stopTtsPlayer();
+    clearCachedTts();
+    setStatus("idle");
+    setError("");
+    setSourceEditError("");
+    setFaceModeVisible(false);
+    setHistoryModalVisible(false);
+    setSourceEditDraft(sourceText.trim());
+    setSourceEditModalVisible(true);
+  }, [
+    abortTtsRequests,
+    clearCachedTts,
+    currentExchangeCanEdit,
+    sourceText,
+    stopFavoritesPlayback,
+    stopTtsPlayer,
+  ]);
 
   const stopPocketMedia = useCallback(
     async (options?: { stopRecorder?: boolean; mediaSessionId?: number }) => {
@@ -849,14 +1157,24 @@ export function PocketInterpreterScreen({
           return;
         }
       }
+      clearFavoritesPlaybackState();
       clearCachedTts();
       recorderPreparedRef.current = false;
       startInFlightRef.current = false;
       pendingStopAfterStartRef.current = false;
       recordingStartedAtRef.current = 0;
+      await releaseFavoritesPlaybackSession();
       await releasePocketAudioSession(options?.mediaSessionId);
     },
-    [abortTtsRequests, clearCachedTts, recorder, releasePocketAudioSession, stopTtsPlayer]
+    [
+      abortTtsRequests,
+      clearCachedTts,
+      clearFavoritesPlaybackState,
+      releaseFavoritesPlaybackSession,
+      recorder,
+      releasePocketAudioSession,
+      stopTtsPlayer,
+    ]
   );
 
   useEffect(() => {
@@ -864,15 +1182,29 @@ export function PocketInterpreterScreen({
       const wasActive = appStateRef.current === "active";
       appStateRef.current = nextState;
       if (nextState !== "active") {
+        if (isBackgroundPlaybackAllowed()) {
+          setFaceModeVisible(false);
+          setHistoryModalVisible(false);
+          setSourceEditModalVisible(false);
+          setSourceEditDraft("");
+          setSourceEditBusy(false);
+          setSourceEditError("");
+          return;
+        }
         const mediaSessionId = beginMediaSession();
         clearPendingStopTimeout();
         abortTtsRequests();
         speechSessionRef.current += 1;
         ttsPlaybackSessionRef.current += 1;
         interactionSessionRef.current += 1;
+        clearFavoritesPlaybackState();
         abortProcessingRequests();
         setFaceModeVisible(false);
         setHistoryModalVisible(false);
+        setSourceEditModalVisible(false);
+        setSourceEditDraft("");
+        setSourceEditBusy(false);
+        setSourceEditError("");
         if (status === "processing") {
           setStatus("idle");
           void releasePocketAudioSession(mediaSessionId);
@@ -905,7 +1237,9 @@ export function PocketInterpreterScreen({
     abortProcessingRequests,
     abortTtsRequests,
     beginMediaSession,
+    clearFavoritesPlaybackState,
     clearPendingStopTimeout,
+    isBackgroundPlaybackAllowed,
     recorderState.isRecording,
     refetchCredits,
     refreshBearerToken,
@@ -930,14 +1264,14 @@ export function PocketInterpreterScreen({
       allowsRecording: false,
       playsInSilentMode: true,
       interruptionMode: Platform.OS === "ios" ? "doNotMix" : "duckOthers",
-      shouldPlayInBackground: false,
+      shouldPlayInBackground: isBackgroundPlaybackAllowed(),
       shouldRouteThroughEarpiece: false,
     });
     if (Platform.OS === "ios") {
       await ensureIosSpeakerOutput();
       await wait(80);
     }
-  }, [ensureIosSpeakerOutput]);
+  }, [ensureIosSpeakerOutput, isBackgroundPlaybackAllowed]);
 
   const setRecordingAudioMode = useCallback(async () => {
     await setAudioModeAsync({
@@ -972,11 +1306,39 @@ export function PocketInterpreterScreen({
     });
   }, [language]);
 
+  const writeBase64TtsToTempFile = useCallback(
+    async (audioBase64: string, format: "wav" | "mp3") => {
+      const cacheBase = FileSystemLegacy.cacheDirectory || FileSystemLegacy.documentDirectory;
+      if (!cacheBase) {
+        throw new Error(
+          language === "fr" ? "Cache audio indisponible." : "Audio cache unavailable."
+        );
+      }
+      const tempUri = `${cacheBase}bfzoom-pocket-tts-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}.${getTtsTempExtension(format)}`;
+      await FileSystemLegacy.writeAsStringAsync(tempUri, audioBase64, {
+        encoding: "base64" as never,
+      });
+      return tempUri;
+    },
+    [language]
+  );
+
   const playTtsUri = useCallback(
     (
       uri: string,
       onEnded?: () => void,
-      options?: { playbackRate?: number; cleanupOnEnd?: boolean }
+      options?: {
+        playbackRate?: number;
+        cleanupOnEnd?: boolean;
+        lockScreenMetadata?: {
+          title?: string;
+          artist?: string;
+          albumTitle?: string;
+          artworkUrl?: string;
+        };
+      }
     ) => {
       stopTtsPlayer();
       ttsPlaybackEndHandlerRef.current = onEnded || null;
@@ -1005,24 +1367,29 @@ export function PocketInterpreterScreen({
           player.shouldCorrectPitch = true;
         }
       } catch {}
-      player.play();
-      clearTtsPlayerMonitor();
-      ttsPlayerMonitorRef.current = setInterval(() => {
+      const statusSubscription = player.addListener("playbackStatusUpdate", (status) => {
         const activePlayer = ttsPlayerRef.current;
-        if (!activePlayer) {
-          clearTtsPlayerMonitor();
+        if (!activePlayer || activePlayer !== player) {
           return;
         }
-        const ended =
-          !activePlayer.playing &&
-          activePlayer.duration > 0 &&
-          activePlayer.currentTime >= activePlayer.duration - 0.15;
-        if (ended) {
+        if (status.didJustFinish) {
           stopTtsPlayer({ notifyEnded: true });
         }
-      }, 220);
+      });
+      ttsPlayerStatusSubscriptionRef.current = statusSubscription;
+      if (Platform.OS === "ios") {
+        try {
+          player.setActiveForLockScreen(true, {
+            title: options?.lockScreenMetadata?.title || "BFZoom",
+            artist: options?.lockScreenMetadata?.artist || "Pocket Interpreter",
+            albumTitle: options?.lockScreenMetadata?.albumTitle,
+            artworkUrl: options?.lockScreenMetadata?.artworkUrl,
+          });
+        } catch {}
+      }
+      player.play();
     },
-    [clearTtsPlayerMonitor, stopTtsPlayer]
+    [stopTtsPlayer]
   );
 
   const waitForTtsPlaybackStart = useCallback(async (sessionId: number, timeoutMs: number) => {
@@ -1048,22 +1415,71 @@ export function PocketInterpreterScreen({
         bearerToken?: string;
         historyEntryId?: string;
         allowServerTts?: boolean;
+        awaitCompletion?: boolean;
+        allowDeviceVoiceFallback?: boolean;
+        mediaSessionId?: number;
+        releaseAudioSessionOnEnd?: boolean;
       }
     ) => {
       const content = text.trim();
-      if (!content) return;
-      if (appStateRef.current !== "active") return;
+      let resolveCompletion: (() => void) | null = null;
+      let completionSettled = false;
+      const completionPromise = options?.awaitCompletion
+        ? new Promise<void>((resolve) => {
+            resolveCompletion = resolve;
+          })
+        : null;
+      const settleCompletion = () => {
+        if (completionSettled) return;
+        completionSettled = true;
+        resolveCompletion?.();
+      };
+      const waitForCompletionIfNeeded = async () => {
+        if (!completionPromise) return;
+        await completionPromise;
+      };
+
+      if (!content) {
+        settleCompletion();
+        return;
+      }
+      if (!isPlaybackAllowedInCurrentAppState()) {
+        settleCompletion();
+        return;
+      }
 
       const locale =
         LANGUAGE_OPTIONS.find((item) => item.code === nextLanguage)?.speechLocale || "en-US";
-      const mediaSessionId = beginMediaSession();
+      const preferredDeviceVoiceId = selectPreferredDeviceVoiceId(
+        availableVoices,
+        nextLanguage,
+        locale
+      );
+      const preferredNaturalDeviceVoiceId = selectPreferredEnhancedDeviceVoiceId(
+        availableVoices,
+        nextLanguage,
+        locale
+      );
+      const autoSelectedDeviceVoiceId =
+        preferredNaturalDeviceVoiceId || preferredDeviceVoiceId;
+      const preferDeviceVoice =
+        shouldPreferNativeTtsLanguage(nextLanguage) && Boolean(preferredNaturalDeviceVoiceId);
+      const aiTtsInstructions = buildAiTtsInstructions({
+        languageCode: nextLanguage,
+        languageLabel: LANGUAGE_PROMPT_NAMES[nextLanguage] || nextLanguage,
+      });
+      const mediaSessionId =
+        typeof options?.mediaSessionId === "number" ? options.mediaSessionId : beginMediaSession();
+      const releaseAudioSessionOnEnd = options?.releaseAudioSessionOnEnd !== false;
+      const allowDeviceVoiceFallback = options?.allowDeviceVoiceFallback !== false;
       clearPendingStopTimeout();
       const sessionId = speechSessionRef.current + 1;
       const historyEntryId = (options?.historyEntryId || "").trim();
       speechSessionRef.current = sessionId;
       ttsPlaybackSessionRef.current = sessionId;
-      if (appStateRef.current !== "active") {
+      if (!isPlaybackAllowedInCurrentAppState()) {
         await releasePocketAudioSession(mediaSessionId);
+        settleCompletion();
         return;
       }
       setStatus("speaking");
@@ -1083,41 +1499,56 @@ export function PocketInterpreterScreen({
           reason,
           targetLanguage: nextLanguage,
         });
+        settleCompletion();
         if (
           sessionId !== speechSessionRef.current ||
           mediaSessionRef.current !== mediaSessionId
         ) {
           return;
         }
-        setStatus("idle");
-        void releasePocketAudioSession(mediaSessionId);
+        if (releaseAudioSessionOnEnd) {
+          setStatus("idle");
+          void releasePocketAudioSession(mediaSessionId);
+        }
       };
 
       const isPlaybackSessionActive = () =>
         sessionId === speechSessionRef.current &&
         sessionId === ttsPlaybackSessionRef.current &&
         mediaSessionRef.current === mediaSessionId &&
-        appStateRef.current === "active";
+        isPlaybackAllowedInCurrentAppState();
 
-      const speakWithDeviceVoice = (fallback: boolean, reason: string) => {
+      const speakWithDeviceVoice = async (fallback: boolean, reason: string) => {
         if (!isPlaybackSessionActive()) {
           finish("device", "superseded");
           return;
         }
-        const deviceLocale = fallback
-          ? (nextLanguage || "en").trim().toLowerCase() || "en"
-          : locale;
+        if (!allowDeviceVoiceFallback) {
+          logPocket("tts_device_fallback_skipped", {
+            sessionId,
+            targetLanguage: nextLanguage,
+            reason,
+          });
+          if (isPlaybackSessionActive()) {
+            setError(ui.playbackFailed);
+          }
+          finish("device", "fallback_disabled");
+          return;
+        }
+        const deviceLocale = locale;
         logPocket("tts_fallback_device", {
           sessionId,
           targetLanguage: nextLanguage,
           slow: options?.slow === true,
           fallback,
           reason,
+          selectedVoice: fallback ? "auto" : autoSelectedDeviceVoiceId || "auto",
         });
         Speech.speak(content, {
           language: deviceLocale,
           rate: options?.slow ? POCKET_SLOW_REPLAY_PLAYBACK_RATE : 0.96,
           pitch: 1,
+          voice: fallback ? undefined : autoSelectedDeviceVoiceId,
           useApplicationAudioSession: Platform.OS === "ios",
           onDone: () => finish("device", "done"),
           onStopped: () => finish("device", "stopped"),
@@ -1128,6 +1559,7 @@ export function PocketInterpreterScreen({
             finish("device", "error");
           },
         });
+        await waitForCompletionIfNeeded();
       };
 
       let ttsController: AbortController | null = null;
@@ -1160,22 +1592,27 @@ export function PocketInterpreterScreen({
             playTtsUri(cachedEntry.uri, () => finish("cache", "ended"), {
               playbackRate: options?.slow ? POCKET_SLOW_REPLAY_PLAYBACK_RATE : 1,
               cleanupOnEnd: false,
+              lockScreenMetadata: {
+                title: content.slice(0, 60),
+                artist: "BFZoom",
+              },
             });
-            if (Platform.OS === "ios") {
+            if (Platform.OS === "ios" && appStateRef.current === "active") {
               const playbackWaitStartedAt = Date.now();
               const playbackStarted = await waitForTtsPlaybackStart(
                 sessionId,
                 IOS_AI_TTS_PLAYBACK_START_TIMEOUT_MS
               );
-              if (playbackStarted) {
-                logPocket("tts_play_start", {
+                if (playbackStarted) {
+                  logPocket("tts_play_start", {
                   sessionId,
                   mode: "cache",
                   playbackWaitMs: Date.now() - playbackWaitStartedAt,
-                  targetLanguage: nextLanguage,
-                });
-                return;
-              }
+                    targetLanguage: nextLanguage,
+                  });
+                  await waitForCompletionIfNeeded();
+                  return;
+                }
               logPocket("tts_playback_stalled", {
                 sessionId,
                 mode: "cache",
@@ -1186,14 +1623,15 @@ export function PocketInterpreterScreen({
               }
               stopTtsPlayer();
             } else {
-              logPocket("tts_play_start", {
-                sessionId,
-                mode: "cache",
-                playbackWaitMs: 0,
-                targetLanguage: nextLanguage,
-              });
-              return;
-            }
+                logPocket("tts_play_start", {
+                  sessionId,
+                  mode: "cache",
+                  playbackWaitMs: 0,
+                  targetLanguage: nextLanguage,
+                });
+                await waitForCompletionIfNeeded();
+                return;
+              }
           } else {
             clearCachedTts();
           }
@@ -1209,6 +1647,16 @@ export function PocketInterpreterScreen({
           Boolean(activeBearerToken) &&
           Boolean(credits?.enabled) &&
           !effectiveCreditsError;
+        if (preferDeviceVoice) {
+          logPocket("tts_device_preferred", {
+            sessionId,
+            targetLanguage: nextLanguage,
+            selectedVoice: preferredNaturalDeviceVoiceId || "auto",
+            textChars: Math.min(content.length, AI_TTS_MAX_CHARS),
+          });
+          await speakWithDeviceVoice(false, "native_preferred");
+          return;
+        }
         if (AI_TTS_ENABLED && apiBaseUrl && allowServerTts) {
           const cacheBase = FileSystemLegacy.cacheDirectory || FileSystemLegacy.documentDirectory;
           if (cacheBase) {
@@ -1232,6 +1680,9 @@ export function PocketInterpreterScreen({
                   text: content.slice(0, AI_TTS_MAX_CHARS),
                   voice: AI_TTS_DEFAULT_VOICE,
                   format,
+                  language: nextLanguage,
+                  locale,
+                  instructions: aiTtsInstructions,
                   pocketFlow: true,
                   signal: ttsController?.signal,
                 });
@@ -1272,22 +1723,28 @@ export function PocketInterpreterScreen({
                   language: nextLanguage,
                   uri: tempUri,
                 });
-                if (historyEntryId) {
-                  const persistedAudioUri = await persistHistoryAudioUri(tempUri, historyEntryId);
-                  if (persistedAudioUri) {
-                    updateHistoryEntryAudio(historyEntryId, persistedAudioUri);
-                    logPocket("history_audio_persisted", {
-                      sessionId,
-                      entryId: historyEntryId,
-                      format,
-                    });
-                  }
-                }
                 playTtsUri(tempUri, () => finish("ai", "ended"), {
                   playbackRate: options?.slow ? POCKET_SLOW_REPLAY_PLAYBACK_RATE : 1,
                   cleanupOnEnd: false,
+                  lockScreenMetadata: {
+                    title: content.slice(0, 60),
+                    artist: "BFZoom",
+                  },
                 });
-                if (Platform.OS === "ios") {
+                if (historyEntryId) {
+                  void persistHistoryAudioUri(tempUri, historyEntryId, "translation")
+                    .then((persistedAudioUri) => {
+                      if (!persistedAudioUri) return;
+                      updateHistoryEntryAudio(historyEntryId, persistedAudioUri);
+                      logPocket("history_audio_persisted", {
+                        sessionId,
+                        entryId: historyEntryId,
+                        format,
+                      });
+                    })
+                    .catch(() => {});
+                }
+                if (Platform.OS === "ios" && appStateRef.current === "active") {
                   const playbackWaitStartedAt = Date.now();
                   const playbackStarted = await waitForTtsPlaybackStart(
                     sessionId,
@@ -1318,6 +1775,7 @@ export function PocketInterpreterScreen({
                     playbackWaitMs: Date.now() - playbackWaitStartedAt,
                     totalToPlayMs: Date.now() - requestStartedAt,
                   });
+                  await waitForCompletionIfNeeded();
                 } else {
                   logPocket("tts_play_start", {
                     sessionId,
@@ -1327,6 +1785,7 @@ export function PocketInterpreterScreen({
                     playbackWaitMs: 0,
                     totalToPlayMs: Date.now() - requestStartedAt,
                   });
+                  await waitForCompletionIfNeeded();
                 }
                 return;
               } catch (ttsError) {
@@ -1361,7 +1820,7 @@ export function PocketInterpreterScreen({
             }
           }
         }
-        speakWithDeviceVoice(false, "ai_tts_unavailable");
+        await speakWithDeviceVoice(false, "ai_tts_unavailable");
       } catch (nextError) {
         if (isTranslationAbortError(nextError)) {
           finish("ai", "superseded");
@@ -1373,7 +1832,7 @@ export function PocketInterpreterScreen({
           message:
             nextError instanceof Error ? nextError.message.trim() : String(nextError || "").trim(),
         });
-        speakWithDeviceVoice(true, "session_error");
+        await speakWithDeviceVoice(true, "session_error");
       } finally {
         if (ttsAbortControllerRef.current === ttsController) {
           ttsAbortControllerRef.current = null;
@@ -1382,6 +1841,7 @@ export function PocketInterpreterScreen({
     },
     [
       apiBaseUrl,
+      availableVoices,
       abortTtsRequests,
       blobToBase64,
       beginMediaSession,
@@ -1389,6 +1849,7 @@ export function PocketInterpreterScreen({
       clearPendingStopTimeout,
       credits?.enabled,
       effectiveCreditsError,
+      isPlaybackAllowedInCurrentAppState,
       language,
       playTtsUri,
       persistHistoryAudioUri,
@@ -1404,99 +1865,207 @@ export function PocketInterpreterScreen({
     ]
   );
 
+  const playStoredHistoryAudio = useCallback(
+    async ({
+      uri,
+      entryId,
+      playbackLanguage,
+      slow,
+      awaitCompletion,
+      track,
+      onMissing,
+      mediaSessionId: providedMediaSessionId,
+      releaseAudioSessionOnEnd: providedReleaseAudioSessionOnEnd,
+    }: {
+      uri: string;
+      entryId: string;
+      playbackLanguage: LanguageCode;
+      slow?: boolean;
+      awaitCompletion?: boolean;
+      track: "source" | "translation";
+      onMissing?: () => void;
+      mediaSessionId?: number;
+      releaseAudioSessionOnEnd?: boolean;
+    }) => {
+      const cleanUri = uri.trim();
+      if (!cleanUri) return false;
+
+      const audioInfo = await FileSystemLegacy.getInfoAsync(cleanUri).catch(() => null);
+      if (!audioInfo?.exists) {
+        logPocket("history_replay_audio_missing", {
+          entryId,
+          targetLanguage: playbackLanguage,
+          track,
+        });
+        onMissing?.();
+        return false;
+      }
+
+      let resolveCompletion: (() => void) | null = null;
+      let completionSettled = false;
+      const completionPromise = awaitCompletion
+        ? new Promise<void>((resolve) => {
+            resolveCompletion = resolve;
+          })
+        : null;
+      const settleCompletion = () => {
+        if (completionSettled) return;
+        completionSettled = true;
+        resolveCompletion?.();
+      };
+      const mediaSessionId =
+        typeof providedMediaSessionId === "number"
+          ? providedMediaSessionId
+          : beginMediaSession();
+      const releaseAudioSessionOnEnd = providedReleaseAudioSessionOnEnd !== false;
+      clearPendingStopTimeout();
+      const sessionId = speechSessionRef.current + 1;
+      const playbackRate = slow ? POCKET_SLOW_REPLAY_PLAYBACK_RATE : 1;
+      speechSessionRef.current = sessionId;
+      ttsPlaybackSessionRef.current = sessionId;
+      const isReplaySessionActive = () =>
+        sessionId === speechSessionRef.current &&
+        sessionId === ttsPlaybackSessionRef.current &&
+        mediaSessionRef.current === mediaSessionId &&
+        isPlaybackAllowedInCurrentAppState();
+      setStatus("speaking");
+      triggerHaptic("speak");
+      logPocket("history_replay_audio", {
+        sessionId,
+        entryId,
+        targetLanguage: playbackLanguage,
+        slow: slow === true,
+        playbackRate,
+        track,
+      });
+      await setPlaybackAudioMode().catch(() => {});
+      await setIsAudioActiveAsync(true).catch(() => {});
+      stopTtsPlayer();
+      await Speech.stop();
+      if (!isReplaySessionActive()) {
+        if (releaseAudioSessionOnEnd) {
+          setStatus("idle");
+          await releasePocketAudioSession(mediaSessionId);
+        }
+        settleCompletion();
+        return true;
+      }
+      const playbackWaitStartedAt = Date.now();
+      playTtsUri(
+        cleanUri,
+        () => {
+          logPocket("tts_end", {
+            sessionId,
+            mode: "history",
+            reason: "ended",
+            targetLanguage: playbackLanguage,
+            track,
+          });
+          if (
+            sessionId !== speechSessionRef.current ||
+            mediaSessionRef.current !== mediaSessionId
+          ) {
+            settleCompletion();
+            return;
+          }
+          if (releaseAudioSessionOnEnd) {
+            setStatus("idle");
+            void releasePocketAudioSession(mediaSessionId);
+          }
+          settleCompletion();
+        },
+        {
+          playbackRate,
+          cleanupOnEnd: false,
+          lockScreenMetadata: {
+            title: track === "source" ? "BFZoom source" : "BFZoom translation",
+            artist: "BFZoom",
+          },
+        }
+      );
+      const playbackStarted =
+        Platform.OS === "ios" && appStateRef.current !== "active"
+          ? true
+          : await waitForTtsPlaybackStart(sessionId, IOS_AI_TTS_PLAYBACK_START_TIMEOUT_MS);
+      if (playbackStarted) {
+        logPocket("tts_play_start", {
+          sessionId,
+          mode: "history",
+          targetLanguage: playbackLanguage,
+          slow: slow === true,
+          playbackRate,
+          playbackWaitMs: Date.now() - playbackWaitStartedAt,
+          track,
+        });
+        if (completionPromise) {
+          await completionPromise;
+        }
+      } else {
+        logPocket("tts_playback_stalled", {
+          sessionId,
+          mode: "history",
+          targetLanguage: playbackLanguage,
+          slow: slow === true,
+          playbackRate,
+          track,
+        });
+        if (isReplaySessionActive()) {
+          setError(ui.playbackFailed);
+        }
+        stopTtsPlayer({ notifyEnded: true });
+        if (completionPromise) {
+          await completionPromise;
+        }
+      }
+      return true;
+    },
+    [
+      beginMediaSession,
+      clearPendingStopTimeout,
+      isPlaybackAllowedInCurrentAppState,
+      playTtsUri,
+      releasePocketAudioSession,
+      setPlaybackAudioMode,
+      stopTtsPlayer,
+      triggerHaptic,
+      ui.playbackFailed,
+      waitForTtsPlaybackStart,
+    ]
+  );
+
   const replayHistoryEntry = useCallback(
-    async (entry: PocketHistoryItem, options?: { slow?: boolean }) => {
+    async (
+      entry: PocketHistoryItem,
+      options?: {
+        slow?: boolean;
+        awaitCompletion?: boolean;
+        preserveInteractionSession?: boolean;
+        bearerToken?: string;
+        mediaSessionId?: number;
+        releaseAudioSessionOnEnd?: boolean;
+        allowDeviceVoiceFallback?: boolean;
+      }
+    ) => {
       if (status === "processing") {
         setError(ui.processingBusy);
         return;
       }
-      interactionSessionRef.current += 1;
-      const audioUri = (entry.audioUri || "").trim();
-      if (audioUri) {
-        const audioInfo = await FileSystemLegacy.getInfoAsync(audioUri).catch(() => null);
-        if (audioInfo?.exists) {
-          const mediaSessionId = beginMediaSession();
-          clearPendingStopTimeout();
-          const sessionId = speechSessionRef.current + 1;
-          const playbackRate = options?.slow ? POCKET_SLOW_REPLAY_PLAYBACK_RATE : 1;
-          speechSessionRef.current = sessionId;
-          ttsPlaybackSessionRef.current = sessionId;
-          const isReplaySessionActive = () =>
-            sessionId === speechSessionRef.current &&
-            sessionId === ttsPlaybackSessionRef.current &&
-            mediaSessionRef.current === mediaSessionId &&
-            appStateRef.current === "active";
-          setStatus("speaking");
-          triggerHaptic("speak");
-          logPocket("history_replay_audio", {
-            sessionId,
-            entryId: entry.id,
-            targetLanguage: entry.targetLanguage,
-            slow: options?.slow === true,
-            playbackRate,
-          });
-          await setPlaybackAudioMode().catch(() => {});
-          await setIsAudioActiveAsync(true).catch(() => {});
-          stopTtsPlayer();
-          await Speech.stop();
-          if (!isReplaySessionActive()) {
-            setStatus("idle");
-            await releasePocketAudioSession(mediaSessionId);
-            return;
-          }
-          const playbackWaitStartedAt = Date.now();
-          playTtsUri(audioUri, () => {
-            logPocket("tts_end", {
-              sessionId,
-              mode: "history",
-              reason: "ended",
-              targetLanguage: entry.targetLanguage,
-            });
-            if (
-              sessionId !== speechSessionRef.current ||
-              mediaSessionRef.current !== mediaSessionId
-            ) {
-              return;
-            }
-            setStatus("idle");
-            void releasePocketAudioSession(mediaSessionId);
-          }, {
-            playbackRate,
-            cleanupOnEnd: false,
-          });
-          const playbackStarted = await waitForTtsPlaybackStart(
-            sessionId,
-            IOS_AI_TTS_PLAYBACK_START_TIMEOUT_MS
-          );
-          if (playbackStarted) {
-            logPocket("tts_play_start", {
-              sessionId,
-              mode: "history",
-              targetLanguage: entry.targetLanguage,
-              slow: options?.slow === true,
-              playbackRate,
-              playbackWaitMs: Date.now() - playbackWaitStartedAt,
-            });
-          } else {
-            logPocket("tts_playback_stalled", {
-              sessionId,
-              mode: "history",
-              targetLanguage: entry.targetLanguage,
-              slow: options?.slow === true,
-              playbackRate,
-            });
-            if (isReplaySessionActive()) {
-              setError(ui.playbackFailed);
-            }
-            stopTtsPlayer({ notifyEnded: true });
-          }
-          return;
-        }
-        logPocket("history_replay_audio_missing", {
-          entryId: entry.id,
-          targetLanguage: entry.targetLanguage,
-        });
-        updateHistoryEntryAudio(entry.id, null);
+      if (!options?.preserveInteractionSession) {
+        interactionSessionRef.current += 1;
+      }
+      const playedStoredAudio = await playStoredHistoryAudio({
+        uri: entry.audioUri || "",
+        entryId: entry.id,
+        playbackLanguage: entry.targetLanguage,
+        slow: options?.slow,
+        awaitCompletion: options?.awaitCompletion,
+        track: "translation",
+        onMissing: () => updateHistoryEntryAudio(entry.id, null),
+        mediaSessionId: options?.mediaSessionId,
+        releaseAudioSessionOnEnd: options?.releaseAudioSessionOnEnd,
+      });
+      if (playedStoredAudio) {
+        return;
       }
       logPocket("history_replay_tts", {
         entryId: entry.id,
@@ -1506,22 +2075,19 @@ export function PocketInterpreterScreen({
       await speakTranslation(entry.translatedText, entry.targetLanguage, {
         slow: options?.slow,
         historyEntryId: entry.id,
+        awaitCompletion: options?.awaitCompletion,
+        bearerToken: options?.bearerToken,
+        mediaSessionId: options?.mediaSessionId,
+        releaseAudioSessionOnEnd: options?.releaseAudioSessionOnEnd,
+        allowDeviceVoiceFallback: options?.allowDeviceVoiceFallback,
       });
     },
     [
-      beginMediaSession,
-      clearPendingStopTimeout,
-      playTtsUri,
-      releasePocketAudioSession,
-      setPlaybackAudioMode,
+      playStoredHistoryAudio,
       speakTranslation,
       status,
-      stopTtsPlayer,
-      triggerHaptic,
-      ui.playbackFailed,
       ui.processingBusy,
       updateHistoryEntryAudio,
-      waitForTtsPlaybackStart,
     ]
   );
 
@@ -1535,6 +2101,13 @@ export function PocketInterpreterScreen({
     setSourceText("");
     setTranslatedText("");
     setError("");
+    setSourceEditModalVisible(false);
+    setSourceEditDraft("");
+    setSourceEditBusy(false);
+    setSourceEditError("");
+    setCurrentExchangeEntryId(null);
+    setCurrentExchangeRetranslatable(false);
+    stopFavoritesPlayback({ bumpInteraction: false, stopAudio: false });
     speechSessionRef.current += 1;
     abortTtsRequests();
     void Speech.stop();
@@ -1546,10 +2119,21 @@ export function PocketInterpreterScreen({
     clearCachedTts,
     sourceLanguage,
     sourceText,
+    stopFavoritesPlayback,
     stopTtsPlayer,
     targetLanguage,
     translatedText,
   ]);
+
+  const removeCurrentExchange = useCallback(() => {
+    const entryId = (currentExchangeEntryId || "").trim();
+    if (!entryId) {
+      resetCurrentExchange();
+      return;
+    }
+    removeHistoryEntry(entryId);
+    resetCurrentExchange();
+  }, [currentExchangeEntryId, removeHistoryEntry, resetCurrentExchange]);
 
   const applyHistoryEntry = useCallback(
     (entry: PocketHistoryItem) => {
@@ -1558,11 +2142,12 @@ export function PocketInterpreterScreen({
         return;
       }
       interactionSessionRef.current += 1;
+      stopFavoritesPlayback({ bumpInteraction: false, stopAudio: false });
       logPocket("history_apply", {
         entryId: entry.id,
         sourceLanguage: entry.sourceLanguage,
         targetLanguage: entry.targetLanguage,
-        hasAudio: Boolean((entry.audioUri || "").trim()),
+        hasAudio: Boolean((entry.audioUri || "").trim() || (entry.sourceAudioUri || "").trim()),
       });
       speechSessionRef.current += 1;
       abortTtsRequests();
@@ -1572,14 +2157,329 @@ export function PocketInterpreterScreen({
       setError("");
       setStatus("idle");
       setFaceModeVisible(false);
+      setSourceEditModalVisible(false);
+      setSourceEditDraft("");
+      setSourceEditBusy(false);
+      setSourceEditError("");
+      setCurrentExchangeEntryId(entry.id);
+      setCurrentExchangeRetranslatable(false);
       setSourceLanguage(entry.sourceLanguage);
       setTargetLanguage(entry.targetLanguage);
       setSourceText(entry.sourceText);
       setTranslatedText(entry.translatedText);
       setHistoryModalVisible(false);
     },
-    [abortTtsRequests, clearCachedTts, status, stopTtsPlayer, ui.processingBusy]
+    [
+      abortTtsRequests,
+      clearCachedTts,
+      status,
+      stopFavoritesPlayback,
+      stopTtsPlayer,
+      ui.processingBusy,
+    ]
   );
+
+  const closeHistoryModal = useCallback(() => {
+    stopFavoritesPlayback();
+    setHistoryModalVisible(false);
+  }, [stopFavoritesPlayback]);
+
+  const openRecentHistoryModal = useCallback(() => {
+    setHistoryFavoritesOnly(false);
+    setHistoryModalVisible(true);
+  }, []);
+
+  const openFavoriteHistoryModal = useCallback(() => {
+    setHistoryFavoritesOnly(true);
+    setHistoryModalVisible(true);
+  }, []);
+
+  const playFavoritePlaylist = useCallback(async () => {
+    if (status === "processing") {
+      setError(ui.processingBusy);
+      return;
+    }
+    if (favoriteHistory.length === 0) {
+      return;
+    }
+
+    const playbackRunId = favoritesPlaybackRunRef.current + 1;
+    favoritesPlaybackRunRef.current = playbackRunId;
+    favoritesPlaybackActiveRef.current = true;
+    interactionSessionRef.current += 1;
+    const interactionSessionId = interactionSessionRef.current;
+    const isPlaybackCurrent = () =>
+      favoritesPlaybackRunRef.current === playbackRunId &&
+      interactionSessionRef.current === interactionSessionId &&
+      isPlaybackAllowedInCurrentAppState();
+
+    abortTtsRequests();
+    void Speech.stop().catch(() => {});
+    stopTtsPlayer({ notifyEnded: true });
+    clearCachedTts();
+    setError("");
+    setFavoritesPlaybackActive(true);
+    setFavoritesPlaybackEntryId(null);
+    setFavoritesPlaybackIndex(0);
+    setFavoritesPlaybackTotal(favoriteHistory.length);
+    setStatus((current) => (current === "speaking" ? "idle" : current));
+
+    logPocket("favorites_playback_start", {
+      favorites: favoriteHistory.length,
+    });
+
+    try {
+      const playlistMediaSessionId = beginMediaSession();
+      favoritesPlaybackMediaSessionIdRef.current = playlistMediaSessionId;
+      await setPlaybackAudioMode().catch(() => {});
+      await setIsAudioActiveAsync(true).catch(() => {});
+      const activeBearerToken =
+        (bearerToken || "").trim() || (await refreshBearerToken()).trim() || undefined;
+      for (let index = 0; index < favoriteHistory.length; index += 1) {
+        if (!isPlaybackCurrent()) return;
+        const entry = favoriteHistory[index];
+        setFavoritesPlaybackEntryId(entry.id);
+        setFavoritesPlaybackIndex(index + 1);
+        logPocket("favorites_playback_entry", {
+          entryId: entry.id,
+          index: index + 1,
+          total: favoriteHistory.length,
+          sourceLanguage: entry.sourceLanguage,
+          targetLanguage: entry.targetLanguage,
+        });
+        const playedRecordedSource = await playStoredHistoryAudio({
+          uri: entry.sourceAudioUri || "",
+          entryId: entry.id,
+          playbackLanguage: entry.sourceLanguage,
+          awaitCompletion: true,
+          track: "source",
+          onMissing: () => updateHistoryEntrySourceAudio(entry.id, null),
+          mediaSessionId: playlistMediaSessionId,
+          releaseAudioSessionOnEnd: false,
+        });
+        if (!playedRecordedSource) {
+          await speakTranslation(entry.sourceText, entry.sourceLanguage, {
+            awaitCompletion: true,
+            bearerToken: activeBearerToken,
+            mediaSessionId: playlistMediaSessionId,
+            releaseAudioSessionOnEnd: false,
+            allowDeviceVoiceFallback: false,
+          });
+        }
+        if (!isPlaybackCurrent()) return;
+        if (appStateRef.current === "active") {
+          await wait(POCKET_FAVORITES_PLAYBACK_PAUSE_MS);
+        }
+        if (!isPlaybackCurrent()) return;
+        await replayHistoryEntry(entry, {
+          awaitCompletion: true,
+          preserveInteractionSession: true,
+          bearerToken: activeBearerToken,
+          mediaSessionId: playlistMediaSessionId,
+          releaseAudioSessionOnEnd: false,
+          allowDeviceVoiceFallback: false,
+        });
+        if (!isPlaybackCurrent()) return;
+        if (appStateRef.current === "active") {
+          await wait(POCKET_FAVORITES_PLAYBACK_PAUSE_MS);
+        }
+      }
+      logPocket("favorites_playback_done", {
+        favorites: favoriteHistory.length,
+      });
+    } catch (nextError) {
+      if (!isTranslationAbortError(nextError) && isPlaybackCurrent()) {
+        setError(
+          nextError instanceof Error && nextError.message.trim()
+            ? nextError.message.trim()
+            : ui.playbackFailed
+        );
+      }
+      logPocket("favorites_playback_failed", {
+        message:
+          nextError instanceof Error ? nextError.message.trim() : String(nextError || "").trim(),
+      });
+    } finally {
+      await releaseFavoritesPlaybackSession();
+      if (favoritesPlaybackRunRef.current === playbackRunId) {
+        clearFavoritesPlaybackState();
+        setStatus((current) => (current === "speaking" ? "idle" : current));
+      }
+    }
+  }, [
+    abortTtsRequests,
+    bearerToken,
+    beginMediaSession,
+      clearCachedTts,
+      clearFavoritesPlaybackState,
+      favoriteHistory,
+      isPlaybackAllowedInCurrentAppState,
+      playStoredHistoryAudio,
+      releaseFavoritesPlaybackSession,
+    refreshBearerToken,
+    replayHistoryEntry,
+    setPlaybackAudioMode,
+    speakTranslation,
+    status,
+    stopTtsPlayer,
+    ui.playbackFailed,
+    ui.processingBusy,
+    updateHistoryEntrySourceAudio,
+  ]);
+
+  const retranslateEditedSource = useCallback(async () => {
+    const nextSourceText = sourceEditDraft.trim();
+    if (!nextSourceText) {
+      setSourceEditError(ui.emptyEditSource);
+      return;
+    }
+    if (!currentExchangeRetranslatable) {
+      setSourceEditError(ui.correctionExpired);
+      return;
+    }
+    if (status === "recording" || status === "processing") {
+      setSourceEditError(ui.processingBusy);
+      return;
+    }
+
+    interactionSessionRef.current += 1;
+    const interactionSessionId = interactionSessionRef.current;
+    const isEditSessionCurrent = () =>
+      interactionSessionRef.current === interactionSessionId && appStateRef.current === "active";
+    const processingController =
+      typeof AbortController !== "undefined" ? new AbortController() : null;
+    processingAbortControllerRef.current = processingController;
+    const previousEntryId = (currentExchangeEntryId || "").trim();
+
+    setSourceEditBusy(true);
+    setSourceEditError("");
+    setError("");
+    setStatus("processing");
+    setFaceModeVisible(false);
+    setHistoryModalVisible(false);
+    abortTtsRequests();
+    void Speech.stop();
+    stopTtsPlayer();
+    clearCachedTts();
+
+    try {
+      const activeBearerToken = (bearerToken || "").trim() || (await refreshBearerToken()).trim();
+      if (!isEditSessionCurrent()) return;
+      if (!activeBearerToken) {
+        throw new Error(ui.accountIssue);
+      }
+
+      const translated = await translateText({
+        apiBaseUrl,
+        bearerToken: activeBearerToken,
+        text: nextSourceText,
+        fromLanguage: LANGUAGE_PROMPT_NAMES[sourceLanguage],
+        toLanguage: LANGUAGE_PROMPT_NAMES[targetLanguage],
+        pocketFlow: true,
+        signal: processingController?.signal,
+      });
+      if (!isEditSessionCurrent()) return;
+
+      const cleanTranslation = translated.trim();
+      if (!cleanTranslation) {
+        throw new Error(ui.translationEmpty);
+      }
+
+      let historyEntryId = previousEntryId;
+      if (historyEntryId) {
+        replaceHistoryEntryExchange(historyEntryId, nextSourceText, cleanTranslation);
+      } else {
+        const nextEntry: PocketHistoryItem = {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          createdAt: Date.now(),
+          sourceText: nextSourceText,
+          translatedText: cleanTranslation,
+          sourceLanguage,
+          targetLanguage,
+          favorite: false,
+          sourceAudioUri: null,
+          audioUri: null,
+        };
+        addHistoryEntry(nextEntry);
+        historyEntryId = nextEntry.id;
+      }
+
+      logPocket("manual_retranslate_ok", {
+        entryId: historyEntryId || undefined,
+        sourceLanguage,
+        targetLanguage,
+        sourceChars: nextSourceText.length,
+        translatedChars: cleanTranslation.length,
+      });
+
+      setCurrentExchangeEntryId(historyEntryId || null);
+      setCurrentExchangeRetranslatable(true);
+      setSourceText(nextSourceText);
+      setTranslatedText(cleanTranslation);
+      setSourceEditModalVisible(false);
+      setSourceEditDraft("");
+      setSourceEditError("");
+
+      if (appStateRef.current === "active") {
+        void speakTranslation(cleanTranslation, targetLanguage, {
+          bearerToken: activeBearerToken,
+          historyEntryId,
+        });
+      } else {
+        setStatus("idle");
+      }
+    } catch (nextError) {
+      if (isTranslationAbortError(nextError)) {
+        if (isEditSessionCurrent()) {
+          setStatus("idle");
+        }
+        return;
+      }
+      const rawMessage =
+        nextError instanceof Error ? nextError.message.trim() : String(nextError || "").trim();
+      const nextMessage = /recent translation consumption required/i.test(rawMessage)
+        ? ui.correctionExpired
+        : rawMessage || ui.translationEmpty;
+      if (isEditSessionCurrent()) {
+        setStatus("idle");
+        setSourceEditError(nextMessage);
+      }
+      logPocket("manual_retranslate_failed", {
+        entryId: previousEntryId || undefined,
+        sourceLanguage,
+        targetLanguage,
+        message: nextMessage,
+      });
+    } finally {
+      if (processingAbortControllerRef.current === processingController) {
+        processingAbortControllerRef.current = null;
+      }
+      if (interactionSessionRef.current === interactionSessionId) {
+        setSourceEditBusy(false);
+      }
+    }
+  }, [
+    abortTtsRequests,
+    addHistoryEntry,
+    apiBaseUrl,
+    clearCachedTts,
+    currentExchangeEntryId,
+    currentExchangeRetranslatable,
+    bearerToken,
+    refreshBearerToken,
+    replaceHistoryEntryExchange,
+    sourceEditDraft,
+    sourceLanguage,
+    speakTranslation,
+    status,
+    stopTtsPlayer,
+    targetLanguage,
+    ui.accountIssue,
+    ui.correctionExpired,
+    ui.emptyEditSource,
+    ui.processingBusy,
+    ui.translationEmpty,
+  ]);
 
   useEffect(() => {
     logPocket("screen_mount", {
@@ -1640,6 +2540,7 @@ export function PocketInterpreterScreen({
   const stabilizeRecordedAudioUri = useCallback(async (rawUri: string, minBytes: number) => {
     let stableUri = rawUri;
     const cacheDir = FileSystemLegacy.cacheDirectory;
+    let copiedToCache = false;
 
     if (cacheDir) {
       const extension = buildSegmentExtension(rawUri);
@@ -1649,15 +2550,20 @@ export function PocketInterpreterScreen({
       try {
         await FileSystemLegacy.copyAsync({ from: rawUri, to: nextUri });
         stableUri = nextUri;
+        copiedToCache = true;
       } catch {
         stableUri = rawUri;
       }
     }
 
+    let currentSize = await getAudioFileSize(stableUri);
+    if (copiedToCache && currentSize >= minBytes) {
+      return { uri: stableUri, size: currentSize };
+    }
+
     const deadline = Date.now() + 1500;
     let lastSize = -1;
     let stableRounds = 0;
-    let currentSize = await getAudioFileSize(stableUri);
 
     while (Date.now() < deadline) {
       currentSize = await getAudioFileSize(stableUri);
@@ -1730,7 +2636,7 @@ export function PocketInterpreterScreen({
           await releasePocketAudioSession(mediaSessionId);
           return false;
         }
-        await recorder.prepareToRecordAsync(RecordingPresets.HIGH_QUALITY);
+        await recorder.prepareToRecordAsync(recorderPreset);
         if (!isWarmupSessionActive()) {
           try {
             await recorder.stop();
@@ -1759,7 +2665,13 @@ export function PocketInterpreterScreen({
       recorderWarmupPromiseRef.current = warmupTask;
       return warmupTask;
     },
-    [recorder, recorderState.isRecording, releasePocketAudioSession, setRecordingAudioMode]
+    [
+      recorder,
+      recorderPreset,
+      recorderState.isRecording,
+      releasePocketAudioSession,
+      setRecordingAudioMode,
+    ]
   );
 
   const startRecording = useCallback(async () => {
@@ -1824,6 +2736,12 @@ export function PocketInterpreterScreen({
       recordingStartedAtRef.current = Date.now();
       setFaceModeVisible(false);
       setHistoryModalVisible(false);
+      setSourceEditModalVisible(false);
+      setSourceEditDraft("");
+      setSourceEditBusy(false);
+      setSourceEditError("");
+      setCurrentExchangeEntryId(null);
+      setCurrentExchangeRetranslatable(false);
       setSourceText("");
       setTranslatedText("");
       setStatus("recording");
@@ -1864,7 +2782,6 @@ export function PocketInterpreterScreen({
     clearPendingStopTimeout,
     abortTtsRequests,
     credits,
-    creditsError,
     creditsLoading,
     effectiveCreditsError,
     ensureRecorderPrepared,
@@ -1872,16 +2789,15 @@ export function PocketInterpreterScreen({
     language,
     recorder,
     recorderState.isRecording,
-    releasePocketAudioSession,
+    sourceLanguage,
     status,
     stopPocketMedia,
     stopTtsPlayer,
     tokenLoading,
+    targetLanguage,
+    triggerHaptic,
     translationLocked,
-    ui.accessPending,
-    ui.accountIssue,
-    ui.creditsError,
-    ui.creditsLocked,
+    ui,
   ]);
 
   const stopRecording = useCallback(async () => {
@@ -1930,7 +2846,8 @@ export function PocketInterpreterScreen({
       await recorder.stop();
       if (!isInteractionCurrent()) return;
       const recorderStopMs = Date.now() - recorderStopStartedAt;
-      await wait(Platform.OS === "ios" ? 180 : 100);
+      const postStopSettleMs = Platform.OS === "ios" ? 80 : 80;
+      await wait(postStopSettleMs);
       const resolveUriStartedAt = Date.now();
       const uri = await resolveFreshRecordingUri();
       if (!isInteractionCurrent()) return;
@@ -1968,10 +2885,213 @@ export function PocketInterpreterScreen({
         copiedToCache: stable.uri !== uri,
       });
 
-      const activeBearerToken = (await refreshBearerToken()).trim();
+      const activeBearerToken = (bearerToken || "").trim() || (await refreshBearerToken()).trim();
       if (!isInteractionCurrent()) return;
       if (!activeBearerToken) {
         throw new Error(ui.accountIssue);
+      }
+
+      const targetLocale =
+        LANGUAGE_OPTIONS.find((item) => item.code === targetLanguage)?.speechLocale || "en-US";
+      const aiTtsInstructions = buildAiTtsInstructions({
+        languageCode: targetLanguage,
+        languageLabel: LANGUAGE_PROMPT_NAMES[targetLanguage] || targetLanguage,
+      });
+      const unifiedRequestId = `pocket-${interactionSessionId}-${Date.now()}`;
+      logPocket("pocket_process_request", {
+        requestId: unifiedRequestId,
+        sourceLanguage,
+        targetLanguage,
+        usageSeconds,
+      });
+
+      try {
+        const unifiedStartedAt = Date.now();
+        const unifiedResult = await processPocketAudio({
+          apiBaseUrl,
+          bearerToken: activeBearerToken,
+          audioUri: stable.uri,
+          sourceLanguage,
+          targetLanguage,
+          fromLanguage: LANGUAGE_PROMPT_NAMES[sourceLanguage],
+          toLanguage: LANGUAGE_PROMPT_NAMES[targetLanguage],
+          usageSeconds,
+          voice: AI_TTS_DEFAULT_VOICE,
+          format:
+            Platform.OS === "ios"
+              ? IOS_AI_TTS_FORMAT_PREFERENCE[0] || DEFAULT_AI_TTS_FORMAT
+              : DEFAULT_AI_TTS_FORMAT,
+          locale: targetLocale,
+          instructions: aiTtsInstructions,
+          requestId: unifiedRequestId,
+          clientMetrics: {
+            recordingMs: durationMs,
+            recorderStopMs,
+            postStopSettleMs,
+            resolveUriMs,
+            stabilizeMs,
+            preUploadMs: Date.now() - stopRequestedAt,
+          },
+          signal: processingController?.signal,
+        });
+        if (!isInteractionCurrent()) return;
+
+        setOptimisticRemainingSeconds(
+          typeof unifiedResult.totalSecondsRemaining === "number" &&
+            Number.isFinite(unifiedResult.totalSecondsRemaining)
+            ? Math.max(0, Math.floor(unifiedResult.totalSecondsRemaining))
+            : 0
+        );
+        refetchCredits();
+
+        if (!unifiedResult.ok) {
+          setTranslatedText("");
+          setStatus("idle");
+          setError(unifiedResult.lockReason || ui.creditsLocked);
+          return;
+        }
+
+        const draft = unifiedResult.sourceText.trim();
+        const cleanTranslation = unifiedResult.translatedText.trim();
+        if (!draft) {
+          throw new Error("No speech detected.");
+        }
+        if (!cleanTranslation) {
+          throw new Error(ui.translationEmpty);
+        }
+
+        logPocket("pocket_process_ok", {
+          requestId: unifiedRequestId,
+          sourceLanguage,
+          targetLanguage,
+          sourceChars: draft.length,
+          translatedChars: cleanTranslation.length,
+          serverTotalMs: unifiedResult.metrics.totalMs,
+          serverTranscribeMs: unifiedResult.metrics.transcribeMs,
+          serverTranslateMs: unifiedResult.metrics.translateMs,
+          serverConsumeMs: unifiedResult.metrics.consumeMs,
+          serverConsumeTxMs: unifiedResult.metrics.consumeTransactionMs,
+          serverConsumeReadMs: unifiedResult.metrics.consumeReadMs,
+          serverConsumePlanMs: unifiedResult.metrics.consumePlanMs,
+          serverConsumeAttempts: unifiedResult.metrics.consumeAttempts,
+          serverConsumeMode: unifiedResult.metrics.consumeMode,
+          serverConsumeWriteMode: unifiedResult.metrics.consumeWriteMode,
+          serverGrantMs: unifiedResult.metrics.grantMs,
+          serverTtsMs: unifiedResult.metrics.ttsMs,
+          serverAudioBase64Ms: unifiedResult.metrics.audioBase64Ms,
+          clientFetchMs: unifiedResult.metrics.clientFetchMs,
+          clientJsonMs: unifiedResult.metrics.clientJsonMs,
+          clientTransportMs: unifiedResult.metrics.clientTransportMs,
+          responseContentLength: unifiedResult.metrics.responseContentLength,
+          vercelId: unifiedResult.metrics.vercelId,
+          totalSinceReleaseMs: Date.now() - stopRequestedAt,
+          requestMs: Date.now() - unifiedStartedAt,
+        });
+
+        setSourceText(draft);
+        setTranslatedText(cleanTranslation);
+        const nextEntryId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        let tempTtsUri = "";
+        if (unifiedResult.ttsAvailable && unifiedResult.ttsBase64) {
+          const tempTtsWriteStartedAt = Date.now();
+          tempTtsUri = await writeBase64TtsToTempFile(
+            unifiedResult.ttsBase64,
+            unifiedResult.ttsFormat
+          );
+          logPocket("pocket_process_audio_ready", {
+            requestId: unifiedRequestId,
+            format: unifiedResult.ttsFormat,
+            audioBytes: unifiedResult.metrics.audioBytes,
+            fileWriteMs: Date.now() - tempTtsWriteStartedAt,
+          });
+        } else {
+          logPocket("pocket_process_tts_deferred", {
+            requestId: unifiedRequestId,
+            reason: unifiedResult.ttsError || "tts_unavailable",
+          });
+        }
+
+        const nextEntry: PocketHistoryItem = {
+          id: nextEntryId,
+          createdAt: Date.now(),
+          sourceText: draft,
+          translatedText: cleanTranslation,
+          sourceLanguage,
+          targetLanguage,
+          favorite: false,
+          sourceAudioUri: null,
+          audioUri: null,
+        };
+        addHistoryEntry(nextEntry);
+        setCurrentExchangeEntryId(nextEntry.id);
+        setCurrentExchangeRetranslatable(true);
+        setSourceEditModalVisible(false);
+        setSourceEditDraft("");
+        setSourceEditBusy(false);
+        setSourceEditError("");
+        logPocket("history_add", {
+          entryId: nextEntry.id,
+          sourceLanguage,
+          targetLanguage,
+          translatedChars: cleanTranslation.length,
+        });
+
+        if (tempTtsUri) {
+          updateCachedTts({
+            text: cleanTranslation,
+            language: targetLanguage,
+            uri: tempTtsUri,
+          });
+        }
+
+        if (appStateRef.current === "active") {
+          void speakTranslation(cleanTranslation, targetLanguage, {
+            bearerToken: activeBearerToken,
+            historyEntryId: nextEntry.id,
+          });
+        } else {
+          setStatus("idle");
+          await releasePocketAudioSession(mediaSessionId);
+        }
+
+        if (tempTtsUri) {
+          void persistHistoryAudioUri(tempTtsUri, nextEntryId, "translation")
+            .then((persistedAudioUri) => {
+              if (!persistedAudioUri) return;
+              updateHistoryEntryAudio(nextEntryId, persistedAudioUri);
+              logPocket("history_audio_persisted", {
+                entryId: nextEntryId,
+                format: unifiedResult.ttsFormat,
+              });
+            })
+            .catch(() => {});
+        }
+
+        void persistHistoryAudioUri(stable.uri, nextEntryId, "source")
+          .then((persistedSourceAudioUri) => {
+            if (!persistedSourceAudioUri) return;
+            updateHistoryEntrySourceAudio(nextEntryId, persistedSourceAudioUri);
+            logPocket("history_source_audio_persisted", {
+              entryId: nextEntryId,
+              sourceLanguage,
+              targetLanguage,
+            });
+          })
+          .catch(() => {});
+        return;
+      } catch (pocketProcessError) {
+        if (!isPocketProcessFallbackError(pocketProcessError)) {
+          throw pocketProcessError;
+        }
+        logPocket("pocket_process_fallback", {
+          requestId: unifiedRequestId,
+          sourceLanguage,
+          targetLanguage,
+          reason:
+            pocketProcessError instanceof Error
+              ? pocketProcessError.message.trim()
+              : String(pocketProcessError || "").trim(),
+        });
       }
 
       const preflightStartedAt = Date.now();
@@ -2088,17 +3208,25 @@ export function PocketInterpreterScreen({
       });
 
       setTranslatedText(cleanTranslation);
+      const nextEntryId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       const nextEntry: PocketHistoryItem = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        id: nextEntryId,
         createdAt: Date.now(),
         sourceText: draft,
         translatedText: cleanTranslation,
         sourceLanguage,
         targetLanguage,
         favorite: false,
+        sourceAudioUri: null,
         audioUri: null,
       };
       addHistoryEntry(nextEntry);
+      setCurrentExchangeEntryId(nextEntry.id);
+      setCurrentExchangeRetranslatable(true);
+      setSourceEditModalVisible(false);
+      setSourceEditDraft("");
+      setSourceEditBusy(false);
+      setSourceEditError("");
       logPocket("history_add", {
         entryId: nextEntry.id,
         sourceLanguage,
@@ -2115,6 +3243,17 @@ export function PocketInterpreterScreen({
         setStatus("idle");
         await releasePocketAudioSession(mediaSessionId);
       }
+      void persistHistoryAudioUri(stable.uri, nextEntryId, "source")
+        .then((persistedSourceAudioUri) => {
+          if (!persistedSourceAudioUri) return;
+          updateHistoryEntrySourceAudio(nextEntryId, persistedSourceAudioUri);
+          logPocket("history_source_audio_persisted", {
+            entryId: nextEntryId,
+            sourceLanguage,
+            targetLanguage,
+          });
+        })
+        .catch(() => {});
     } catch (nextError) {
       if (isTranslationAbortError(nextError)) {
         if (isInteractionCurrent()) {
@@ -2156,10 +3295,12 @@ export function PocketInterpreterScreen({
     abortProcessingRequests,
     beginMediaSession,
     clearPendingStopTimeout,
+    bearerToken,
     language,
     recorder,
     recorderState.durationMillis,
     recorderState.isRecording,
+    persistHistoryAudioUri,
     refetchCredits,
     refreshBearerToken,
     releasePocketAudioSession,
@@ -2170,10 +3311,14 @@ export function PocketInterpreterScreen({
     status,
     targetLanguage,
     triggerHaptic,
+    updateCachedTts,
+    updateHistoryEntryAudio,
+    updateHistoryEntrySourceAudio,
     ui.accountIssue,
     ui.creditsLocked,
     ui.keepSpeaking,
     ui.translationEmpty,
+    writeBase64TtsToTempFile,
   ]);
 
   useEffect(() => {
@@ -2229,19 +3374,35 @@ export function PocketInterpreterScreen({
 
   const canRecord = canUsePocket && !translationLocked && status !== "processing";
   const currentTranslationCanReplay = Boolean(translatedText.trim());
+  const languagesSummaryLabel = useMemo(
+    () => ui.languagesSummary(sourceLanguageLabel, targetLanguageLabel),
+    [sourceLanguageLabel, targetLanguageLabel, ui]
+  );
+  const accessNoticeMessage = useMemo(() => {
+    if (effectiveCreditsError) return ui.creditsIssue;
+    if (!tokenLoading && !bearerToken) return ui.accountIssue;
+    return "";
+  }, [bearerToken, effectiveCreditsError, tokenLoading, ui]);
+  const runtimeNoticeMessage = useMemo(() => {
+    const message = error.trim();
+    if (!message) return "";
+    if (message === accessNoticeMessage) return "";
+    return message;
+  }, [accessNoticeMessage, error]);
 
   return (
     <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
       <View style={styles.heroCard}>
         <View style={styles.heroHeader}>
-          <View style={styles.heroTextBlock}>
-            <Text style={styles.kicker}>{ui.kicker}</Text>
-            <Text style={styles.title}>{ui.title}</Text>
+          <View style={styles.brandRow}>
+            <Image source={MOBILE_BRAND_ICON} style={styles.brandLogo} resizeMode="cover" alt="" />
+            <View style={styles.heroTextBlock}>
+              <Text style={styles.brand}>BFZoom</Text>
+              <Text style={styles.brandHint}>{ui.brandSignature}</Text>
+            </View>
           </View>
-          <Pressable style={styles.roomsButton} onPress={onOpenConference}>
-            <Text style={styles.roomsButtonText}>{ui.rooms}</Text>
-          </Pressable>
         </View>
+        <Text style={styles.title}>{ui.title}</Text>
         <Text style={styles.subtitle}>{ui.subtitle}</Text>
         <View style={styles.statusBanner}>
           <Text style={styles.statusBannerText}>{creditsLoading ? ui.creditsLoading : creditsRemainingLabel}</Text>
@@ -2252,10 +3413,11 @@ export function PocketInterpreterScreen({
             <Text style={styles.actionButtonText}>{ui.buyCredits}</Text>
           </Pressable>
         ) : null}
-        {effectiveCreditsError ? (
-          <Text style={styles.errorText}>{ui.creditsError(effectiveCreditsError)}</Text>
+        {accessNoticeMessage ? (
+          <View style={[styles.noticeCard, styles.noticeCardWarm]}>
+            <Text style={styles.noticeText}>{accessNoticeMessage}</Text>
+          </View>
         ) : null}
-        {!tokenLoading && !bearerToken ? <Text style={styles.errorText}>{ui.accountIssue}</Text> : null}
         {showAccessRetry ? (
           <Pressable
             disabled={tokenLoading || creditsLoading}
@@ -2270,77 +3432,91 @@ export function PocketInterpreterScreen({
       </View>
 
       <View style={styles.card}>
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>{ui.languagesTitle}</Text>
-          <Pressable
-            disabled={languageControlsDisabled}
-            style={[styles.swapButton, languageControlsDisabled && styles.controlDisabled]}
-            onPress={swapLanguages}
-          >
-            <Text style={styles.swapButtonText}>{ui.swap}</Text>
-          </Pressable>
-        </View>
-        {languageControlsDisabled ? (
-          <Text style={styles.busyHint}>{ui.languagesBusy}</Text>
+        <Pressable
+          style={styles.accordionHeader}
+          onPress={() => setLanguagesPanelOpen((current) => !current)}
+        >
+          <View style={styles.accordionHeaderText}>
+            <Text style={styles.sectionTitle}>{ui.languagesTitle}</Text>
+            <Text style={styles.sectionMeta}>{languagesSummaryLabel}</Text>
+          </View>
+          <Text style={styles.accordionToggle}>{languagesPanelOpen ? "−" : "+"}</Text>
+        </Pressable>
+        {languagesPanelOpen ? (
+          <View style={styles.languagesPanel}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionMeta}>{languagesSummaryLabel}</Text>
+              <Pressable
+                disabled={languageControlsDisabled}
+                style={[styles.swapButton, languageControlsDisabled && styles.controlDisabled]}
+                onPress={swapLanguages}
+              >
+                <Text style={styles.swapButtonText}>{ui.swap}</Text>
+              </Pressable>
+            </View>
+            {languageControlsDisabled ? (
+              <Text style={styles.busyHint}>{ui.languagesBusy}</Text>
+            ) : null}
+
+            <Text style={styles.selectorLabel}>
+              {ui.sourceLanguage}: {sourceLanguageLabel}
+            </Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.chipsRow}
+            >
+              {LANGUAGE_OPTIONS.map((option) => {
+                const selected = option.code === sourceLanguage;
+                return (
+                  <Pressable
+                    key={`source-${option.code}`}
+                    disabled={languageControlsDisabled}
+                    style={[
+                      styles.chip,
+                      selected && styles.chipActive,
+                      languageControlsDisabled && styles.controlDisabled,
+                    ]}
+                    onPress={() => applySourceLanguage(option.code)}
+                  >
+                    <Text style={[styles.chipText, selected && styles.chipTextActive]}>
+                      {getLanguageUiLabel(option.code, language)}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+
+            <Text style={styles.selectorLabel}>
+              {ui.targetLanguage}: {targetLanguageLabel}
+            </Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.chipsRow}
+            >
+              {LANGUAGE_OPTIONS.map((option) => {
+                const selected = option.code === targetLanguage;
+                return (
+                  <Pressable
+                    key={`target-${option.code}`}
+                    disabled={languageControlsDisabled}
+                    style={[
+                      styles.chip,
+                      selected && styles.chipActive,
+                      languageControlsDisabled && styles.controlDisabled,
+                    ]}
+                    onPress={() => applyTargetLanguage(option.code)}
+                  >
+                    <Text style={[styles.chipText, selected && styles.chipTextActive]}>
+                      {getLanguageUiLabel(option.code, language)}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+          </View>
         ) : null}
-
-        <Text style={styles.selectorLabel}>
-          {ui.sourceLanguage}: {sourceLanguageLabel}
-        </Text>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.chipsRow}
-        >
-          {LANGUAGE_OPTIONS.map((option) => {
-            const selected = option.code === sourceLanguage;
-            return (
-              <Pressable
-                key={`source-${option.code}`}
-                disabled={languageControlsDisabled}
-                style={[
-                  styles.chip,
-                  selected && styles.chipActive,
-                  languageControlsDisabled && styles.controlDisabled,
-                ]}
-                onPress={() => applySourceLanguage(option.code)}
-              >
-                <Text style={[styles.chipText, selected && styles.chipTextActive]}>
-                  {getLanguageUiLabel(option.code, language)}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </ScrollView>
-
-        <Text style={styles.selectorLabel}>
-          {ui.targetLanguage}: {targetLanguageLabel}
-        </Text>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.chipsRow}
-        >
-          {LANGUAGE_OPTIONS.map((option) => {
-            const selected = option.code === targetLanguage;
-            return (
-              <Pressable
-                key={`target-${option.code}`}
-                disabled={languageControlsDisabled}
-                style={[
-                  styles.chip,
-                  selected && styles.chipActive,
-                  languageControlsDisabled && styles.controlDisabled,
-                ]}
-                onPress={() => applyTargetLanguage(option.code)}
-              >
-                <Text style={[styles.chipText, selected && styles.chipTextActive]}>
-                  {getLanguageUiLabel(option.code, language)}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </ScrollView>
       </View>
 
       <View style={styles.talkieCard}>
@@ -2388,11 +3564,22 @@ export function PocketInterpreterScreen({
             </Text>
           )}
         </Pressable>
-        {error ? <Text style={styles.errorText}>{error}</Text> : null}
+        {runtimeNoticeMessage ? (
+          <View style={[styles.noticeCard, styles.noticeCardWarm]}>
+            <Text style={styles.noticeText}>{runtimeNoticeMessage}</Text>
+          </View>
+        ) : null}
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.sectionTitle}>{ui.sourceCard}</Text>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>{ui.sourceCard}</Text>
+          {currentExchangeCanEdit ? (
+            <Pressable style={styles.replayButton} onPress={openSourceEditModal}>
+              <Text style={styles.replayButtonText}>{ui.editSource}</Text>
+            </Pressable>
+          ) : null}
+        </View>
         <Text
           style={[
             styles.exchangeText,
@@ -2427,6 +3614,34 @@ export function PocketInterpreterScreen({
                 >
                   <Text style={styles.replayButtonText}>{ui.replaySlow}</Text>
                 </Pressable>
+                {currentExchangeCanFavorite ? (
+                  <Pressable
+                    style={[
+                      styles.replayButton,
+                      currentExchangeFavorite && styles.replayButtonActive,
+                    ]}
+                    onPress={() => toggleHistoryFavorite((currentExchangeEntryId || "").trim())}
+                  >
+                    <Text
+                      style={[
+                        styles.replayButtonText,
+                        currentExchangeFavorite && styles.replayButtonTextActive,
+                      ]}
+                    >
+                      {currentExchangeFavorite ? ui.unfavorite : ui.favorite}
+                    </Text>
+                  </Pressable>
+                ) : null}
+                {currentExchangeCanDelete ? (
+                  <Pressable
+                    style={[styles.replayButton, styles.replayButtonDanger]}
+                    onPress={removeCurrentExchange}
+                  >
+                    <Text style={[styles.replayButtonText, styles.replayButtonTextDanger]}>
+                      {ui.delete}
+                    </Text>
+                  </Pressable>
+                ) : null}
               </>
             ) : null}
           </View>
@@ -2442,43 +3657,222 @@ export function PocketInterpreterScreen({
       </View>
 
       <View style={styles.card}>
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>{ui.recentPhrases}</Text>
-          {history.length > 0 ? (
-            <Pressable style={styles.replayButton} onPress={() => setHistoryModalVisible(true)}>
-              <Text style={styles.replayButtonText}>{ui.viewAll}</Text>
-            </Pressable>
-          ) : null}
-        </View>
-        {previewHistory.length === 0 ? <Text style={styles.summaryText}>{ui.noHistory}</Text> : null}
-        {previewHistory.map((entry) => (
-          <View key={entry.id} style={styles.historyRow}>
-            <Text style={styles.historyMeta}>
-              {getLanguageUiLabel(entry.sourceLanguage, language)} →{" "}
-              {getLanguageUiLabel(entry.targetLanguage, language)}
-            </Text>
-            <Text
-              style={[
-                styles.historySource,
-                RTL_LANGUAGE_CODES.has(entry.sourceLanguage) && styles.rtlText,
-              ]}
-            >
-              {entry.sourceText}
-            </Text>
-            <Text
-              style={[
-                styles.historyTarget,
-                RTL_LANGUAGE_CODES.has(entry.targetLanguage) && styles.rtlText,
-              ]}
-            >
-              {entry.translatedText}
-            </Text>
-            <Text style={styles.historyAvailability}>
-              {entry.audioUri ? ui.offlineAudioReady : ui.offlineTextOnly}
+        <Pressable
+          style={styles.accordionHeader}
+          onPress={() => setFavoritesPanelOpen((current) => !current)}
+        >
+          <View style={styles.accordionHeaderText}>
+            <Text style={styles.sectionTitle}>{ui.favoritePhrases}</Text>
+            <Text style={styles.sectionMeta}>
+              {favoriteHistoryCount > 0 ? ui.favoritesSummary(favoriteHistoryCount) : ui.noFavorites}
             </Text>
           </View>
-        ))}
+          <Text style={styles.accordionToggle}>{favoritesPanelOpen ? "−" : "+"}</Text>
+        </Pressable>
+        {favoritesPanelOpen ? (
+          <View style={styles.accordionBody}>
+            {favoriteHistoryCount > 0 ? (
+              <View style={styles.sectionActions}>
+                <Pressable
+                  style={[
+                    styles.replayButton,
+                    favoritesPlaybackActive && styles.replayButtonActive,
+                  ]}
+                  onPress={() => {
+                    if (favoritesPlaybackActive) {
+                      stopFavoritesPlayback();
+                      return;
+                    }
+                    void playFavoritePlaylist();
+                  }}
+                >
+                  <Text
+                    style={[
+                      styles.replayButtonText,
+                      favoritesPlaybackActive && styles.replayButtonTextActive,
+                    ]}
+                  >
+                    {favoritesPlaybackActive ? ui.stopFavorites : ui.listenFavorites}
+                  </Text>
+                </Pressable>
+                <Pressable style={styles.replayButton} onPress={openFavoriteHistoryModal}>
+                  <Text style={styles.replayButtonText}>{ui.viewAll}</Text>
+                </Pressable>
+              </View>
+            ) : null}
+            {previewFavoriteHistory.length === 0 ? (
+              <Text style={styles.summaryText}>{ui.noFavorites}</Text>
+            ) : (
+              previewFavoriteHistory.map((entry) => (
+                <View
+                  key={entry.id}
+                  style={[
+                    styles.historyRow,
+                    favoritesPlaybackEntryId === entry.id && favoritesPlaybackActive && styles.historyRowActive,
+                  ]}
+                >
+                  <Text style={styles.historyMeta}>
+                    {getLanguageUiLabel(entry.sourceLanguage, language)} →{" "}
+                    {getLanguageUiLabel(entry.targetLanguage, language)}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.historySource,
+                      RTL_LANGUAGE_CODES.has(entry.sourceLanguage) && styles.rtlText,
+                    ]}
+                  >
+                    {entry.sourceText}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.historyTarget,
+                      RTL_LANGUAGE_CODES.has(entry.targetLanguage) && styles.rtlText,
+                    ]}
+                  >
+                    {entry.translatedText}
+                  </Text>
+                  {favoritesPlaybackEntryId === entry.id && favoritesPlaybackActive ? (
+                    <Text style={styles.historyNowPlaying}>{ui.favoritesPlayingNow}</Text>
+                  ) : null}
+                </View>
+              ))
+            )}
+          </View>
+        ) : null}
       </View>
+
+      <View style={styles.card}>
+        <Pressable
+          style={styles.accordionHeader}
+          onPress={() => setRecentHistoryOpen((current) => !current)}
+        >
+          <View style={styles.accordionHeaderText}>
+            <Text style={styles.sectionTitle}>{ui.recentPhrases}</Text>
+            <Text style={styles.sectionMeta}>
+              {history.length > 0 ? ui.recentSummary(history.length) : ui.noHistory}
+            </Text>
+          </View>
+          <Text style={styles.accordionToggle}>{recentHistoryOpen ? "−" : "+"}</Text>
+        </Pressable>
+        {recentHistoryOpen ? (
+          <>
+            {history.length > 0 ? (
+              <View style={styles.inlineActionRow}>
+                <Pressable style={styles.replayButton} onPress={openRecentHistoryModal}>
+                  <Text style={styles.replayButtonText}>{ui.viewAll}</Text>
+                </Pressable>
+              </View>
+            ) : null}
+            {previewHistory.length === 0 ? <Text style={styles.summaryText}>{ui.noHistory}</Text> : null}
+            {previewHistory.map((entry) => (
+              <View key={entry.id} style={styles.historyRow}>
+                <Text style={styles.historyMeta}>
+                  {getLanguageUiLabel(entry.sourceLanguage, language)} →{" "}
+                  {getLanguageUiLabel(entry.targetLanguage, language)}
+                </Text>
+                <Text
+                  style={[
+                    styles.historySource,
+                    RTL_LANGUAGE_CODES.has(entry.sourceLanguage) && styles.rtlText,
+                  ]}
+                >
+                  {entry.sourceText}
+                </Text>
+                <Text
+                  style={[
+                    styles.historyTarget,
+                    RTL_LANGUAGE_CODES.has(entry.targetLanguage) && styles.rtlText,
+                  ]}
+                >
+                  {entry.translatedText}
+                </Text>
+                <Text style={styles.historyAvailability}>
+                  {entry.audioUri || entry.sourceAudioUri ? ui.offlineAudioReady : ui.offlineTextOnly}
+                </Text>
+              </View>
+            ))}
+          </>
+        ) : null}
+      </View>
+
+      <Modal
+        animationType="slide"
+        presentationStyle="fullScreen"
+        visible={sourceEditModalVisible}
+        onRequestClose={closeSourceEditModal}
+      >
+        <View style={styles.faceModeRoot}>
+          <View style={styles.faceModeHeader}>
+            <View style={styles.faceModeHeaderText}>
+              <Text style={styles.faceModeTitle}>{ui.editSourceTitle}</Text>
+              <Text style={styles.faceModeHint}>{ui.editSourceHint}</Text>
+            </View>
+            <Pressable
+              disabled={sourceEditBusy}
+              style={[styles.faceModeCloseButton, sourceEditBusy && styles.controlDisabled]}
+              onPress={closeSourceEditModal}
+            >
+              <Text style={styles.faceModeCloseButtonText}>{ui.cancel}</Text>
+            </Pressable>
+          </View>
+          <View style={styles.editorModalBody}>
+            <Text style={styles.historyMeta}>
+              {sourceLanguageLabel} → {targetLanguageLabel}
+            </Text>
+            <TextInput
+              multiline
+              autoFocus
+              value={sourceEditDraft}
+              onChangeText={(nextValue) => {
+                setSourceEditDraft(nextValue);
+                if (sourceEditError) {
+                  setSourceEditError("");
+                }
+              }}
+              editable={!sourceEditBusy}
+              placeholder={ui.editSourcePlaceholder}
+              placeholderTextColor="#64748b"
+              style={[
+                styles.editorInput,
+                RTL_LANGUAGE_CODES.has(sourceLanguage) && styles.rtlText,
+              ]}
+            />
+            {sourceEditError ? <Text style={styles.errorText}>{sourceEditError}</Text> : null}
+          </View>
+          <View style={styles.editorActionsRow}>
+            <Pressable
+              disabled={sourceEditBusy}
+              style={[
+                styles.actionButton,
+                styles.editorSecondaryAction,
+                sourceEditBusy && styles.controlDisabled,
+              ]}
+              onPress={closeSourceEditModal}
+            >
+              <Text style={styles.faceModeSecondaryActionText}>{ui.cancel}</Text>
+            </Pressable>
+            <Pressable
+              disabled={sourceEditBusy}
+              style={[
+                styles.actionButton,
+                styles.actionPrimary,
+                styles.editorPrimaryAction,
+                sourceEditBusy && styles.controlDisabled,
+              ]}
+              onPress={() => {
+                void retranslateEditedSource();
+              }}
+            >
+              {sourceEditBusy ? (
+                <ActivityIndicator size="small" color="#ffffff" />
+              ) : (
+                <Text style={styles.actionButtonText}>{ui.retranslate}</Text>
+              )}
+            </Pressable>
+          </View>
+          {sourceEditBusy ? <Text style={styles.editorBusyText}>{ui.retranslateBusy}</Text> : null}
+        </View>
+      </Modal>
 
       <Modal
         animationType="slide"
@@ -2508,7 +3902,6 @@ export function PocketInterpreterScreen({
             >
               {translatedText || "…"}
             </Text>
-            {error ? <Text style={styles.errorText}>{error}</Text> : null}
           </View>
           <View style={styles.faceModeFooter}>
             <Pressable
@@ -2537,7 +3930,7 @@ export function PocketInterpreterScreen({
         animationType="slide"
         presentationStyle="fullScreen"
         visible={historyModalVisible}
-        onRequestClose={() => setHistoryModalVisible(false)}
+        onRequestClose={closeHistoryModal}
       >
         <View style={styles.faceModeRoot}>
           <View style={styles.faceModeHeader}>
@@ -2545,7 +3938,7 @@ export function PocketInterpreterScreen({
               <Text style={styles.faceModeTitle}>{ui.recentPhrases}</Text>
               <Text style={styles.faceModeHint}>{ui.historyHint}</Text>
             </View>
-            <Pressable style={styles.faceModeCloseButton} onPress={() => setHistoryModalVisible(false)}>
+            <Pressable style={styles.faceModeCloseButton} onPress={closeHistoryModal}>
               <Text style={styles.faceModeCloseButtonText}>{ui.closeFaceMode}</Text>
             </Pressable>
           </View>
@@ -2556,7 +3949,10 @@ export function PocketInterpreterScreen({
                 styles.filterChip,
                 !historyFavoritesOnly && styles.filterChipActive,
               ]}
-              onPress={() => setHistoryFavoritesOnly(false)}
+              onPress={() => {
+                stopFavoritesPlayback({ bumpInteraction: false });
+                setHistoryFavoritesOnly(false);
+              }}
             >
               <Text
                 style={[
@@ -2572,7 +3968,10 @@ export function PocketInterpreterScreen({
                 styles.filterChip,
                 historyFavoritesOnly && styles.filterChipActive,
               ]}
-              onPress={() => setHistoryFavoritesOnly(true)}
+              onPress={() => {
+                stopFavoritesPlayback({ bumpInteraction: false });
+                setHistoryFavoritesOnly(true);
+              }}
             >
               <Text
                 style={[
@@ -2584,14 +3983,47 @@ export function PocketInterpreterScreen({
               </Text>
             </Pressable>
           </View>
-          {error ? <Text style={styles.errorText}>{error}</Text> : null}
-
+          {historyFavoritesOnly && favoriteHistoryCount > 0 ? (
+            <View style={styles.favoritesPlaybackBar}>
+              <View style={styles.favoritesPlaybackTextBlock}>
+                <Text style={styles.favoritesPlaybackTitle}>
+                  {favoritesPlaybackActive && favoritesPlaybackIndex
+                    ? ui.favoritesPlaybackProgress(favoritesPlaybackIndex, favoritesPlaybackTotal)
+                    : ui.listenFavorites}
+                </Text>
+                <Text style={styles.favoritesPlaybackHint}>{ui.favoritesPlaybackHint}</Text>
+              </View>
+              <Pressable
+                style={[
+                  styles.historyActionButton,
+                  favoritesPlaybackActive && styles.historyActionButtonActive,
+                ]}
+                onPress={() => {
+                  if (favoritesPlaybackActive) {
+                    stopFavoritesPlayback();
+                    return;
+                  }
+                  void playFavoritePlaylist();
+                }}
+              >
+                <Text style={styles.historyActionButtonText}>
+                  {favoritesPlaybackActive ? ui.stopFavorites : ui.listenFavorites}
+                </Text>
+              </Pressable>
+            </View>
+          ) : null}
           <ScrollView contentContainerStyle={styles.historyModalList} showsVerticalScrollIndicator={false}>
             {visibleHistory.length === 0 ? (
               <Text style={styles.summaryText}>{ui.noHistory}</Text>
             ) : null}
             {visibleHistory.map((entry) => (
-              <View key={entry.id} style={styles.historyModalRow}>
+              <View
+                key={entry.id}
+                style={[
+                  styles.historyModalRow,
+                  favoritesPlaybackEntryId === entry.id && styles.historyModalRowActive,
+                ]}
+              >
                 <Text style={styles.historyMeta}>
                   {getLanguageUiLabel(entry.sourceLanguage, language)} →{" "}
                   {getLanguageUiLabel(entry.targetLanguage, language)}
@@ -2613,15 +4045,22 @@ export function PocketInterpreterScreen({
                   {entry.translatedText}
                 </Text>
                 <Text style={styles.historyAvailability}>
-                  {entry.audioUri ? ui.offlineAudioReady : ui.offlineTextOnly}
+                  {entry.audioUri || entry.sourceAudioUri ? ui.offlineAudioReady : ui.offlineTextOnly}
                 </Text>
+                {favoritesPlaybackEntryId === entry.id && favoritesPlaybackActive ? (
+                  <Text style={styles.historyNowPlaying}>{ui.favoritesPlayingNow}</Text>
+                ) : null}
                 <View style={styles.historyActionsWrap}>
-                  <Pressable style={styles.historyActionButton} onPress={() => applyHistoryEntry(entry)}>
+                  <Pressable
+                    style={styles.historyActionButton}
+                    onPress={() => applyHistoryEntry(entry)}
+                  >
                     <Text style={styles.historyActionButtonText}>{ui.usePhrase}</Text>
                   </Pressable>
                   <Pressable
                     style={styles.historyActionButton}
                     onPress={() => {
+                      stopFavoritesPlayback({ bumpInteraction: false });
                       void replayHistoryEntry(entry);
                     }}
                   >
@@ -2630,6 +4069,7 @@ export function PocketInterpreterScreen({
                   <Pressable
                     style={styles.historyActionButton}
                     onPress={() => {
+                      stopFavoritesPlayback({ bumpInteraction: false });
                       void replayHistoryEntry(entry, { slow: true });
                     }}
                   >
@@ -2676,10 +4116,30 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   heroHeader: {
-    flexDirection: "row",
     alignItems: "flex-start",
-    justifyContent: "space-between",
-    gap: 12,
+  },
+  brandRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    flex: 1,
+  },
+  brandLogo: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+  },
+  brand: {
+    color: "#f8fafc",
+    fontSize: 28,
+    fontWeight: "900",
+    letterSpacing: 0.2,
+  },
+  brandHint: {
+    color: "#38bdf8",
+    fontSize: 12,
+    fontWeight: "700",
+    letterSpacing: 0.4,
   },
   heroTextBlock: {
     flex: 1,
@@ -2700,19 +4160,6 @@ const styles = StyleSheet.create({
     color: "#cbd5e1",
     fontSize: 13,
     lineHeight: 18,
-  },
-  roomsButton: {
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "#334155",
-    backgroundColor: "#0f172a",
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-  },
-  roomsButtonText: {
-    color: "#e2e8f0",
-    fontSize: 12,
-    fontWeight: "700",
   },
   statusBanner: {
     borderRadius: 12,
@@ -2803,10 +4250,40 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 12,
   },
+  accordionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  accordionHeaderText: {
+    flex: 1,
+    gap: 4,
+  },
+  accordionBody: {
+    gap: 12,
+    paddingTop: 12,
+  },
   sectionTitle: {
     color: "#e2e8f0",
     fontSize: 18,
     fontWeight: "800",
+  },
+  sectionMeta: {
+    color: "#93c5fd",
+    fontSize: 12,
+    fontWeight: "700",
+    lineHeight: 17,
+  },
+  accordionToggle: {
+    color: "#94a3b8",
+    fontSize: 22,
+    fontWeight: "500",
+    lineHeight: 22,
+  },
+  languagesPanel: {
+    gap: 12,
+    paddingTop: 12,
   },
   selectorLabel: {
     color: "#cbd5e1",
@@ -2903,7 +4380,22 @@ const styles = StyleSheet.create({
   translationActions: {
     flexDirection: "row",
     alignItems: "center",
+    justifyContent: "flex-end",
+    flexWrap: "wrap",
     gap: 8,
+    flexShrink: 1,
+  },
+  sectionActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  inlineActionRow: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    paddingTop: 12,
   },
   replayButton: {
     borderRadius: 999,
@@ -2913,10 +4405,24 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 8,
   },
+  replayButtonActive: {
+    borderColor: "#67e8f9",
+    backgroundColor: "#0f766e",
+  },
+  replayButtonDanger: {
+    borderColor: "#ef4444",
+    backgroundColor: "#1f1114",
+  },
   replayButtonText: {
     color: "#bfdbfe",
     fontSize: 12,
     fontWeight: "700",
+  },
+  replayButtonTextActive: {
+    color: "#ecfeff",
+  },
+  replayButtonTextDanger: {
+    color: "#fecaca",
   },
   faceModeRoot: {
     flex: 1,
@@ -2979,6 +4485,47 @@ const styles = StyleSheet.create({
   faceModeFooter: {
     gap: 10,
   },
+  editorModalBody: {
+    flex: 1,
+    gap: 12,
+    paddingTop: 18,
+  },
+  editorInput: {
+    minHeight: 180,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "#334155",
+    backgroundColor: "#0f172a",
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    color: "#f8fafc",
+    fontSize: 18,
+    lineHeight: 28,
+    fontWeight: "600",
+    textAlignVertical: "top",
+  },
+  editorActionsRow: {
+    flexDirection: "row",
+    gap: 10,
+    paddingTop: 8,
+  },
+  editorPrimaryAction: {
+    flex: 1,
+    minHeight: 52,
+  },
+  editorSecondaryAction: {
+    flex: 1,
+    minHeight: 52,
+    backgroundColor: "#0f172a",
+    borderWidth: 1,
+    borderColor: "#334155",
+  },
+  editorBusyText: {
+    color: "#93c5fd",
+    fontSize: 12,
+    textAlign: "center",
+    paddingTop: 8,
+  },
   faceModeAction: {
     minHeight: 52,
   },
@@ -3005,6 +4552,10 @@ const styles = StyleSheet.create({
     backgroundColor: "#0f172a",
     padding: 12,
     gap: 6,
+  },
+  historyRowActive: {
+    borderColor: "#38bdf8",
+    backgroundColor: "#082f49",
   },
   historyMeta: {
     color: "#93c5fd",
@@ -3060,6 +4611,29 @@ const styles = StyleSheet.create({
     paddingBottom: 32,
     gap: 12,
   },
+  favoritesPlaybackBar: {
+    marginHorizontal: 20,
+    marginBottom: 10,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#164e63",
+    backgroundColor: "#082f49",
+    padding: 12,
+    gap: 10,
+  },
+  favoritesPlaybackTextBlock: {
+    gap: 4,
+  },
+  favoritesPlaybackTitle: {
+    color: "#e0f2fe",
+    fontSize: 13,
+    fontWeight: "800",
+  },
+  favoritesPlaybackHint: {
+    color: "#bae6fd",
+    fontSize: 12,
+    lineHeight: 17,
+  },
   historyModalRow: {
     borderRadius: 18,
     borderWidth: 1,
@@ -3067,6 +4641,10 @@ const styles = StyleSheet.create({
     backgroundColor: "#0b1220",
     padding: 14,
     gap: 8,
+  },
+  historyModalRowActive: {
+    borderColor: "#38bdf8",
+    backgroundColor: "#082f49",
   },
   historyActionsWrap: {
     flexDirection: "row",
@@ -3081,6 +4659,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 8,
   },
+  historyActionButtonActive: {
+    borderColor: "#67e8f9",
+    backgroundColor: "#0f766e",
+  },
   historyActionButtonDanger: {
     borderColor: "#7f1d1d",
     backgroundColor: "#450a0a",
@@ -3089,6 +4671,13 @@ const styles = StyleSheet.create({
     color: "#e2e8f0",
     fontSize: 12,
     fontWeight: "700",
+  },
+  historyNowPlaying: {
+    color: "#67e8f9",
+    fontSize: 11,
+    fontWeight: "800",
+    textTransform: "uppercase",
+    letterSpacing: 0.7,
   },
   actionButton: {
     borderRadius: 12,
@@ -3102,6 +4691,22 @@ const styles = StyleSheet.create({
   },
   retryButton: {
     backgroundColor: "#1d4ed8",
+  },
+  noticeCard: {
+    borderRadius: 12,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  noticeCardWarm: {
+    borderColor: "#92400e",
+    backgroundColor: "rgba(120, 53, 15, 0.28)",
+  },
+  noticeText: {
+    color: "#fde68a",
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: "700",
   },
   actionButtonText: {
     color: "#ffffff",

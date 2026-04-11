@@ -1,11 +1,17 @@
 "use client";
 
-import { Suspense } from "react";
+import Link from "next/link";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import VideoConferenceContent from "@/components/video/VideoConferenceContent";
+import { getAiPracticeViewportProfile } from "@/components/video/useAiPracticeViewportProfile";
 import UiLocaleSwitch from "@/components/ui/UiLocaleSwitch";
 import { useUiLocale } from "@/components/ui/UiLocaleProvider";
+import {
+  buildConferenceMobileAppHref,
+  resolvePreferredMobileStoreUrl,
+} from "@/lib/mobileVideoLinks";
 
 /* =======================================================
    🎥 PAGE VISIO — fond bleu clair, responsive, menu déroulant
@@ -13,10 +19,162 @@ import { useUiLocale } from "@/components/ui/UiLocaleProvider";
 export default function VideoConferencePage() {
   return (
     <Suspense fallback={<LoadingFallback />}>
-      <ResponsiveLayout>
-        <VideoConferenceContent />
-      </ResponsiveLayout>
+      <VideoConferenceRoute />
     </Suspense>
+  );
+}
+
+function VideoConferenceRoute() {
+  const searchParams = useSearchParams();
+  const [isPhoneViewport, setIsPhoneViewport] = useState<boolean | null>(null);
+  const wantsAiExercise = searchParams.get("exercise") === "1";
+  const inviteId = (searchParams.get("invite") || "").trim();
+  const guestName =
+    (searchParams.get("name") || searchParams.get("guest") || "").trim();
+  const allowPhoneWeb = searchParams.get("web") === "1";
+
+  useEffect(() => {
+    const apply = () => setIsPhoneViewport(getAiPracticeViewportProfile().isPhone);
+    apply();
+    window.addEventListener("resize", apply);
+    window.addEventListener("orientationchange", apply);
+    window.visualViewport?.addEventListener("resize", apply);
+    return () => {
+      window.removeEventListener("resize", apply);
+      window.removeEventListener("orientationchange", apply);
+      window.visualViewport?.removeEventListener("resize", apply);
+    };
+  }, []);
+
+  if (wantsAiExercise) {
+    return <ExerciseRedirect />;
+  }
+
+  if (isPhoneViewport === null) {
+    return <LoadingFallback />;
+  }
+
+  if (isPhoneViewport && !allowPhoneWeb) {
+    return <MobileWebConferenceGate inviteId={inviteId} guestName={guestName} />;
+  }
+
+  return (
+    <ResponsiveLayout>
+      <VideoConferenceContent />
+    </ResponsiveLayout>
+  );
+}
+
+function MobileWebConferenceGate({
+  inviteId,
+  guestName,
+}: {
+  inviteId: string;
+  guestName: string;
+}) {
+  const searchParams = useSearchParams();
+  const { locale } = useUiLocale();
+  const [preferredStoreUrl, setPreferredStoreUrl] = useState("");
+  const openAppHref = useMemo(
+    () => buildConferenceMobileAppHref({ inviteId, guestName }),
+    [guestName, inviteId]
+  );
+  const continueOnWebHref = useMemo(() => {
+    const nextParams = new URLSearchParams(searchParams.toString());
+    nextParams.set("web", "1");
+    return `/videoconference?${nextParams.toString()}`;
+  }, [searchParams]);
+
+  useEffect(() => {
+    setPreferredStoreUrl(resolvePreferredMobileStoreUrl());
+  }, []);
+  const isInviteFlow = inviteId.length > 0;
+  const title =
+    locale === "fr"
+      ? "Utilise l'app BFZoom sur telephone"
+      : "Use the BFZoom app on phone";
+  const description =
+    locale === "fr"
+      ? isInviteFlow
+        ? "Cette invitation fonctionne mieux dans l'app BFZoom. Le web mobile n'est pas une experience visio fiable."
+        : "La visioconference BFZoom n'est pas prise en charge correctement sur navigateur mobile. Ouvre l'app pour appeler ou creer une salle."
+      : isInviteFlow
+      ? "This invite works best in the BFZoom app. Mobile web is not a reliable calling experience."
+      : "BFZoom video calls are not properly supported in mobile browsers. Open the app to call or create a room.";
+  const primaryLabel = locale === "fr" ? "Ouvrir l'app BFZoom" : "Open the BFZoom app";
+  const downloadLabel = locale === "fr" ? "Telecharger l'app" : "Download the app";
+  const webLabel =
+    locale === "fr"
+      ? "Continuer quand meme sur le web"
+      : "Continue on the web anyway";
+  const helper =
+    locale === "fr"
+      ? "Mode secours seulement. Sur smartphone, la visio BFZoom est prevue pour l'app."
+      : "Fallback mode only. On smartphones, BFZoom calls are designed for the app.";
+
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-linear-to-b from-slate-950 via-slate-900 to-slate-950 px-4 py-8 text-slate-100">
+      <div className="w-full max-w-md rounded-3xl border border-white/10 bg-black/35 p-6 shadow-2xl backdrop-blur">
+        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-300">BFZoom</p>
+        <h1 className="mt-3 text-2xl font-semibold text-white">{title}</h1>
+        <p className="mt-3 text-sm leading-relaxed text-slate-300">{description}</p>
+        <a
+          href={openAppHref}
+          className="mt-6 flex w-full items-center justify-center rounded-xl bg-amber-400 px-4 py-3 text-sm font-semibold text-slate-950 transition hover:bg-amber-300"
+        >
+          {primaryLabel}
+        </a>
+        {preferredStoreUrl ? (
+          <a
+            href={preferredStoreUrl}
+            className="mt-2 flex w-full items-center justify-center rounded-xl border border-white/25 bg-white/10 px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/15"
+          >
+            {downloadLabel}
+          </a>
+        ) : null}
+        <Link
+          href={continueOnWebHref}
+          className="mt-2 flex w-full items-center justify-center rounded-xl border border-slate-600 bg-transparent px-4 py-3 text-sm font-semibold text-slate-200 transition hover:bg-white/5"
+        >
+          {webLabel}
+        </Link>
+        <p className="mt-3 text-[11px] leading-relaxed text-slate-400">{helper}</p>
+      </div>
+    </div>
+  );
+}
+
+function ExerciseRedirect() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const { locale } = useUiLocale();
+
+  const targetHref = useMemo(() => {
+    const params = new URLSearchParams();
+    for (const [key, value] of searchParams.entries()) {
+      if (key === "exercise" || key === "host" || key === "create") continue;
+      params.set(key, value);
+    }
+    const search = params.toString();
+    return `/exercice-ia${search ? `?${search}` : ""}`;
+  }, [searchParams]);
+
+  useEffect(() => {
+    router.replace(targetHref);
+  }, [router, targetHref]);
+
+  const label =
+    locale === "fr"
+      ? "Redirection vers AI Practice..."
+      : "Redirecting to AI Practice...";
+
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-black px-4 text-white">
+      <div className="w-full max-w-md rounded-2xl border border-white/15 bg-black/65 p-6 text-center shadow-xl backdrop-blur">
+        <div className="mx-auto mb-3 h-6 w-6 animate-spin rounded-full border-2 border-sky-500 border-t-transparent" />
+        <p className="text-sm font-semibold text-slate-100">{label}</p>
+      </div>
+    </div>
   );
 }
 
@@ -26,7 +184,8 @@ export default function VideoConferencePage() {
 function ResponsiveLayout({ children }: { children: React.ReactNode }) {
   const searchParams = useSearchParams();
   const roomId = (searchParams.get("room") || "").trim();
-  const isRoomView = roomId.length > 0;
+  const inviteId = (searchParams.get("invite") || "").trim();
+  const isRoomView = roomId.length > 0 || inviteId.length > 0;
 
   return (
     <div

@@ -1,0 +1,46 @@
+<svg width="1800" height="560" viewBox="0 0 1800 560" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="BFZoom wordmark">
+  <defs>
+    <linearGradient id="wm-bg" x1="42" y1="28" x2="524" y2="528" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#081433"/>
+      <stop offset="0.52" stop-color="#0C2A70"/>
+      <stop offset="1" stop-color="#14B8FF"/>
+    </linearGradient>
+    <linearGradient id="wm-card" x1="116" y1="90" x2="430" y2="432" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#EAF6FF"/>
+    </linearGradient>
+    <linearGradient id="wm-accent" x1="208" y1="208" x2="420" y2="424" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#89E6FF"/>
+      <stop offset="1" stop-color="#38BDF8"/>
+    </linearGradient>
+    <filter id="wm-shadow" x="64" y="56" width="428" height="436" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+      <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
+      <feOffset dy="12"/>
+      <feGaussianBlur stdDeviation="8"/>
+      <feComposite in2="hardAlpha" operator="out"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.0157 0 0 0 0 0.0902 0 0 0 0 0.2471 0 0 0 0.33 0"/>
+      <feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow"/>
+      <feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow" result="shape"/>
+    </filter>
+  </defs>
+
+  <rect x="24" y="24" width="512" height="512" rx="124" fill="url(#wm-bg)"/>
+  <circle cx="442" cy="122" r="50" fill="white" fill-opacity="0.09"/>
+  <circle cx="118" cy="444" r="62" fill="white" fill-opacity="0.08"/>
+
+  <g filter="url(#wm-shadow)">
+    <rect x="86" y="70" width="384" height="258" rx="96" fill="url(#wm-card)"/>
+    <path d="M164 316L144 402L224 334L164 316Z" fill="#F2FAFF"/>
+    <rect x="176" y="208" width="270" height="182" rx="76" fill="url(#wm-accent)"/>
+    <path d="M352 378L394 452L424 374L352 378Z" fill="#67D7FF"/>
+    <path d="M214 168V402" stroke="#0A2666" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M214 168H284C317 168 342 193 342 224C342 255 317 280 284 280H214" stroke="#0A2666" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M214 280H300C338 280 366 307 366 342C366 377 338 404 300 404H214" stroke="#0A2666" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <path d="M454 140L464 170L494 180L464 190L454 220L444 190L414 180L444 170L454 140Z" fill="#E8F9FF"/>
+
+  <text x="600" y="286" fill="#0A163D" font-family="Avenir Next, Avenir, Poppins, Montserrat, sans-serif" font-size="208" font-weight="800" letter-spacing="-4">BFZoom</text>
+  <text x="606" y="358" fill="#2B4D8F" font-family="Avenir Next, Avenir, Poppins, Montserrat, sans-serif" font-size="54" font-weight="600" letter-spacing="8">CONNECT . CHAT . TRAIN</text>
+</svg>

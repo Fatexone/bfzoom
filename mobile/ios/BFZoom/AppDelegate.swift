@@ -1,6 +1,8 @@
 import Expo
 import React
 import ReactAppDependencyProvider
+import livekit_react_native
+import livekit_react_native_webrtc
 
 @UIApplicationMain
 public class AppDelegate: ExpoAppDelegate {
@@ -13,6 +15,12 @@ public class AppDelegate: ExpoAppDelegate {
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
   ) -> Bool {
+    LivekitReactNative.setup()
+
+    if #available(iOS 16.0, *), UIDevice.current.userInterfaceIdiom == .pad {
+      WebRTCModuleOptions.sharedInstance().enableMultitaskingCameraAccess = true
+    }
+
     let delegate = ReactNativeDelegate()
     let factory = ExpoReactNativeFactory(delegate: delegate)
     delegate.dependencyProvider = RCTAppDependencyProvider()

@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Animated,
+  Easing,
+  Image,
   Keyboard,
   KeyboardAvoidingView,
   Platform,
@@ -19,11 +22,11 @@ import { env } from "../config/env";
 import { auth, db } from "../services/firebase";
 
 const ACTIVE_SESSION_STORAGE_KEY = "bfzoom.activeSessionId";
+const MOBILE_BRAND_ICON = require("../../assets/icon.png");
 
 type LoginOtpScreenProps = {
   onLoggedIn: () => void;
   onBack: () => void;
-  onContinueAsGuestForPacks?: () => void;
 };
 
 type OtpSendResponse = {
@@ -40,10 +43,12 @@ type OtpVerifyResponse = {
 export function LoginOtpScreen({
   onLoggedIn,
   onBack,
-  onContinueAsGuestForPacks,
 }: LoginOtpScreenProps) {
   const { language } = useI18n();
   const codeInputRef = useRef<TextInput | null>(null);
+  const driftPrimary = useRef(new Animated.Value(-24)).current;
+  const driftSecondary = useRef(new Animated.Value(18)).current;
+  const driftTertiary = useRef(new Animated.Value(-14)).current;
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
   const [step, setStep] = useState<"email" | "code">("email");
@@ -56,6 +61,64 @@ export function LoginOtpScreen({
       console.log("[BFZoom][auth] LoginOtpScreen unmounted");
     };
   }, []);
+
+  useEffect(() => {
+    const animations = [
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(driftPrimary, {
+            toValue: 28,
+            duration: 18000,
+            easing: Easing.inOut(Easing.quad),
+            useNativeDriver: true,
+          }),
+          Animated.timing(driftPrimary, {
+            toValue: -24,
+            duration: 18000,
+            easing: Easing.inOut(Easing.quad),
+            useNativeDriver: true,
+          }),
+        ])
+      ),
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(driftSecondary, {
+            toValue: -18,
+            duration: 22000,
+            easing: Easing.inOut(Easing.quad),
+            useNativeDriver: true,
+          }),
+          Animated.timing(driftSecondary, {
+            toValue: 22,
+            duration: 22000,
+            easing: Easing.inOut(Easing.quad),
+            useNativeDriver: true,
+          }),
+        ])
+      ),
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(driftTertiary, {
+            toValue: 20,
+            duration: 20000,
+            easing: Easing.inOut(Easing.quad),
+            useNativeDriver: true,
+          }),
+          Animated.timing(driftTertiary, {
+            toValue: -14,
+            duration: 20000,
+            easing: Easing.inOut(Easing.quad),
+            useNativeDriver: true,
+          }),
+        ])
+      ),
+    ];
+
+    animations.forEach((animation) => animation.start());
+    return () => {
+      animations.forEach((animation) => animation.stop());
+    };
+  }, [driftPrimary, driftSecondary, driftTertiary]);
 
   const ui = language === "fr"
     ? {
@@ -76,15 +139,17 @@ export function LoginOtpScreen({
         title: "Connexion",
         subtitle:
           "Entre ton email. Si c'est ta premiere fois, ton compte BFZoom sera cree automatiquement apres verification du code.",
+        backgroundLines: [
+          "Bonjour / Hello / Hola / Oi / Ciao / Guten Tag / Merhaba",
+          "Voix traduite / Sous-titres partages / Interpretation live / Temps reel",
+          "Francais / English / Espanol / Portugues / Darija / Deutsch / Italiano / Arabic",
+        ],
         emailPlaceholder: "Entre ton email...",
         sendCode: "Envoyer le code",
         codePlaceholder: "Code à 6 chiffres",
         verifyCode: "Valider le code",
         editEmail: "Modifier l'email",
         back: "Retour à l'accueil",
-        guestPacksHint:
-          "Tu peux aussi ouvrir les packs iPhone sans créer de compte. Crée un compte plus tard pour synchroniser tes minutes.",
-        continueAsGuest: "Voir les packs sans compte",
       }
     : {
         networkUnknown: "Unknown network error",
@@ -104,15 +169,17 @@ export function LoginOtpScreen({
         title: "Sign in",
         subtitle:
           "Enter your email. If this is your first time, your BFZoom account will be created automatically after code verification.",
+        backgroundLines: [
+          "Hello / Bonjour / Hola / Oi / Ciao / Guten Tag / Merhaba",
+          "Translated voice / Shared captions / Live interpretation / Real time",
+          "English / Francais / Espanol / Portugues / Darija / Deutsch / Italiano / Arabic",
+        ],
         emailPlaceholder: "Enter your email...",
         sendCode: "Send code",
         codePlaceholder: "6-digit code",
         verifyCode: "Verify code",
         editEmail: "Edit email",
         back: "Back to home",
-        guestPacksHint:
-          "You can also open iPhone packs without creating an account. Create one later to sync your minutes across devices.",
-        continueAsGuest: "View packs without account",
       };
 
   const normalizedApiBaseUrl = env.apiBaseUrl.trim().replace(/\/+$/, "");
@@ -244,6 +311,37 @@ export function LoginOtpScreen({
       behavior={Platform.OS === "ios" ? "padding" : undefined}
       keyboardVerticalOffset={0}
     >
+      <View pointerEvents="none" style={styles.backgroundLayer}>
+        <View style={styles.backgroundGlowTop} />
+        <View style={styles.backgroundGlowBottom} />
+        <Animated.Text
+          style={[
+            styles.subtitleRibbon,
+            styles.subtitleRibbonTop,
+            { transform: [{ rotate: "-10deg" }, { translateX: driftPrimary }] },
+          ]}
+        >
+          {ui.backgroundLines[0]}
+        </Animated.Text>
+        <Animated.Text
+          style={[
+            styles.subtitleRibbon,
+            styles.subtitleRibbonMiddle,
+            { transform: [{ rotate: "-6deg" }, { translateX: driftSecondary }] },
+          ]}
+        >
+          {ui.backgroundLines[1]}
+        </Animated.Text>
+        <Animated.Text
+          style={[
+            styles.subtitleRibbon,
+            styles.subtitleRibbonBottom,
+            { transform: [{ rotate: "-8deg" }, { translateX: driftTertiary }] },
+          ]}
+        >
+          {ui.backgroundLines[2]}
+        </Animated.Text>
+      </View>
       <ScrollView
         contentContainerStyle={styles.scrollContent}
         contentInsetAdjustmentBehavior="always"
@@ -252,16 +350,15 @@ export function LoginOtpScreen({
         showsVerticalScrollIndicator
       >
         <View style={styles.card}>
-          <Text style={styles.title}>{language === "fr" ? "🔑 Connexion" : "🔑 Sign in"}</Text>
-          <Text style={styles.subtitle}>{ui.subtitle}</Text>
-          {onContinueAsGuestForPacks && step === "email" ? (
-            <View style={styles.guestCard}>
-              <Text style={styles.guestHint}>{ui.guestPacksHint}</Text>
-              <Pressable style={styles.guestButton} onPress={onContinueAsGuestForPacks}>
-                <Text style={styles.guestButtonText}>{ui.continueAsGuest}</Text>
-              </Pressable>
+          <View style={styles.brandHeader}>
+            <Image source={MOBILE_BRAND_ICON} style={styles.brandLogo} resizeMode="cover" />
+            <View style={styles.brandTextBlock}>
+              <Text style={styles.brand}>BFZoom</Text>
+              <Text style={styles.brandHint}>by Beyond Frontiers</Text>
             </View>
-          ) : null}
+          </View>
+          <Text style={styles.title}>{ui.title}</Text>
+          <Text style={styles.subtitle}>{ui.subtitle}</Text>
 
           <TextInput
             value={email}
@@ -356,8 +453,50 @@ export function LoginOtpScreen({
 const styles = StyleSheet.create({
   screen: {
     flex: 1,
-    backgroundColor: "#f8fafc",
+    backgroundColor: "#f4f7fb",
     paddingHorizontal: 16,
+  },
+  backgroundLayer: {
+    ...StyleSheet.absoluteFillObject,
+    overflow: "hidden",
+  },
+  backgroundGlowTop: {
+    position: "absolute",
+    width: 280,
+    height: 280,
+    borderRadius: 140,
+    top: -80,
+    right: -60,
+    backgroundColor: "rgba(56,189,248,0.14)",
+  },
+  backgroundGlowBottom: {
+    position: "absolute",
+    width: 260,
+    height: 260,
+    borderRadius: 130,
+    bottom: -110,
+    left: -70,
+    backgroundColor: "rgba(37,99,235,0.1)",
+  },
+  subtitleRibbon: {
+    position: "absolute",
+    left: -36,
+    right: -36,
+    color: "rgba(37,99,235,0.12)",
+    fontSize: 14,
+    fontWeight: "700",
+    letterSpacing: 0.4,
+  },
+  subtitleRibbonTop: {
+    top: 120,
+  },
+  subtitleRibbonMiddle: {
+    top: 300,
+    color: "rgba(15,23,42,0.08)",
+  },
+  subtitleRibbonBottom: {
+    top: 520,
+    color: "rgba(37,99,235,0.1)",
   },
   scrollContent: {
     flexGrow: 1,
@@ -373,13 +512,43 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#e2e8f0",
     borderRadius: 16,
-    backgroundColor: "#ffffff",
+    backgroundColor: "rgba(255,255,255,0.94)",
     padding: 16,
     gap: 10,
+    shadowColor: "#0f172a",
+    shadowOpacity: 0.08,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 4,
+  },
+  brandHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginBottom: 2,
+  },
+  brandLogo: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+  },
+  brandTextBlock: {
+    gap: 2,
+  },
+  brand: {
+    color: "#081433",
+    fontSize: 24,
+    fontWeight: "900",
+  },
+  brandHint: {
+    color: "#2563eb",
+    fontSize: 12,
+    fontWeight: "700",
+    letterSpacing: 0.3,
   },
   title: {
     color: "#0f172a",
-    fontSize: 26,
+    fontSize: 24,
     fontWeight: "800",
     marginBottom: 2,
   },
@@ -388,32 +557,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 19,
     marginBottom: 4,
-  },
-  guestCard: {
-    borderWidth: 1,
-    borderColor: "#bfdbfe",
-    borderRadius: 12,
-    backgroundColor: "#eff6ff",
-    padding: 12,
-    gap: 10,
-  },
-  guestHint: {
-    color: "#1e3a8a",
-    fontSize: 12,
-    lineHeight: 18,
-  },
-  guestButton: {
-    borderRadius: 10,
-    backgroundColor: "#2563eb",
-    paddingHorizontal: 14,
-    paddingVertical: 11,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  guestButtonText: {
-    color: "#ffffff",
-    fontSize: 13,
-    fontWeight: "800",
   },
   input: {
     borderWidth: 1,

@@ -15,6 +15,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { auth } from "@/lib/firebaseConfig";
@@ -50,33 +51,51 @@ import {
   isTrackReferencePinned,
 } from "@livekit/components-core";
 import type { LocalParticipant, Participant } from "livekit-client";
-import { ConnectionState, DisconnectReason, LocalAudioTrack, Room, RoomEvent, Track } from "livekit-client";
 import {
-  BookOpen,
-  Bot,
-  Camera,
-  CameraOff,
+  ConnectionQuality,
+  ConnectionState,
+  DisconnectReason,
+  LocalAudioTrack,
+  Room,
+  RoomEvent,
+  Track,
+} from "livekit-client";
+import {
   Info,
-  LogOut,
-  MessageCircle,
+  Share2,
   Mic,
   MicOff,
-  MoreHorizontal,
-  Power,
-  ScreenShare,
-  Settings,
-  Share2,
+  Camera,
+  CameraOff,
   SwitchCamera,
+  ScreenShare,
+  MessageCircle,
+  Settings,
+  Power,
+  LogOut,
   Volume2,
+  MoreHorizontal,
+  Menu,
+  X,
 } from "lucide-react";
-import boxingLibrary from "@/data/coach/boxing.json";
-import businessLibrary from "@/data/coach/business.json";
-import generalLibrary from "@/data/coach/general.json";
-import meditationLibrary from "@/data/coach/meditation.json";
-import mentalLibrary from "@/data/coach/mental.json";
-import coachIndex from "@/data/coach/index.json";
-import rumeurPositioning from "@/data/positioning/rumeur-publique.json";
+
+import AiPracticeNotebookSaveButton from "@/components/video/AiPracticeNotebookSaveButton";
+import {
+  isApplePhonePlatform,
+  isAppleTouchPlatform,
+  useAiPracticeViewportProfile,
+} from "@/components/video/useAiPracticeViewportProfile";
+import { useUiLocale, type UiLocale } from "@/components/ui/UiLocaleProvider";
 import { getAuthHeader } from "@/lib/authHeader";
+import {
+  AI_PRACTICE_NOTEBOOK_ENRICHED_SECONDS,
+  AI_PRACTICE_NOTEBOOK_SIMPLE_SECONDS,
+  formatNotebookChargeMinutes,
+  type AiPracticeNotebookSaveInput,
+} from "@/lib/aiPracticeNotebook";
+import { buildCreditsPageHref } from "@/lib/creditPacks";
+import { dispatchTranslationEntitlementUpdatedEvent } from "@/lib/translationEntitlementEvents";
+import { buildCanonicalLivekitInviteUrl } from "@/lib/livekitInviteLinks";
 import {
   CAPTION_TARGETS_CONFIG,
   DEFAULT_CAPTION_TARGET,
@@ -87,16 +106,58 @@ import {
   type CaptionTargetCode,
   type SourceLanguageOption,
 } from "./translationConfig";
-import { saveTranslationNotebookEntry } from "@/lib/translationNotebook";
 
 type LiveKitTokenResponse = {
   token: string;
+  room?: string;
+  guestTtsToken?: string;
 };
+type InitialLivekitAuth = {
+  token: string;
+  guestTtsToken?: string;
+};
+type CaptionTarget = CaptionTargetCode;
+
+type PushToTalkDraftCaptureSource = "speech" | "recording" | "manual";
+
+type PushToTalkDraft = {
+  id: number;
+  transcript: string;
+  elapsedSeconds: number;
+  captureSource: PushToTalkDraftCaptureSource;
+  requiresExplicitConfirmation: boolean;
+};
+
+type PushToTalkDraftReviewStatus = "ok" | "review" | "unclear";
+type PushToTalkDraftReviewMode = "coach" | "translation";
+
+type PushToTalkDraftReview = {
+  status: PushToTalkDraftReviewStatus;
+  message: string;
+  correctedText: string;
+  naturalText: string;
+  familiarText: string;
+  reviewedText: string;
+};
+
+type QueuePushToTalkDraftOptions = {
+  captureSource?: PushToTalkDraftCaptureSource;
+  requiresExplicitConfirmation?: boolean;
+  forceEditing?: boolean;
+  reviewOverride?: PushToTalkDraftReview | null;
+};
+
+// Utilitaire global pour l'affichage des badges d'état
+const getBadgeClass = (active: boolean) =>
+  `rounded-full px-2 py-0.5 text-[10px] font-semibold ${active ? "bg-emerald-500/20 text-emerald-200" : "bg-slate-800 text-slate-500"}`;
 
 const LK_URL =
   process.env.NEXT_PUBLIC_LIVEKIT_URL?.replace(/\/$/, "") || "";
+const ROOM_HEARTBEAT_INTERVAL_MS = 30_000;
+const ROOM_HEARTBEAT_TIMEOUT_MS = 8_000;
 
 const REALTIME_VOICE_OPTIONS = [
+
   "alloy",
   "ash",
   "ballad",
@@ -107,18 +168,7 @@ const REALTIME_VOICE_OPTIONS = [
   "sage",
   "shimmer",
   "verse",
-] as const;
-
-type CaptionTarget = CaptionTargetCode;
-
-type PushToTalkDraft = {
-  id: number;
-  transcript: string;
-  elapsedSeconds: number;
-};
-
-const getBadgeClass = (active: boolean) =>
-  `rounded-full px-2 py-0.5 text-[10px] font-semibold ${active ? "bg-emerald-500/20 text-emerald-200" : "bg-slate-800 text-slate-500"}`;
+];
 
 const shouldForcePushToTalkCorrection = (input: string) => {
   const normalized = input
@@ -136,6 +186,48 @@ const shouldForcePushToTalkCorrection = (input: string) => {
   }
   return false;
 };
+
+const normalizeComparableText = (value: string) =>
+  value
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+
+const sanitizePushToTalkDraftSuggestion = (candidate: string, sourceText: string) => {
+  const cleaned = candidate.replace(/\s+/g, " ").trim();
+  if (!cleaned) return "";
+  return normalizeComparableText(cleaned) === normalizeComparableText(sourceText) ? "" : cleaned;
+};
+
+const hasPushToTalkDraftReviewSuggestions = (review: PushToTalkDraftReview | null) =>
+  Boolean(
+    review &&
+      (review.correctedText.trim() ||
+        review.naturalText.trim() ||
+        review.familiarText.trim())
+  );
+
+const buildManualPushToTalkDraftReview = (
+  message: string,
+  reviewedText = ""
+): PushToTalkDraftReview => ({
+  status: "unclear",
+  message,
+  correctedText: "",
+  naturalText: "",
+  familiarText: "",
+  reviewedText,
+});
+
+const isPushToTalkDraftReviewCurrent = (
+  review: PushToTalkDraftReview | null,
+  sourceText: string
+) =>
+  Boolean(
+    review &&
+      normalizeComparableText(review.reviewedText) ===
+        normalizeComparableText(sourceText)
+  );
 
 const REALTIME_TRANSLATION_ENABLED = false;
 const CAPTIONS_ALWAYS_ON = true;
@@ -162,19 +254,35 @@ const TRANSLATION_UNLOCK_HINT =
 const TRANSLATION_WAIT_HOST_HINT =
   "Traduction en attente: l'hote doit disposer de minutes offertes ou de credits actifs.";
 const TRANSLATION_ACCESS_TOPIC = "bfzoom-translation-access";
+const TALKIE_LOCK_TOPIC = "bfzoom-ptt-lock";
+const TALKIE_LOCK_TIMEOUT_MS = 10_000;
+const TALKIE_LOCK_HEARTBEAT_MS = 2_500;
+const TALKIE_REMOTE_AUDIO_MUTED_VOLUME = 0;
+const TALKIE_REMOTE_AUDIO_VOLUME_NORMAL = 1;
 const AI_PARTNER_TRAINING_ENABLED = !["0", "false", "no", "off"].includes(
   (process.env.NEXT_PUBLIC_BFZOOM_AI_PARTNER_TRAINING_ENABLED || "").trim().toLowerCase()
 );
 const AI_PARTNER_NAME = "Partenaire IA";
-const AI_PARTNER_TOGGLE_LABEL = "Coach conversation IA";
-const AI_PARTNER_TOGGLE_INFO =
-  "Mode d'entrainement solo: tu parles, l'IA te repond dans la langue de communication, puis propose une aide pour enchainer ta prochaine reponse.";
 const PUSH_TO_TALK_CANCEL_DISTANCE_PX = 72;
-const PUSH_TO_TALK_AUTO_SEND_MS = 1200;
+const PUSH_TO_TALK_AUTO_SEND_MS = 500;
+const formatPushToTalkAutoSendDelay = (delayMs: number) =>
+  delayMs < 1000 ? "<1s" : `${Math.round(delayMs / 1000)}s`;
+const NOTEBOOK_SIMPLE_LABEL = `Ajouter au carnet (${formatNotebookChargeMinutes(
+  AI_PRACTICE_NOTEBOOK_SIMPLE_SECONDS
+)})`;
+const NOTEBOOK_ENRICHED_LABEL = `Ajouter au carnet enrichi (${formatNotebookChargeMinutes(
+  AI_PRACTICE_NOTEBOOK_ENRICHED_SECONDS
+)})`;
 type AiPartnerScenario = "auto" | "daily" | "travel" | "business" | "interview" | "society";
 type AiPartnerTone = "friendly" | "professional" | "challenging";
 type AiPartnerAvatarTheme = "neutral" | "boxing";
 type AiPartnerFeedbackView = "target" | "source" | "fr";
+type AiPartnerConversationMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+const AI_PARTNER_HISTORY_LIMIT = 6;
 const AI_PARTNER_SCENARIO_OPTIONS: ReadonlyArray<{ value: AiPartnerScenario; label: string }> = [
   { value: "auto", label: "Auto (IA)" },
   { value: "daily", label: "Quotidien" },
@@ -222,9 +330,9 @@ const AI_PARTNER_SCENARIO_RULES: Record<AiPartnerScenario, string[]> = {
   ],
 };
 const AI_PARTNER_TONE_PROMPTS: Record<AiPartnerTone, string> = {
-  friendly: "warm, supportive, and encouraging.",
-  professional: "clear, concise, and professional.",
-  challenging: "direct, candid, and demanding to push the learner to improve.",
+  friendly: "warm, supportive, lightly witty, emotionally intelligent, and encouraging.",
+  professional: "clear, concise, confident, and professional.",
+  challenging: "direct, playful, and demanding to push the learner to improve without sounding rude.",
 };
 const buildAiPartnerSystemPrompt = (
   languageName: string,
@@ -240,7 +348,11 @@ const buildAiPartnerSystemPrompt = (
     `- Reply only in ${languageName}.`,
     "- Keep responses short (1-2 sentences) but precise.",
     "- Be practical, conversational, and concrete.",
+    "- Sound like a lively mentor: human, sharp, and easy to talk to.",
+    "- Light humor, empathy, and a little perspective are welcome when they fit naturally.",
+    "- Do not behave like a therapist or abstract philosopher. Stay useful and grounded.",
     "- Avoid vague, evasive, or overly neutral filler.",
+    "- Keep the current thread alive. If the learner says yes, no, okay, maybe, or asks for more detail, treat it as a continuation of your latest question or explanation.",
     "- Ask one useful follow-up question.",
     "- Feedback must help the learner answer YOUR latest reply/question.",
     "- Do not focus only on correcting the learner previous sentence.",
@@ -333,28 +445,81 @@ const safeRandomId = () => {
   // to avoid Safari iOS randomUUID context issues in some environments.
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 };
-const DEFAULT_PUBLIC_APP_URL = "https://www.bfzoom.fr";
 type InviteLinkKind = "smart";
 type InviteLinks = Record<InviteLinkKind, string>;
 type InviteCopyFeedback = InviteLinkKind | "shared";
-const resolveAppBaseUrl = () => {
-  if (typeof window !== "undefined" && window.location?.origin) {
-    return window.location.origin.replace(/\/+$/, "");
-  }
-  const configured = (process.env.NEXT_PUBLIC_APP_URL || "").trim().replace(/\/+$/, "");
-  return configured || DEFAULT_PUBLIC_APP_URL;
-};
-const buildInviteLinks = (roomId: string): InviteLinks => {
-  const room = encodeURIComponent(roomId.trim());
-  const baseUrl = resolveAppBaseUrl();
+const buildInviteLinks = (inviteId: string): InviteLinks => {
   return {
-    smart: `${baseUrl}/join/${room}`,
+    smart: buildCanonicalLivekitInviteUrl(inviteId),
   };
 };
-const getInviteCopiedLabel = (value: InviteCopyFeedback) => {
-  if (value === "smart") return "Lien copie";
-  if (value === "shared") return "Partage envoye";
+const createLivekitRoomInviteId = async (roomId: string) => {
+  const authHeader = await getAuthHeader();
+  const res = await fetch("/api/livekit/invite", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeader,
+    },
+    body: JSON.stringify({ room: roomId }),
+  });
+  const payload = (await res.json().catch(() => ({}))) as {
+    inviteId?: string;
+    error?: string;
+  };
+  if (!res.ok) {
+    throw new Error(payload.error || `Invite creation failed (${res.status})`);
+  }
+  const inviteId = (payload.inviteId || "").trim();
+  if (!inviteId) {
+    throw new Error("Invite creation returned no invite id.");
+  }
+  return inviteId;
+};
+const getInviteCopiedLabel = (value: InviteCopyFeedback, locale: UiLocale = "fr") => {
+  const ui = LIVEKIT_UI_COPY[locale];
+  if (value === "smart") return ui.linkCopied;
+  if (value === "shared") return ui.inviteShareSent;
   return "OK";
+};
+const getLocalizedBackgroundOptionLabel = (
+  optionId: string,
+  ui: LiveKitUiText
+) => {
+  switch (optionId) {
+    case "none":
+      return ui.normalBackground;
+    case "blur":
+      return ui.blurBackground;
+    case "studio":
+      return ui.studioBackground;
+    case "sunset":
+      return ui.sunsetBackground;
+    case "grid":
+      return ui.gridBackground;
+    default:
+      return optionId;
+  }
+};
+const buildMailtoHref = (subject: string, body: string) =>
+  `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+
+const buildSmsHref = (body: string) => {
+  const encodedBody = encodeURIComponent(body);
+  if (typeof navigator !== "undefined" && /iPhone|iPad|iPod/i.test(navigator.userAgent)) {
+    return `sms:&body=${encodedBody}`;
+  }
+  return `sms:?body=${encodedBody}`;
+};
+
+const openMailComposer = (subject: string, body: string) => {
+  if (typeof window === "undefined") return;
+  const href = buildMailtoHref(subject, body);
+  try {
+    window.location.assign(href);
+  } catch {
+    window.location.href = href;
+  }
 };
 const buildVideoConferenceRoomHref = (
   roomId: string,
@@ -369,10 +534,6 @@ const buildVideoConferenceRoomHref = (
     params.set("resume", "1");
   }
   return `/videoconference?${params.toString()}`;
-};
-const buildTranslationNotebookHref = (roomId: string, isHost: boolean) => {
-  const returnTo = buildVideoConferenceRoomHref(roomId, isHost, { resume: true });
-  return `/notes-traduction?returnTo=${encodeURIComponent(returnTo)}`;
 };
 const PREJOIN_CHOICES_STORAGE_PREFIX = "bfzoom:prejoin-choices";
 const buildPreJoinChoicesStorageKey = (roomId: string, isHost: boolean) =>
@@ -444,6 +605,16 @@ const formatTranslationRemaining = (remainingSeconds?: number | null) => {
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 };
 
+const openCreditsTopUpFromCall = () => {
+  if (typeof window === "undefined") return;
+  const returnTo = `${window.location.pathname}${window.location.search}`;
+  const href = buildCreditsPageHref({ returnTo });
+  const creditsWindow = window.open(href, "_blank", "noopener,noreferrer");
+  if (!creditsWindow) {
+    window.location.assign(href);
+  }
+};
+
 type AnnotationPoint = { x: number; y: number };
 type AnnotationStroke = {
   type: "stroke";
@@ -467,7 +638,8 @@ type CaptionPayload = {
   roomId?: string;
   from?: string;
   timestamp?: number;
-  target?: CaptionTarget;
+  target?: CaptionTargetCode;
+  audioTrackPublished?: boolean;
   sourceText?: string;
   sourceLang?: string;
   sourceLangName?: string;
@@ -483,6 +655,15 @@ type TranslationAccessPayload = {
   updatedAt?: number;
 };
 
+type TalkieLockPayload = {
+  roomId?: string;
+  holder?: string;
+  holderName?: string;
+  action?: "claim" | "release" | "heartbeat";
+  expiresAt?: number;
+  timestamp?: number;
+};
+
 type TranslationEntitlementState = {
   enabled: boolean;
   lockReason: string;
@@ -494,6 +675,22 @@ type TranslationEntitlementState = {
   totalSecondsRemaining: number;
 };
 
+const parseCoachFeedbackLines = (feedback: string) =>
+  feedback
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line, index) => {
+      const suggestionText = line.startsWith("•") ? stripCoachSuggestionPrefix(line) : "";
+      const phoneticId = suggestionText ? `${index}:${suggestionText}` : "";
+      return {
+        id: phoneticId || `${index}:${line}`,
+        text: line,
+        suggestionText,
+        phoneticId,
+      };
+    });
+
 const DEFAULT_TRANSLATION_ENTITLEMENT: TranslationEntitlementState = {
   enabled: true,
   lockReason: "",
@@ -503,6 +700,445 @@ const DEFAULT_TRANSLATION_ENTITLEMENT: TranslationEntitlementState = {
   freeSecondsRemaining: 180,
   paidSecondsRemaining: 0,
   totalSecondsRemaining: 180,
+};
+
+type LiveKitUiText = {
+  shareKeyPoint: string;
+  askSummary: string;
+  close: string;
+  send: string;
+  sendAsIs: string;
+  edit: string;
+  cancel: string;
+  autoSendIn: (delayLabel: string) => string;
+  simpleSuggestion: string;
+  naturalVersion: string;
+  familiarVersion: string;
+  applyCorrection: string;
+  useNaturalVersion: string;
+  useFamiliarVersion: string;
+  inviteShareSent: string;
+  inviteEmailSubject: string;
+  inviteEmailBody: string;
+  verifyBeforeTranslation: string;
+  verifyBeforeSend: string;
+  analysisBeforeTranslation: string;
+  analysisInProgress: string;
+  noVoiceDetected: string;
+  incompleteDetection: string;
+  disableRealtimeForPushToTalk: string;
+  sourceLabel: (language: string) => string;
+  translationLabel: (language: string) => string;
+  share: string;
+  shareAria: string;
+  microphone: string;
+  camera: string;
+  cameraBusy: string;
+  enableCameraAria: string;
+  disableCameraAria: string;
+  flip: string;
+  flipCameraAria: string;
+  screen: string;
+  chat: string;
+  settings: string;
+  more: string;
+  moreActionsAria: string;
+  endForAll: string;
+  ending: string;
+  endShort: string;
+  leave: string;
+  localPlayback: string;
+  blocked: string;
+  holdToTalk: string;
+  releaseToTranslate: string;
+  translating: string;
+  talkieBusyBy: (name: string) => string;
+  talkieInfo: string;
+  translationRemaining: string;
+  translationRemainingHost: string;
+  topUpNow: string;
+  askHostToTopUp: string;
+  sourceCaptured: string;
+  directSpeech: string;
+  screenShareInProgress: (trackName?: string) => string;
+  hideGallery: string;
+  showGallery: string;
+  stopSharing: string;
+  stopShareConfirm: string;
+  shareRoom: string;
+  smartLink: string;
+  smartHint: string;
+  shareOptionsHint: string;
+  sendEmail: string;
+  sendSms: string;
+  shareViaDevice: string;
+  emailReady: string;
+  copyLink: string;
+  linkCopied: string;
+  copyShort: string;
+  settingsTitle: string;
+  cameraSection: string;
+  hostSection: string;
+  hostOptions: string;
+  hostReserved: string;
+  hostLinkHint: string;
+  cameraAndCaptionsTitle: string;
+  cameraAndCaptionsHint: string;
+  cameraAndCaptionsInfo: string;
+  autoFrame: string;
+  autoFrameInfo: string;
+  active: string;
+  inactive: string;
+  captionSize: string;
+  captionSizeInfo: string;
+  videoFit: string;
+  videoFitInfo: string;
+  fill: string;
+  fit: string;
+  forceFit: string;
+  forceFitHint: string;
+  backgroundTitle: string;
+  backgroundInfo: string;
+  normalBackground: string;
+  blurBackground: string;
+  studioBackground: string;
+  sunsetBackground: string;
+  gridBackground: string;
+  dallePromptPlaceholder: string;
+  generate: string;
+  generating: string;
+  save: string;
+  overlayTextOptional: string;
+  overlayTextPlaceholder: string;
+  overlayTextHint: string;
+  aiGeneratingStatus: string;
+  aiBackgroundActiveStatus: string;
+  generateThenActivate: string;
+  aiGenerationHostOnly: string;
+  importImage: string;
+  importedBackgrounds: string;
+  aiGalleryTitle: string;
+  delete: string;
+  flipCamera: string;
+  activate: string;
+  remove: string;
+  aiBackgroundActiveCard: string;
+  translationLanguages: string;
+  spokenLanguage: string;
+  communicationLanguage: string;
+  personalReceptionLanguage: string;
+  info: string;
+  receptionInfoLabel: string;
+  open: string;
+  collapse: string;
+  noMessages: string;
+  messagesVisible: string;
+  writeIn: string;
+  writeMessagePlaceholder: string;
+  preview: string;
+  listen: string;
+  stop: string;
+  sentTranslation: string;
+  returnLabel: string;
+  mobileReviewRequired: string;
+  mobileTranscriptionUnclear: string;
+  mobileTranscriptionFailed: string;
+};
+
+const LIVEKIT_UI_COPY: Record<UiLocale, LiveKitUiText> = {
+  fr: {
+    shareKeyPoint: "Partager un point clé",
+    askSummary: "Demander un résumé",
+    close: "Fermer",
+    send: "Envoyer",
+    sendAsIs: "Envoyer tel quel",
+    edit: "Corriger",
+    cancel: "Annuler",
+    autoSendIn: (delayLabel) => `Envoi auto dans ${delayLabel}`,
+    simpleSuggestion: "Suggestion simple",
+    naturalVersion: "Version naturelle",
+    familiarVersion: "Version familiere",
+    applyCorrection: "Appliquer la correction",
+    useNaturalVersion: "Utiliser la version naturelle",
+    useFamiliarVersion: "Utiliser la version familiere",
+    inviteShareSent: "Partage envoye",
+    inviteEmailSubject: "Invitation BFZoom",
+    inviteEmailBody: "Rejoins ma visioconference BFZoom avec ce lien.",
+    verifyBeforeTranslation: "Verification avant traduction",
+    verifyBeforeSend: "Verification avant envoi",
+    analysisBeforeTranslation: "Analyse avant traduction en cours...",
+    analysisInProgress: "Analyse en cours...",
+    noVoiceDetected: "Aucune voix detectee. Maintiens le bouton puis parle.",
+    incompleteDetection:
+      "Verifie la phrase captee puis clique Envoyer. La detection semble incomplete.",
+    disableRealtimeForPushToTalk:
+      "Desactive Realtime pour utiliser le mode appuyer pour parler.",
+    sourceLabel: (language) => `Source (${language})`,
+    translationLabel: (language) => `Traduction (${language})`,
+    share: "Partager",
+    shareAria: "Partager le lien",
+    microphone: "Micro",
+    camera: "Camera",
+    cameraBusy: "Camera...",
+    enableCameraAria: "Activer la camera",
+    disableCameraAria: "Couper la camera",
+    flip: "Retourner",
+    flipCameraAria: "Retourner la camera",
+    screen: "Ecran",
+    chat: "Chat",
+    settings: "Reglages",
+    more: "Plus",
+    moreActionsAria: "Plus d'actions",
+    endForAll: "Terminer pour tous",
+    ending: "Fermeture...",
+    endShort: "Terminer",
+    leave: "Quitter",
+    localPlayback: "Lecture locale",
+    blocked: "BLOQUE",
+    holdToTalk: "Maintenir pour parler",
+    releaseToTranslate: "Relache pour traduire",
+    translating: "Traduction...",
+    talkieBusyBy: (name) => `Talkie occupe par ${name}.`,
+    talkieInfo: 'Talkie traduction: maintiens "Maintenir pour parler", puis relache.',
+    translationRemaining: "Temps traduction restant: ",
+    translationRemainingHost: "Temps traduction restant (hote): ",
+    topUpNow: "Recharger maintenant",
+    askHostToTopUp: "Demande a l'hote de recharger pour reactiver la traduction.",
+    sourceCaptured: "Source captee",
+    directSpeech: "Oral direct",
+    screenShareInProgress: (trackName) =>
+      `Partage d’écran en cours${trackName ? ` • ${trackName}` : ""}`,
+    hideGallery: "Masquer galerie",
+    showGallery: "Afficher galerie",
+    stopSharing: "Arrêter le partage",
+    stopShareConfirm: "Arrêter le partage d’écran ?",
+    shareRoom: "Partager la salle",
+    smartLink: "Lien intelligent",
+    smartHint: "Invite en un clic: app mobile si installée, sinon navigateur.",
+    shareOptionsHint: "Choisis comment envoyer ce lien: mail, SMS, copie ou partage de l'appareil.",
+    sendEmail: "Envoyer par email",
+    sendSms: "Envoyer par SMS",
+    shareViaDevice: "Partager via l'appareil",
+    emailReady: "Email pret ✅",
+    copyLink: "Copier le lien",
+    linkCopied: "Lien copie ✅",
+    copyShort: "Copie",
+    settingsTitle: "Reglages",
+    cameraSection: "Camera",
+    hostSection: "Hote",
+    hostOptions: "Options hote",
+    hostReserved: "Gestion hote reservee a l'hote.",
+    hostLinkHint: "Ouvre le lien de salle en mode hote pour les afficher.",
+    cameraAndCaptionsTitle: "Camera & sous-titres",
+    cameraAndCaptionsHint: "Ajuste le cadrage et controle la transcription automatique.",
+    cameraAndCaptionsInfo: "Reglages de la camera et des sous-titres.",
+    autoFrame: "Auto-cadrage",
+    autoFrameInfo: "Garde ton visage centre automatiquement.",
+    active: "Actif",
+    inactive: "Inactif",
+    captionSize: "Taille sous-titres",
+    captionSizeInfo: "Ajuste la taille du texte affiche.",
+    videoFit: "Cadrage video",
+    videoFitInfo: "Remplir coupe l'image, Entier affiche toute l'image.",
+    fill: "Remplir",
+    fit: "Entier",
+    forceFit: "Forcer l'entier",
+    forceFitHint: "Reapplique « Entier » pour voir tout le fond DALL·E.",
+    backgroundTitle: "Arriere-plan",
+    backgroundInfo: "Choisis, importe ou supprime les fonds depuis les reglages.",
+    normalBackground: "Normal",
+    blurBackground: "Flou",
+    studioBackground: "Studio",
+    sunsetBackground: "Coucher",
+    gridBackground: "Grille",
+    dallePromptPlaceholder: "Prompt (ex: studio zen, lumiere douce)",
+    generate: "Generer",
+    generating: "Generation...",
+    save: "Enregistrer",
+    overlayTextOptional: "Texte a integrer (optionnel)",
+    overlayTextPlaceholder: "Ex: Focus, Discipline",
+    overlayTextHint: "Le texte peut varier selon le rendu DALL·E.",
+    aiGeneratingStatus: "Generation IA en cours...",
+    aiBackgroundActiveStatus: "Fond IA actif.",
+    generateThenActivate: "Genere un fond puis active-le ci-dessous.",
+    aiGenerationHostOnly: "Generation IA reservee a l'hote.",
+    importImage: "Importer une image",
+    importedBackgrounds: "Fonds importes",
+    aiGalleryTitle: "Galerie IA",
+    delete: "Supprimer",
+    flipCamera: "Retourner la camera",
+    activate: "Activer",
+    remove: "Supprimer",
+    aiBackgroundActiveCard: "Fond IA actif · genere un nouveau prompt pour le remplacer.",
+    translationLanguages: "Langues de traduction",
+    spokenLanguage: "Langue que tu parles",
+    communicationLanguage: "Langue de communication (texte + voix)",
+    personalReceptionLanguage: "Langue de réception (personnelle)",
+    info: "Info",
+    receptionInfoLabel: "Info langue de reception",
+    open: "Ouvrir",
+    collapse: "Replier",
+    noMessages: "Aucun message dans la salle.",
+    messagesVisible: "Messages visibles par tous les participants.",
+    writeIn: "J’écris en",
+    writeMessagePlaceholder: "Ecris un message...",
+    preview: "Aperçu",
+    listen: "Ecouter",
+    stop: "Stop",
+    sentTranslation: "Traduction envoyée:",
+    returnLabel: "Retour",
+    mobileReviewRequired: "Relis puis valide la phrase avant envoi depuis le web mobile.",
+    mobileTranscriptionUnclear:
+      "La transcription mobile est vide ou incertaine. Corrige la phrase ou réessaie.",
+    mobileTranscriptionFailed:
+      "La transcription mobile a échoué. Corrige manuellement la phrase ou réessaie.",
+  },
+  en: {
+    shareKeyPoint: "Share a key point",
+    askSummary: "Ask for a summary",
+    close: "Close",
+    send: "Send",
+    sendAsIs: "Send as is",
+    edit: "Edit",
+    cancel: "Cancel",
+    autoSendIn: (delayLabel) => `Auto-send in ${delayLabel}`,
+    simpleSuggestion: "Simple suggestion",
+    naturalVersion: "Natural version",
+    familiarVersion: "Casual version",
+    applyCorrection: "Apply correction",
+    useNaturalVersion: "Use natural version",
+    useFamiliarVersion: "Use casual version",
+    inviteShareSent: "Shared",
+    inviteEmailSubject: "BFZoom invitation",
+    inviteEmailBody: "Join my BFZoom video conference with this link.",
+    verifyBeforeTranslation: "Review before translation",
+    verifyBeforeSend: "Review before sending",
+    analysisBeforeTranslation: "Checking before translation...",
+    analysisInProgress: "Analysis in progress...",
+    noVoiceDetected: "No voice detected. Hold the button and speak.",
+    incompleteDetection: "Check the captured phrase, then click Send. Detection seems incomplete.",
+    disableRealtimeForPushToTalk:
+      "Disable Realtime to use push-to-talk mode.",
+    sourceLabel: (language) => `Source (${language})`,
+    translationLabel: (language) => `Translation (${language})`,
+    share: "Share",
+    shareAria: "Share link",
+    microphone: "Mic",
+    camera: "Camera",
+    cameraBusy: "Camera...",
+    enableCameraAria: "Enable camera",
+    disableCameraAria: "Turn camera off",
+    flip: "Flip",
+    flipCameraAria: "Flip camera",
+    screen: "Screen",
+    chat: "Chat",
+    settings: "Settings",
+    more: "More",
+    moreActionsAria: "More actions",
+    endForAll: "End for everyone",
+    ending: "Closing...",
+    endShort: "End",
+    leave: "Leave",
+    localPlayback: "Local playback",
+    blocked: "LOCKED",
+    holdToTalk: "Hold to talk",
+    releaseToTranslate: "Release to translate",
+    translating: "Translating...",
+    talkieBusyBy: (name) => `Talkie is currently used by ${name}.`,
+    talkieInfo: 'Translation talkie: hold "Hold to talk", then release.',
+    translationRemaining: "Translation time left: ",
+    translationRemainingHost: "Translation time left (host): ",
+    topUpNow: "Top up now",
+    askHostToTopUp: "Ask the host to top up to reactivate translation.",
+    sourceCaptured: "Captured source",
+    directSpeech: "Direct speech",
+    screenShareInProgress: (trackName) =>
+      `Screen sharing in progress${trackName ? ` • ${trackName}` : ""}`,
+    hideGallery: "Hide gallery",
+    showGallery: "Show gallery",
+    stopSharing: "Stop sharing",
+    stopShareConfirm: "Stop screen sharing?",
+    shareRoom: "Share room",
+    smartLink: "Smart link",
+    smartHint: "One-click invite: mobile app if installed, otherwise the browser.",
+    shareOptionsHint: "Choose how to send this link: email, SMS, copy, or device share.",
+    sendEmail: "Send by email",
+    sendSms: "Send by SMS",
+    shareViaDevice: "Share via device",
+    emailReady: "Email ready ✅",
+    copyLink: "Copy link",
+    linkCopied: "Link copied ✅",
+    copyShort: "Copied",
+    settingsTitle: "Settings",
+    cameraSection: "Camera",
+    hostSection: "Host",
+    hostOptions: "Host options",
+    hostReserved: "Host controls are reserved for the host.",
+    hostLinkHint: "Open the room link in host mode to display them.",
+    cameraAndCaptionsTitle: "Camera & captions",
+    cameraAndCaptionsHint: "Adjust framing and control automatic transcription.",
+    cameraAndCaptionsInfo: "Camera and captions settings.",
+    autoFrame: "Auto-framing",
+    autoFrameInfo: "Keeps your face centered automatically.",
+    active: "Active",
+    inactive: "Inactive",
+    captionSize: "Caption size",
+    captionSizeInfo: "Adjust the displayed text size.",
+    videoFit: "Video framing",
+    videoFitInfo: "Fill crops the image, Fit shows the full image.",
+    fill: "Fill",
+    fit: "Fit",
+    forceFit: "Force fit",
+    forceFitHint: "Reapply “Fit” to show the full DALL·E background.",
+    backgroundTitle: "Background",
+    backgroundInfo: "Choose, import, or remove backgrounds from settings.",
+    normalBackground: "Normal",
+    blurBackground: "Blur",
+    studioBackground: "Studio",
+    sunsetBackground: "Sunset",
+    gridBackground: "Grid",
+    dallePromptPlaceholder: "Prompt (e.g. zen studio, soft light)",
+    generate: "Generate",
+    generating: "Generating...",
+    save: "Save",
+    overlayTextOptional: "Text to include (optional)",
+    overlayTextPlaceholder: "E.g. Focus, Discipline",
+    overlayTextHint: "The text may vary depending on the DALL·E render.",
+    aiGeneratingStatus: "AI generation in progress...",
+    aiBackgroundActiveStatus: "AI background active.",
+    generateThenActivate: "Generate a background, then activate it below.",
+    aiGenerationHostOnly: "AI generation is reserved for the host.",
+    importImage: "Import an image",
+    importedBackgrounds: "Imported backgrounds",
+    aiGalleryTitle: "AI gallery",
+    delete: "Delete",
+    flipCamera: "Flip camera",
+    activate: "Activate",
+    remove: "Remove",
+    aiBackgroundActiveCard: "AI background active. Generate a new prompt to replace it.",
+    translationLanguages: "Translation languages",
+    spokenLanguage: "Language you speak",
+    communicationLanguage: "Communication language (text + voice)",
+    personalReceptionLanguage: "Reception language (personal)",
+    info: "Info",
+    receptionInfoLabel: "Reception language info",
+    open: "Open",
+    collapse: "Collapse",
+    noMessages: "No messages in this room.",
+    messagesVisible: "Messages visible to all participants.",
+    writeIn: "I write in",
+    writeMessagePlaceholder: "Write a message...",
+    preview: "Preview",
+    listen: "Listen",
+    stop: "Stop",
+    sentTranslation: "Sent translation:",
+    returnLabel: "Back",
+    mobileReviewRequired: "Review and confirm the sentence before sending from mobile web.",
+    mobileTranscriptionUnclear:
+      "The mobile transcription is empty or uncertain. Edit the sentence or try again.",
+    mobileTranscriptionFailed:
+      "The mobile transcription failed. Edit the sentence manually or try again.",
+  },
 };
 
 const normalizeTranslationEntitlement = (
@@ -549,21 +1185,258 @@ type ActionControlsProps = {
 };
 
 function ActionControls({ visible, onAction, onClose }: ActionControlsProps) {
+  const { locale } = useUiLocale();
+  const ui = LIVEKIT_UI_COPY[locale];
   if (!visible) return null;
   return (
     <div className="absolute inset-x-0 bottom-[calc(var(--lk-control-bar-height)+60px)] z-30 flex justify-center px-4">
       <div className="flex gap-2 rounded-full bg-white/90 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-800 shadow-lg">
         <button type="button" onClick={() => onAction("share-point")} className="rounded-full border border-slate-200 px-3 py-1">
-          Partager un point clé
+          {ui.shareKeyPoint}
         </button>
         <button type="button" onClick={() => onAction("ask-summary")} className="rounded-full border border-slate-200 px-3 py-1">
-          Demander un résumé
+          {ui.askSummary}
         </button>
         <button type="button" onClick={onClose} className="rounded-full border border-slate-200 px-3 py-1">
-          Fermer
+          {ui.close}
         </button>
       </div>
     </div>
+  );
+}
+
+type PushToTalkDraftModalProps = {
+  draftText: string;
+  editing: boolean;
+  review: PushToTalkDraftReview | null;
+  reviewBusy: boolean;
+  reviewMode?: PushToTalkDraftReviewMode;
+  showAutoSendHint: boolean;
+  notebookEnabled?: boolean;
+  notebookBaseText?: string;
+  notebookRoomId?: string;
+  notebookTargetLanguageCode?: string;
+  notebookTargetLanguageName?: string;
+  notebookVoice?: string;
+  onChangeText: (nextValue: string) => void;
+  onSubmit: () => void;
+  onEdit: () => void;
+  onCancel: () => void;
+  onApplySuggestion: (nextValue: string) => void;
+};
+
+function PushToTalkDraftModal({
+  draftText,
+  editing,
+  review,
+  reviewBusy,
+  reviewMode = "coach",
+  showAutoSendHint,
+  notebookEnabled = false,
+  notebookBaseText = "",
+  notebookRoomId = "",
+  notebookTargetLanguageCode = "",
+  notebookTargetLanguageName = "",
+  notebookVoice = "",
+  onChangeText,
+  onSubmit,
+  onEdit,
+  onCancel,
+  onApplySuggestion,
+}: PushToTalkDraftModalProps) {
+  const { locale } = useUiLocale();
+  const ui = LIVEKIT_UI_COPY[locale];
+  const viewportProfile = useAiPracticeViewportProfile();
+  const isCompactViewport = viewportProfile.isPhone;
+  const [portalReady, setPortalReady] = useState(false);
+  const isTranslationReview = reviewMode === "translation";
+  const reviewIsCurrent = isPushToTalkDraftReviewCurrent(review, draftText);
+  const reviewSuggestions = reviewIsCurrent
+    ? [
+        {
+          id: "corrected",
+          title: ui.simpleSuggestion,
+          actionLabel: ui.applyCorrection,
+          text: review?.correctedText.trim() || "",
+        },
+        {
+          id: "natural",
+          title: ui.naturalVersion,
+          actionLabel: ui.useNaturalVersion,
+          text: review?.naturalText.trim() || "",
+        },
+        {
+          id: "familiar",
+          title: ui.familiarVersion,
+          actionLabel: ui.useFamiliarVersion,
+          text: review?.familiarText.trim() || "",
+        },
+      ].filter((item, index, items) => {
+        if (!item.text) return false;
+        const normalized = normalizeComparableText(item.text);
+        return items.findIndex((candidate) => normalizeComparableText(candidate.text) === normalized) === index;
+      })
+    : [];
+  const sendLabel =
+    reviewIsCurrent && review?.status && review.status !== "ok"
+      ? ui.sendAsIs
+      : ui.send;
+  const reviewToneClass = reviewBusy
+    ? "border-sky-300/70 bg-sky-500/10 text-sky-50"
+    : review?.status === "unclear"
+    ? "border-amber-300/70 bg-amber-500/10 text-amber-50"
+    : review?.status === "review"
+    ? "border-rose-300/70 bg-rose-500/10 text-rose-50"
+    : "border-emerald-300/70 bg-emerald-500/10 text-emerald-50";
+  const canSaveReviewSuggestions =
+    notebookEnabled &&
+    reviewIsCurrent &&
+    notebookTargetLanguageCode.trim().length > 0 &&
+    notebookTargetLanguageName.trim().length > 0;
+  const modalTitle = isTranslationReview
+    ? ui.verifyBeforeTranslation
+    : ui.verifyBeforeSend;
+  const busyLabel = isTranslationReview
+    ? ui.analysisBeforeTranslation
+    : ui.analysisInProgress;
+
+  useEffect(() => {
+    setPortalReady(true);
+    return () => setPortalReady(false);
+  }, []);
+
+  if (!portalReady || typeof document === "undefined") {
+    return null;
+  }
+
+  return createPortal(
+    <div
+      className={`fixed inset-0 z-140 flex justify-center px-3 ${
+        isCompactViewport ? "items-center" : "items-end"
+      }`}
+      style={{
+        paddingTop: isCompactViewport ? "calc(env(safe-area-inset-top, 0px) + 0.75rem)" : undefined,
+        paddingBottom: `calc(env(safe-area-inset-bottom, 0px) + ${isCompactViewport ? "0.75rem" : "1rem"})`,
+      }}
+    >
+      <div className="absolute inset-0 bg-slate-950/38 backdrop-blur-[1px]" />
+      <div
+        className={`relative flex w-full flex-col overflow-hidden border shadow-2xl ${
+          isCompactViewport
+            ? "max-h-[calc(100dvh-1.5rem)] max-w-[min(96vw,36rem)] rounded-2xl"
+            : "max-h-[min(78vh,34rem)] max-w-[min(92vw,32rem)] rounded-lg"
+        }`}
+        style={{
+          backgroundColor: "rgba(15, 23, 42, 0.98)",
+          color: "#f8fafc",
+          borderColor: "rgba(148, 163, 184, 0.88)",
+        }}
+      >
+        <div className={isCompactViewport ? "overflow-y-auto px-4 py-4" : "overflow-y-auto px-3 py-3"}>
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-sky-100">{modalTitle}</p>
+          {editing ? (
+            <textarea
+              value={draftText}
+              onChange={(event) => onChangeText(event.target.value)}
+              rows={4}
+              className="mt-2 w-full rounded-md border border-slate-500/80 bg-slate-900/80 px-2 py-1.5 text-[12px] text-slate-50 outline-none ring-sky-400/60 focus:ring-1"
+            />
+          ) : (
+            <p className="mt-1 whitespace-pre-wrap wrap-break-word text-[12px] text-slate-100">
+              {draftText}
+            </p>
+          )}
+          {(reviewBusy || (reviewIsCurrent && review?.message)) && (
+            <div className={`mt-3 rounded-lg border px-3 py-2 text-[11px] ${reviewToneClass}`}>
+              {reviewBusy ? busyLabel : review?.message}
+            </div>
+          )}
+          {reviewIsCurrent &&
+            hasPushToTalkDraftReviewSuggestions(review) &&
+            reviewSuggestions.length > 0 && (
+              <div className="mt-3 space-y-2">
+                {reviewSuggestions.map((suggestion) => (
+                  <div
+                    key={`${suggestion.id}:${suggestion.text}`}
+                    className="rounded-lg border border-slate-600/80 bg-slate-900/70 px-3 py-2"
+                  >
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-300">
+                      {suggestion.title}
+                    </p>
+                    <p className="mt-1 whitespace-pre-wrap wrap-break-word text-[12px] text-slate-50">
+                      {suggestion.text}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => onApplySuggestion(suggestion.text)}
+                      className="mt-2 inline-flex items-center rounded-full border border-sky-300/80 bg-sky-700/70 px-3 py-1 text-[11px] font-semibold text-white"
+                    >
+                      {suggestion.actionLabel}
+                    </button>
+                    {canSaveReviewSuggestions && (
+                      <AiPracticeNotebookSaveButton
+                        payload={{
+                          kind: "draft_review",
+                          mode: "simple",
+                          baseText: notebookBaseText || review?.reviewedText || draftText,
+                          targetText: suggestion.text,
+                          targetLanguageCode: notebookTargetLanguageCode,
+                          targetLanguageName: notebookTargetLanguageName,
+                          correctedText: review?.correctedText || "",
+                          naturalText: review?.naturalText || "",
+                          familiarText: review?.familiarText || "",
+                          contextLabel: suggestion.title,
+                          roomId: notebookRoomId,
+                          voice: notebookVoice,
+                        }}
+                        label={NOTEBOOK_SIMPLE_LABEL}
+                        className="mt-2 inline-flex items-center gap-1 rounded-full border border-white/20 bg-white/8 px-3 py-1 text-[11px] font-semibold text-white transition hover:bg-white/12 disabled:opacity-60"
+                      />
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+        </div>
+        <div
+          className={`border-t border-slate-700/70 bg-slate-950/94 ${
+            isCompactViewport ? "px-4 py-3" : "px-3 py-3"
+          }`}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={onSubmit}
+            className="inline-flex items-center rounded-full border border-emerald-300/80 bg-emerald-600/85 px-3 py-1 text-[11px] font-semibold text-white"
+          >
+            {sendLabel}
+          </button>
+          {!editing && (
+            <button
+              type="button"
+              onClick={onEdit}
+              className="inline-flex items-center rounded-full border border-sky-300/80 bg-sky-700/70 px-3 py-1 text-[11px] font-semibold text-white"
+            >
+              {ui.edit}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onCancel}
+            className="inline-flex items-center rounded-full border border-slate-300/70 bg-slate-700/70 px-3 py-1 text-[11px] font-semibold text-slate-100"
+          >
+            {ui.cancel}
+          </button>
+          {showAutoSendHint && (
+            <span className="text-[10px] text-slate-300">
+              {ui.autoSendIn(formatPushToTalkAutoSendDelay(PUSH_TO_TALK_AUTO_SEND_MS))}
+            </span>
+          )}
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body
   );
 }
 
@@ -683,11 +1556,23 @@ const normalizeLanguageKey = (value: string) =>
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
 
+const shouldShowPhoneticAidForLanguage = (languageCode?: string) => {
+  const normalized = String(languageCode || "").trim().toLowerCase();
+  return Boolean(normalized) && normalized !== "fr";
+};
+
+const stripCoachSuggestionPrefix = (line: string) =>
+  line
+    .replace(/^•\s*/, "")
+    .replace(/^Option\s*\d+\s*:\s*/i, "")
+    .trim();
+
 const resolveSpeechLocaleFromLanguage = (language?: string) => {
   const raw = (language || "").trim();
   if (!raw) return "";
   if (/^[a-z]{2}-[a-z]{2}$/i.test(raw)) {
-    return raw;
+    const [languagePart = "", regionPart = ""] = raw.split("-");
+    return `${languagePart.toLowerCase()}-${regionPart.toUpperCase()}`;
   }
   if (/^[a-z]{2}$/i.test(raw)) {
     const normalizedCode = raw.toLowerCase();
@@ -718,6 +1603,33 @@ const estimateChatTranslationSeconds = (text: string) => {
 };
 
 const GUEST_TRANSLATION_CACHE_LIMIT = 160;
+
+const normalizeCaptionTargetCode = (value?: string): CaptionTargetCode | null => {
+  const normalized = (value || "").trim().toLowerCase();
+  if (!normalized) return null;
+  return CAPTION_TARGETS_CONFIG.some((item) => item.code === normalized)
+    ? (normalized as CaptionTargetCode)
+    : null;
+};
+
+const resolveCaptionDisplayTarget = (
+  target?: string | null,
+  fallback?: string | null
+): CaptionTarget =>
+  (normalizeCaptionTargetCode(target || undefined) ??
+    normalizeCaptionTargetCode(fallback || undefined) ??
+    DEFAULT_CAPTION_TARGET) as CaptionTarget;
+
+const buildCaptionFallbackMessage = (
+  requestedTargetName: string,
+  actualTarget?: string | null
+) => {
+  const actualName =
+    resolveLanguageNameFromCode(actualTarget || undefined) ||
+    String(actualTarget || "").trim().toUpperCase() ||
+    "la langue source";
+  return `Reception ${requestedTargetName} indisponible pour ce message. Lecture locale suspendue, texte affiche en ${actualName}.`;
+};
 
 const buildTranslationCacheKey = (
   text: string,
@@ -848,6 +1760,78 @@ const buildPhoneticMessages = (text: string, target: string, targetCode?: string
   ];
 };
 
+const buildPhoneticBatchMessages = (
+  texts: string[],
+  target: string,
+  targetCode?: string
+) => {
+  const targetLanguage = buildLanguageDescriptor(target, targetCode);
+  return [
+    {
+      role: "system",
+      content: [
+        "You are a pronunciation assistant.",
+        `For each input item written in ${targetLanguage.label}, convert it into Latin-script phonetic pronunciation.`,
+        "Do not translate.",
+        'Return valid JSON only with the exact shape {"items":[{"text":"original","phonetic":"latin phonetic"}]}.',
+        'Copy each original input exactly into the "text" field and preserve input order.',
+      ].join(" "),
+    },
+    {
+      role: "user",
+      content: JSON.stringify({ items: texts }),
+    },
+  ];
+};
+
+const buildPushToTalkDraftReviewMessages = (
+  text: string,
+  target: string,
+  targetCode?: string,
+  mode: PushToTalkDraftReviewMode = "coach",
+  captureSource: PushToTalkDraftCaptureSource = "speech"
+) => {
+  const targetLanguage = buildLanguageDescriptor(target, targetCode);
+  const isTranslationReview = mode === "translation";
+  const isRecordedAudioReview = captureSource === "recording";
+  return [
+    {
+      role: "system",
+      content: [
+        isTranslationReview
+          ? "You review a speech-to-text transcript before it is translated and sent in a video conference."
+          : "You are a language coach reviewing a speech-to-text transcript before it is sent.",
+        `Working language: ${targetLanguage.label}.`,
+        "Return valid JSON only.",
+        'Use the exact shape {"status":"ok|review|unclear","message":"short French message","correctedText":"","naturalText":"","familiarText":""}.',
+        'The "message" must be short, clear, and in French.',
+        isTranslationReview
+          ? 'Do not mention any coach, AI, or assistant in the "message".'
+          : 'You may mention the coach in the "message" when useful.',
+        "All suggested sentences must stay in the working language, never in French.",
+        isRecordedAudioReview
+          ? "This transcript comes from a recorded web audio clip and may contain speech-recognition mistakes."
+          : "",
+        isTranslationReview
+          ? 'Use status "ok" only when the sentence is understandable and acceptable enough to translate and send as-is.'
+          : 'Use status "ok" only when the sentence is understandable and acceptable enough to send as-is.',
+        isRecordedAudioReview
+          ? 'Be conservative: prefer status "review" or "unclear" unless the sentence is clearly correct and safe to send.'
+          : "",
+        'Use status "review" when the sentence is understandable but incorrect, awkward, or unnatural.',
+        'Use status "unclear" when the transcript likely contains speech-recognition mistakes or is hard to understand.',
+        "correctedText must be the minimal corrected version.",
+        "naturalText should be a smoother, more natural version.",
+        "familiarText should be an optional colloquial variant when relevant.",
+      ].join(" "),
+    },
+    {
+      role: "user",
+      content: text.trim(),
+    },
+  ];
+};
+
 const toFriendlyAiError = (message: string) => {
   const normalized = (message || "").trim();
   if (/unauthorized|401/i.test(normalized)) {
@@ -878,18 +1862,10 @@ const readApiErrorMessage = async (response: Response) => {
   }
 };
 
-const isAppleMobilePlatform = () => {
-  if (typeof navigator === "undefined") return false;
-  const ua = navigator.userAgent || "";
-  if (/iPhone|iPad|iPod/i.test(ua)) return true;
-  const maybeNavigator = navigator as Navigator & { maxTouchPoints?: number };
-  return navigator.platform === "MacIntel" && (maybeNavigator.maxTouchPoints || 0) > 1;
-};
-
 const isBackgroundEffectsBlockedOnBrowser = () => {
   if (typeof navigator === "undefined") return false;
   const ua = navigator.userAgent || "";
-  const isIosWebKit = isAppleMobilePlatform() && /AppleWebKit/i.test(ua);
+  const isIosWebKit = isAppleTouchPlatform() && /AppleWebKit/i.test(ua);
   return isIosWebKit;
 };
 
@@ -1068,6 +2044,186 @@ const phoneticWithOpenAi = async (
   return choice?.message?.content?.trim() || "";
 };
 
+const phoneticBatchWithOpenAi = async (
+  texts: string[],
+  target: string,
+  { signal, targetCode, guestToken }: PhoneticWithOpenAIOptions = {}
+) => {
+  const uniqueTexts = Array.from(
+    new Set(
+      texts
+        .map((item) => item.trim())
+        .filter(Boolean)
+    )
+  );
+  if (uniqueTexts.length === 0) return new Map<string, string>();
+
+  const authHeader = await getAuthHeader();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...authHeader,
+  };
+  if (!authHeader.Authorization && guestToken?.trim()) {
+    headers["x-bfzoom-guest-tts-token"] = guestToken.trim();
+  }
+  const response = await fetch("/api/openai", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      messages: buildPhoneticBatchMessages(uniqueTexts, target, targetCode),
+      jsonMode: true,
+      maxTokens: Math.max(220, Math.min(700, uniqueTexts.length * 70)),
+      temperature: 0.1,
+      timeoutMs: 16_000,
+    }),
+    signal,
+  });
+  const raw = await response.text();
+  let data: unknown = null;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    if (!response.ok) throw new Error(raw || "Erreur phonetique");
+  }
+  if (!response.ok) {
+    const errMessage = (data as { error?: string })?.error || "Erreur phonetique";
+    throw new Error(errMessage);
+  }
+
+  const content = String(
+    (data as { choices?: { message?: { content?: string } }[] })?.choices?.[0]?.message?.content || ""
+  ).trim();
+  if (!content) return new Map<string, string>();
+
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return new Map<string, string>();
+  }
+
+  const items = Array.isArray((parsed as { items?: unknown[] })?.items)
+    ? ((parsed as { items: unknown[] }).items as Array<{ text?: unknown; phonetic?: unknown }>)
+    : [];
+  const results = new Map<string, string>();
+  for (const item of items) {
+    const sourceText = String(item?.text || "").trim();
+    const phoneticText = String(item?.phonetic || "").trim();
+    if (!sourceText) continue;
+    results.set(sourceText, phoneticText);
+  }
+  return results;
+};
+
+const reviewPushToTalkDraftWithOpenAi = async (
+  text: string,
+  target: string,
+  {
+    signal,
+    targetCode,
+    guestToken,
+    mode = "coach",
+    captureSource = "speech",
+  }: PhoneticWithOpenAIOptions & {
+    mode?: PushToTalkDraftReviewMode;
+    captureSource?: PushToTalkDraftCaptureSource;
+  } = {}
+) => {
+  const trimmed = text.trim();
+  const isTranslationReview = mode === "translation";
+  if (!trimmed) {
+    return {
+      status: "unclear" as PushToTalkDraftReviewStatus,
+      message: "Le texte capte semble incomplet.",
+      correctedText: "",
+      naturalText: "",
+      familiarText: "",
+      reviewedText: "",
+    };
+  }
+  const authHeader = await getAuthHeader();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...authHeader,
+  };
+  if (!authHeader.Authorization && guestToken?.trim()) {
+    headers["x-bfzoom-guest-tts-token"] = guestToken.trim();
+  }
+  const response = await fetch("/api/openai", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      messages: buildPushToTalkDraftReviewMessages(
+        trimmed,
+        target,
+        targetCode,
+        mode,
+        captureSource
+      ),
+      jsonMode: true,
+      maxTokens: 260,
+      temperature: 0.1,
+      timeoutMs: 12_000,
+      intent: "coach_ai",
+    }),
+    signal,
+  });
+  const raw = await response.text();
+  let data: unknown = null;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    if (!response.ok) throw new Error(raw || "Erreur d'analyse avant envoi");
+  }
+  if (!response.ok) {
+    const errMessage = (data as { error?: string })?.error || "Erreur d'analyse avant envoi";
+    throw new Error(errMessage);
+  }
+  const content = String(
+    (data as { choices?: { message?: { content?: string } }[] })?.choices?.[0]?.message?.content || ""
+  ).trim();
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    parsed = null;
+  }
+
+  const rawStatus = String((parsed as { status?: unknown })?.status || "").trim().toLowerCase();
+  const status: PushToTalkDraftReviewStatus =
+    rawStatus === "ok" || rawStatus === "review" || rawStatus === "unclear"
+      ? (rawStatus as PushToTalkDraftReviewStatus)
+      : "review";
+  const message = String((parsed as { message?: unknown })?.message || "").trim();
+  return {
+    status,
+    message:
+      message ||
+      (status === "ok"
+        ? "La phrase semble correcte."
+        : status === "unclear"
+        ? isTranslationReview
+          ? "La phrase semble avoir ete mal captee."
+          : "Le coach pense que la phrase a ete mal captee."
+        : isTranslationReview
+        ? "Une correction est recommandee avant traduction."
+        : "Le coach recommande une correction avant envoi."),
+    correctedText: sanitizePushToTalkDraftSuggestion(
+      String((parsed as { correctedText?: unknown })?.correctedText || ""),
+      trimmed
+    ),
+    naturalText: sanitizePushToTalkDraftSuggestion(
+      String((parsed as { naturalText?: unknown })?.naturalText || ""),
+      trimmed
+    ),
+    familiarText: sanitizePushToTalkDraftSuggestion(
+      String((parsed as { familiarText?: unknown })?.familiarText || ""),
+      trimmed
+    ),
+    reviewedText: trimmed,
+  };
+};
+
 const downsampleBuffer = (buffer: Float32Array, inputRate: number, outputRate: number) => {
   if (outputRate === inputRate) return buffer;
   const sampleRateRatio = inputRate / outputRate;
@@ -1097,15 +2253,19 @@ function useGuestCaptionPlayer(
 ) {
   const guestAudioRef = useRef<HTMLAudioElement | null>(null);
   const guestAudioUrlRef = useRef<string | null>(null);
+  const guestWebAudioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const unlockContextRef = useRef<AudioContext | null>(null);
   const audioUnlockedRef = useRef(false);
   const playbackIssueNotifiedRef = useRef(false);
-  const pendingPlaybackRef = useRef<{ text: string; target?: CaptionTarget } | null>(null);
-  const playCaptionRef = useRef<((text: string, target?: CaptionTarget) => Promise<void>) | null>(
+  const pendingPlaybackRef = useRef<{ text: string; target?: CaptionTargetCode } | null>(null);
+  const playCaptionRef = useRef<((text: string, target?: CaptionTargetCode) => Promise<void>) | null>(
     null
   );
   const replayingPendingRef = useRef(false);
   const playbackChainRef = useRef<Promise<void>>(Promise.resolve());
+  const playbackGenerationRef = useRef(0);
+  const activePlaybackCancelRef = useRef<(() => void) | null>(null);
+  const activeTtsAbortRef = useRef<AbortController | null>(null);
 
   const clearPlaybackIssue = useCallback(() => {
     playbackIssueNotifiedRef.current = false;
@@ -1124,6 +2284,36 @@ function useGuestCaptionPlayer(
     if (!guestAudioUrlRef.current) return;
     URL.revokeObjectURL(guestAudioUrlRef.current);
     guestAudioUrlRef.current = null;
+  }, []);
+
+  const clearActivePlaybackCancel = useCallback((cancel?: (() => void) | null) => {
+    if (!cancel || activePlaybackCancelRef.current === cancel) {
+      activePlaybackCancelRef.current = null;
+    }
+  }, []);
+
+  const stopGuestWebAudio = useCallback(() => {
+    const source = guestWebAudioSourceRef.current;
+    guestWebAudioSourceRef.current = null;
+    if (!source) return;
+    try {
+      source.stop();
+    } catch {}
+    try {
+      source.disconnect();
+    } catch {}
+  }, []);
+
+  const isAbortError = useCallback((error: unknown) => {
+    if (error instanceof DOMException) {
+      return error.name === "AbortError";
+    }
+    return (
+      typeof error === "object" &&
+      error !== null &&
+      "name" in error &&
+      (error as { name?: string }).name === "AbortError"
+    );
   }, []);
 
   const unlockGuestAudio = useCallback(async () => {
@@ -1159,11 +2349,16 @@ function useGuestCaptionPlayer(
     }
   }, []);
 
-  const playWithSpeechSynthesis = useCallback(async (text: string, target?: CaptionTarget) => {
+  const playWithSpeechSynthesis = useCallback(async (
+    text: string,
+    target?: CaptionTargetCode,
+    isCurrentPlayback?: () => boolean
+  ) => {
     if (typeof window === "undefined") return false;
     if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") {
       return false;
     }
+    if (isCurrentPlayback && !isCurrentPlayback()) return false;
 
     try {
       const speech = window.speechSynthesis;
@@ -1199,22 +2394,35 @@ function useGuestCaptionPlayer(
       guestAudioRef.current?.pause();
       releaseGuestAudioUrl();
       guestAudioRef.current = null;
+      stopGuestWebAudio();
       speech.cancel();
 
       return await new Promise<boolean>((resolve) => {
         let settled = false;
         let startTimeoutId = 0;
         let endTimeoutId = 0;
+        const cancelPlayback = () => {
+          try {
+            speech.cancel();
+          } catch {}
+          finish(false);
+        };
+        activePlaybackCancelRef.current = cancelPlayback;
         const finish = (ok: boolean) => {
           if (settled) return;
           settled = true;
+          clearActivePlaybackCancel(cancelPlayback);
           window.clearTimeout(startTimeoutId);
           window.clearTimeout(endTimeoutId);
           utterance.onstart = null;
           utterance.onend = null;
           utterance.onerror = null;
-          resolve(ok);
+          resolve(ok && (!isCurrentPlayback || isCurrentPlayback()));
         };
+        if (isCurrentPlayback && !isCurrentPlayback()) {
+          finish(false);
+          return;
+        }
         startTimeoutId = window.setTimeout(() => finish(false), 2600);
         utterance.onstart = () => {
           window.clearTimeout(startTimeoutId);
@@ -1228,9 +2436,9 @@ function useGuestCaptionPlayer(
     } catch {
       return false;
     }
-  }, [releaseGuestAudioUrl]);
+  }, [clearActivePlaybackCancel, releaseGuestAudioUrl, stopGuestWebAudio]);
 
-  const hasLocalVoiceForTarget = useCallback((target?: CaptionTarget) => {
+  const hasLocalVoiceForTarget = useCallback((target?: CaptionTargetCode) => {
     if (!target || typeof window === "undefined") return true;
     if (!("speechSynthesis" in window)) return false;
     const preferredLocale = SPEECH_LANG_BY_TARGET[target] || "";
@@ -1248,13 +2456,17 @@ function useGuestCaptionPlayer(
     });
   }, []);
 
-  const playWithWebAudio = useCallback(async (audioData: ArrayBuffer) => {
+  const playWithWebAudio = useCallback(async (
+    audioData: ArrayBuffer,
+    isCurrentPlayback?: () => boolean
+  ) => {
     if (typeof window === "undefined") return false;
     const maybeWindow = window as Window & typeof globalThis & {
       webkitAudioContext?: typeof AudioContext;
     };
     const AudioContextCtor = maybeWindow.AudioContext || maybeWindow.webkitAudioContext;
     if (!AudioContextCtor) return false;
+    if (isCurrentPlayback && !isCurrentPlayback()) return false;
     try {
       const context = unlockContextRef.current ?? new AudioContextCtor();
       unlockContextRef.current = context;
@@ -1265,31 +2477,58 @@ function useGuestCaptionPlayer(
         return false;
       }
       const decoded = await context.decodeAudioData(audioData.slice(0));
+      if (isCurrentPlayback && !isCurrentPlayback()) {
+        return false;
+      }
       await new Promise<void>((resolve) => {
         const source = context.createBufferSource();
+        guestWebAudioSourceRef.current = source;
         source.buffer = decoded;
         source.connect(context.destination);
-        source.onended = () => {
+        const finish = () => {
+          clearActivePlaybackCancel(cancelPlayback);
+          if (guestWebAudioSourceRef.current === source) {
+            guestWebAudioSourceRef.current = null;
+          }
           try {
             source.disconnect();
           } catch {}
           resolve();
         };
+        const cancelPlayback = () => {
+          try {
+            source.stop();
+          } catch {}
+          finish();
+        };
+        activePlaybackCancelRef.current = cancelPlayback;
+        source.onended = () => {
+          finish();
+        };
+        if (isCurrentPlayback && !isCurrentPlayback()) {
+          cancelPlayback();
+          return;
+        }
         source.start();
       });
-      return true;
+      return !isCurrentPlayback || isCurrentPlayback();
     } catch {
       return false;
     }
-  }, []);
+  }, [clearActivePlaybackCancel]);
 
-  const playWithHtmlAudio = useCallback(async (audioData: ArrayBuffer, target?: CaptionTarget) => {
+  const playWithHtmlAudio = useCallback(async (
+    audioBlob: Blob,
+    target?: CaptionTargetCode,
+    isCurrentPlayback?: () => boolean
+  ) => {
     if (typeof window === "undefined") return false;
+    if (isCurrentPlayback && !isCurrentPlayback()) return false;
     try {
-      const blob = new Blob([audioData], { type: "audio/mpeg" });
-      const url = URL.createObjectURL(blob);
+      const url = URL.createObjectURL(audioBlob);
       guestAudioRef.current?.pause();
       releaseGuestAudioUrl();
+      stopGuestWebAudio();
       let audio = guestAudioRef.current;
       if (!audio) {
         audio = new Audio();
@@ -1307,7 +2546,6 @@ function useGuestCaptionPlayer(
       guestAudioUrlRef.current = url;
       audio.src = url;
       audio.currentTime = 0;
-      await audio.play();
       return await new Promise<boolean>((resolve) => {
         let settled = false;
         let timeoutId = 0;
@@ -1321,41 +2559,64 @@ function useGuestCaptionPlayer(
         const finish = (ok: boolean) => {
           if (settled) return;
           settled = true;
+          clearActivePlaybackCancel(cancelPlayback);
           cleanup();
-          resolve(ok);
+          resolve(ok && (!isCurrentPlayback || isCurrentPlayback()));
         };
+        const cancelPlayback = () => {
+          try {
+            audio?.pause();
+            if (audio) {
+              audio.currentTime = 0;
+            }
+          } catch {}
+          finish(false);
+        };
+        activePlaybackCancelRef.current = cancelPlayback;
         const onEnded = () => finish(true);
-        const onError = () => finish(false);
+        const onError = () => cancelPlayback();
         audio.addEventListener("ended", onEnded, { once: true });
         audio.addEventListener("error", onError, { once: true });
         audio.addEventListener("stalled", onError, { once: true });
         audio.addEventListener("abort", onError, { once: true });
-        timeoutId = window.setTimeout(() => finish(false), 60000);
+        timeoutId = window.setTimeout(() => cancelPlayback(), 60000);
+        if (isCurrentPlayback && !isCurrentPlayback()) {
+          finish(false);
+          return;
+        }
+        void audio.play().catch(() => {
+          finish(false);
+        });
       });
     } catch {
       releaseGuestAudioUrl();
       return false;
     }
-  }, [releaseGuestAudioUrl]);
+  }, [clearActivePlaybackCancel, releaseGuestAudioUrl, stopGuestWebAudio]);
 
   const playCaption = useCallback(
-    async (text: string, target?: CaptionTarget) => {
+    async (text: string, target?: CaptionTargetCode, generation = playbackGenerationRef.current) => {
       const trimmedText = text.trim();
       if (!trimmedText) return;
+      const isCurrentPlayback = () => playbackGenerationRef.current === generation;
+      if (!isCurrentPlayback()) return;
       const fallbackMessage =
         "Audio iPhone/iPad bloque. Touche l'ecran une fois pour activer l'audio, puis reessaie.";
       const rememberForUserTap = (message = fallbackMessage) => {
+        if (!isCurrentPlayback()) return;
         pendingPlaybackRef.current = { text: trimmedText, target };
         notifyPlaybackIssue(message);
       };
+      let ttsAbortController: AbortController | null = null;
       try {
-        const authHeader = await getAuthHeader();
+        const authHeader = await getAuthHeader({ forceRefresh: true });
+        if (!isCurrentPlayback()) return;
         const guestToken = guestTtsToken?.trim();
         const ttsHeaders: Record<string, string> = {
           "Content-Type": "application/json",
           ...authHeader,
         };
-        if (!authHeader.Authorization && guestToken) {
+        if (guestToken) {
           ttsHeaders["x-bfzoom-guest-tts-token"] = guestToken;
         }
         const hasServerTtsAuthorization = Boolean(
@@ -1364,7 +2625,9 @@ function useGuestCaptionPlayer(
 
         if (!hasServerTtsAuthorization) {
           await unlockGuestAudio();
-          const spoken = await playWithSpeechSynthesis(trimmedText, target);
+          if (!isCurrentPlayback()) return;
+          const spoken = await playWithSpeechSynthesis(trimmedText, target, isCurrentPlayback);
+          if (!isCurrentPlayback()) return;
           if (!spoken) {
             const targetName =
               resolveLanguageNameFromCode(target) || target?.toUpperCase() || "cette langue";
@@ -1380,16 +2643,26 @@ function useGuestCaptionPlayer(
           }
           return;
         }
+        ttsAbortController = new AbortController();
+        activeTtsAbortRef.current?.abort();
+        activeTtsAbortRef.current = ttsAbortController;
         const res = await fetch("/api/tts", {
           method: "POST",
           headers: ttsHeaders,
-          body: JSON.stringify({ text: trimmedText, voice }),
+          signal: ttsAbortController.signal,
+          body: JSON.stringify({ text: trimmedText, voice, format: "mp3" }),
         });
+        if (activeTtsAbortRef.current === ttsAbortController) {
+          activeTtsAbortRef.current = null;
+        }
+        if (!isCurrentPlayback()) return;
         if (!res.ok) {
           const data = (await res.json()) as { error?: string };
+          if (!isCurrentPlayback()) return;
           const serverMessage = toFriendlyAiError(data?.error || "Erreur TTS serveur.");
           console.warn("Guest server TTS failed", data?.error || `HTTP ${res.status}`);
-          const spoken = await playWithSpeechSynthesis(trimmedText, target);
+          const spoken = await playWithSpeechSynthesis(trimmedText, target, isCurrentPlayback);
+          if (!isCurrentPlayback()) return;
           if (spoken) {
             pendingPlaybackRef.current = null;
             clearPlaybackIssue();
@@ -1404,19 +2677,21 @@ function useGuestCaptionPlayer(
               : `TTS serveur indisponible (${serverMessage}).`
           );
         }
-        const arrayBuffer = await res.arrayBuffer();
+        const audioBlob = await res.blob();
+        if (!isCurrentPlayback()) return;
         await unlockGuestAudio();
-        const isAppleMobile =
-          typeof navigator !== "undefined" && /iPhone|iPad|iPod/i.test(navigator.userAgent);
-        const played = isAppleMobile
-          ? (await playWithHtmlAudio(arrayBuffer, target)) || (await playWithWebAudio(arrayBuffer))
-          : (await playWithWebAudio(arrayBuffer)) || (await playWithHtmlAudio(arrayBuffer, target));
+        if (!isCurrentPlayback()) return;
+        const played =
+          (await playWithHtmlAudio(audioBlob, target, isCurrentPlayback)) ||
+          (await playWithWebAudio(await audioBlob.arrayBuffer(), isCurrentPlayback));
+        if (!isCurrentPlayback()) return;
         if (played) {
           pendingPlaybackRef.current = null;
           clearPlaybackIssue();
           return;
         }
-        const spoken = await playWithSpeechSynthesis(trimmedText, target);
+        const spoken = await playWithSpeechSynthesis(trimmedText, target, isCurrentPlayback);
+        if (!isCurrentPlayback()) return;
         if (!spoken) {
           rememberForUserTap();
         } else {
@@ -1424,7 +2699,14 @@ function useGuestCaptionPlayer(
           clearPlaybackIssue();
         }
       } catch (err) {
-        const spoken = await playWithSpeechSynthesis(trimmedText, target);
+        if (activeTtsAbortRef.current === ttsAbortController) {
+          activeTtsAbortRef.current = null;
+        }
+        if (isAbortError(err) || !isCurrentPlayback()) {
+          return;
+        }
+        const spoken = await playWithSpeechSynthesis(trimmedText, target, isCurrentPlayback);
+        if (!isCurrentPlayback()) return;
         if (spoken) {
           pendingPlaybackRef.current = null;
           clearPlaybackIssue();
@@ -1439,6 +2721,7 @@ function useGuestCaptionPlayer(
       clearPlaybackIssue,
       playWithHtmlAudio,
       hasLocalVoiceForTarget,
+      isAbortError,
       notifyPlaybackIssue,
       playWithWebAudio,
       playWithSpeechSynthesis,
@@ -1449,11 +2732,13 @@ function useGuestCaptionPlayer(
   );
 
   useEffect(() => {
-    const enqueuePlayback = async (text: string, target?: CaptionTarget) => {
+    const enqueuePlayback = async (text: string, target?: CaptionTargetCode) => {
+      const generation = playbackGenerationRef.current;
       const next = playbackChainRef.current
         .catch(() => undefined)
         .then(async () => {
-          await playCaption(text, target);
+          if (playbackGenerationRef.current !== generation) return;
+          await playCaption(text, target, generation);
         });
       playbackChainRef.current = next;
       await next;
@@ -1485,9 +2770,14 @@ function useGuestCaptionPlayer(
     return () => {
       window.removeEventListener("pointerdown", handleFirstInteraction);
       window.removeEventListener("touchstart", handleFirstInteraction);
+      activeTtsAbortRef.current?.abort();
+      activeTtsAbortRef.current = null;
+      activePlaybackCancelRef.current?.();
+      clearActivePlaybackCancel();
       releaseGuestAudioUrl();
       guestAudioRef.current?.pause();
       guestAudioRef.current = null;
+      stopGuestWebAudio();
       if ("speechSynthesis" in window) {
         window.speechSynthesis.cancel();
       }
@@ -1499,28 +2789,39 @@ function useGuestCaptionPlayer(
       replayingPendingRef.current = false;
       playbackChainRef.current = Promise.resolve();
     };
-  }, [releaseGuestAudioUrl, unlockGuestAudio]);
+  }, [clearActivePlaybackCancel, releaseGuestAudioUrl, stopGuestWebAudio, unlockGuestAudio]);
 
-  const speakCaption = useCallback(async (text: string, target?: CaptionTarget) => {
+  const speakCaption = useCallback(async (text: string, target?: CaptionTargetCode) => {
+    const generation = playbackGenerationRef.current;
     const next = playbackChainRef.current
       .catch(() => undefined)
       .then(async () => {
-        await playCaption(text, target);
+        if (playbackGenerationRef.current !== generation) return;
+        await playCaption(text, target, generation);
       });
     playbackChainRef.current = next;
     await next;
   }, [playCaption]);
 
   const stopCaptionPlayback = useCallback(() => {
+    playbackGenerationRef.current += 1;
     pendingPlaybackRef.current = null;
     replayingPendingRef.current = false;
     playbackChainRef.current = Promise.resolve();
+    activeTtsAbortRef.current?.abort();
+    activeTtsAbortRef.current = null;
+    activePlaybackCancelRef.current?.();
+    clearActivePlaybackCancel();
     guestAudioRef.current?.pause();
+    if (guestAudioRef.current) {
+      guestAudioRef.current.currentTime = 0;
+    }
+    stopGuestWebAudio();
     releaseGuestAudioUrl();
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
-  }, [releaseGuestAudioUrl]);
+  }, [clearActivePlaybackCancel, releaseGuestAudioUrl, stopGuestWebAudio]);
 
   return {
     speakCaption,
@@ -1916,6 +3217,85 @@ const useAnnotationSync = ({ roomId, isHost }: { roomId: string; isHost: boolean
     sendClear,
     sendTextEntry,
   };
+};
+
+const useHostRoomHeartbeat = ({
+  room,
+  roomId,
+  isHost,
+  sessionMode,
+}: {
+  room: Room;
+  roomId: string;
+  isHost: boolean;
+  sessionMode: "conference" | "chat";
+}) => {
+  const heartbeatInFlightRef = useRef(false);
+
+  const sendHeartbeat = useCallback(async () => {
+    if (!isHost || sessionMode !== "conference") return;
+    if (!roomId.trim()) return;
+    const canHeartbeat =
+      room.state === ConnectionState.Connected ||
+      room.state === ConnectionState.Reconnecting ||
+      room.state === ConnectionState.SignalReconnecting;
+    if (!canHeartbeat || heartbeatInFlightRef.current) return;
+
+    heartbeatInFlightRef.current = true;
+    const controller = typeof AbortController === "undefined" ? null : new AbortController();
+    const timeoutId =
+      typeof window === "undefined"
+        ? null
+        : window.setTimeout(() => controller?.abort(), ROOM_HEARTBEAT_TIMEOUT_MS);
+    try {
+      const authHeader = await getAuthHeader();
+      if (!("Authorization" in authHeader) || !authHeader.Authorization) {
+        return;
+      }
+      await fetch("/api/livekit/room/heartbeat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeader,
+        },
+        body: JSON.stringify({ room: roomId }),
+        signal: controller?.signal,
+        cache: "no-store",
+      });
+    } catch {
+      // Heartbeat failure should not disrupt an active call.
+    } finally {
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+      heartbeatInFlightRef.current = false;
+    }
+  }, [isHost, room, roomId, sessionMode]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!isHost || sessionMode !== "conference") return;
+    void sendHeartbeat();
+    const intervalId = window.setInterval(() => {
+      void sendHeartbeat();
+    }, ROOM_HEARTBEAT_INTERVAL_MS);
+    const onPageShow = () => {
+      void sendHeartbeat();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void sendHeartbeat();
+      }
+    };
+    window.addEventListener("pageshow", onPageShow);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("pageshow", onPageShow);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      heartbeatInFlightRef.current = false;
+    };
+  }, [isHost, sendHeartbeat, sessionMode]);
 };
 
 type AnnotationLayerProps = {
@@ -2944,51 +4324,13 @@ const useRealtimeTranslation = ({
   }, [enabled, buildSessionUpdate]);
 };
 
-type SuggestionMode =
-  | "general"
-  | "rp"
-  | "business"
-  | "fitness"
-  | "writer"
-  | "care";
-
-const SUGGESTION_MODES: { id: SuggestionMode; label: string; hint: string }[] = [
-  {
-    id: "general",
-    label: "General",
-    hint: "Reponses libres et naturelles, sans jargon.",
-  },
-  {
-    id: "rp",
-    label: "Communication strategique (RP)",
-    hint: "Messages corporate coherents, factuels, influence.",
-  },
-  {
-    id: "business",
-    label: "Coach mental pro",
-    hint: "Clarte, assertivite, objectifs, posture executive.",
-  },
-  {
-    id: "fitness",
-    label: "Preparateur physique",
-    hint: "Motivation, effort, progression, rythme.",
-  },
-  {
-    id: "writer",
-    label: "Style Brice Faradji",
-    hint: "Ton direct, image forte, oralite soignee.",
-  },
-  {
-    id: "care",
-    label: "Ecoute sensible",
-    hint: "Bienveillance, questions ouvertes, sans diagnostic.",
-  },
-];
-
 export default function LiveKitCall({
   roomId,
   onParticipantCount,
   isHost,
+  guestInviteId,
+  sessionIdentity,
+  initialLivekitAuth,
   aiTrainingAutoStart = false,
   defaultDisplayName,
   onLeave,
@@ -2999,6 +4341,9 @@ export default function LiveKitCall({
   roomId: string;
   onParticipantCount?: (count: number) => void;
   isHost: boolean;
+  guestInviteId?: string;
+  sessionIdentity?: string;
+  initialLivekitAuth?: InitialLivekitAuth;
   aiTrainingAutoStart?: boolean;
   defaultDisplayName?: string;
   onLeave?: () => void;
@@ -3020,7 +4365,7 @@ export default function LiveKitCall({
   const [sessionUser, setSessionUser] = useState<FirebaseUser | null>(auth.currentUser);
   const [translationEntitlement, setTranslationEntitlement] =
     useState<TranslationEntitlementState>(DEFAULT_TRANSLATION_ENTITLEMENT);
-  const translationConsumeInFlightRef = useRef(false);
+  const translationConsumeQueueRef = useRef<Promise<boolean>>(Promise.resolve(true));
   const manualLeaveRef = useRef(false);
   const autoResumeAttemptsRef = useRef(0);
   const autoResumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -3070,58 +4415,83 @@ export default function LiveKitCall({
       }));
     }
   }, [isChatSession, isHost]);
+
+  useEffect(() => {
+    if (translationEntitlement.loading) return;
+    dispatchTranslationEntitlementUpdatedEvent({
+      enabled: translationEntitlement.enabled,
+      isAdmin: translationEntitlement.isAdmin,
+      isPremium: translationEntitlement.isPremium,
+      totalSecondsRemaining: translationEntitlement.totalSecondsRemaining,
+      freeSecondsRemaining: translationEntitlement.freeSecondsRemaining,
+      paidSecondsRemaining: translationEntitlement.paidSecondsRemaining,
+    });
+  }, [
+    translationEntitlement.enabled,
+    translationEntitlement.freeSecondsRemaining,
+    translationEntitlement.isAdmin,
+    translationEntitlement.isPremium,
+    translationEntitlement.loading,
+    translationEntitlement.paidSecondsRemaining,
+    translationEntitlement.totalSecondsRemaining,
+  ]);
+
   const consumeTranslationSeconds = useCallback(
     async (seconds: number, origin: "local" | "remote") => {
       if (!isHost && !isChatSession) return true;
       const currentUser = auth.currentUser;
       if (!currentUser) return false;
-      if (translationEntitlement.isAdmin || translationEntitlement.isPremium) return true;
-      if (translationConsumeInFlightRef.current) return translationEntitlement.enabled;
       const safeSeconds = Math.max(1, Math.min(300, Math.floor(seconds || 1)));
-      translationConsumeInFlightRef.current = true;
-      try {
-        const idToken = await getIdToken(currentUser, true);
-        const response = await fetch("/api/translation/consume", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${idToken}`,
-          },
-          body: JSON.stringify({
-            seconds: safeSeconds,
-            origin,
-            roomId,
-          }),
-        });
-        const payload = await response.json().catch(() => ({}));
-        const hasEntitlementShape =
-          payload &&
-          typeof payload === "object" &&
-          ("enabled" in (payload as Record<string, unknown>) ||
-            "freeSecondsRemaining" in (payload as Record<string, unknown>));
-        if (hasEntitlementShape) {
-          setTranslationEntitlement(normalizeTranslationEntitlement(payload));
-        }
-        if (response.status === 402) {
+      const executeConsume = async () => {
+        try {
+          const idToken = await getIdToken(currentUser);
+          const response = await fetch("/api/translation/consume", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${idToken}`,
+            },
+            body: JSON.stringify({
+              seconds: safeSeconds,
+              origin,
+              roomId,
+            }),
+          });
+          const payload = await response.json().catch(() => ({}));
+          const hasEntitlementShape =
+            payload &&
+            typeof payload === "object" &&
+            ("enabled" in (payload as Record<string, unknown>) ||
+              "freeSecondsRemaining" in (payload as Record<string, unknown>));
+          if (hasEntitlementShape) {
+            setTranslationEntitlement(normalizeTranslationEntitlement(payload));
+          }
+          if (response.status === 402) {
+            return false;
+          }
+          if (!response.ok) {
+            return false;
+          }
+          return true;
+        } catch {
           return false;
         }
-        if (!response.ok) {
-          return false;
-        }
-        return true;
-      } catch {
-        return false;
-      } finally {
-        translationConsumeInFlightRef.current = false;
-      }
+      };
+
+      const queuedConsume = translationConsumeQueueRef.current.then(
+        executeConsume,
+        executeConsume
+      );
+      translationConsumeQueueRef.current = queuedConsume.then(
+        () => true,
+        () => true
+      );
+      return queuedConsume;
     },
     [
       isChatSession,
       isHost,
       roomId,
-      translationEntitlement.enabled,
-      translationEntitlement.isAdmin,
-      translationEntitlement.isPremium,
     ]
   );
   useEffect(() => {
@@ -3445,12 +4815,14 @@ export default function LiveKitCall({
         {
           username: fallbackPreJoinName,
           audioEnabled: true,
-          videoEnabled: !audioOnly,
+          // The AI exercise swaps to the coach stage immediately, so avoid
+          // publishing camera tracks only to disable them right after join.
+          videoEnabled: !audioOnly && !aiTrainingAutoStart,
         },
         fallbackPreJoinName
       )
     );
-  }, [audioOnly, fallbackPreJoinName, skipPreJoin]);
+  }, [aiTrainingAutoStart, audioOnly, fallbackPreJoinName, skipPreJoin]);
   useEffect(() => {
     if (preJoinChoices) return;
     if (preJoinRestoreAttemptedRef.current) return;
@@ -3478,7 +4850,7 @@ export default function LiveKitCall({
   const [autoFrame, setAutoFrame] = useState(true);
   const [captionsEnabled, setCaptionsEnabled] = useState(CAPTIONS_ALWAYS_ON);
   const [captionSize, setCaptionSize] = useState<"sm" | "md" | "lg">("md");
-  const [captionTarget, setCaptionTarget] = useState<CaptionTarget>(DEFAULT_CAPTION_TARGET);
+  const [captionTarget, setCaptionTarget] = useState<CaptionTargetCode>(DEFAULT_CAPTION_TARGET);
   const [sourceLanguage, setSourceLanguage] = useState<SourceLanguageOption["code"]>(
     DEFAULT_SOURCE_LANGUAGE
   );
@@ -3494,7 +4866,8 @@ export default function LiveKitCall({
   const [hostLocalTtsEnabled, setHostLocalTtsEnabled] = useState(false);
   const [shareMicToGuests, setShareMicToGuests] = useState(true);
   const [guestTtsEnabled, setGuestTtsEnabled] = useState(true);
-  const [guestCaptionTarget, setGuestCaptionTarget] = useState<CaptionTarget>(captionTarget);
+  const [guestCaptionTarget, setGuestCaptionTarget] = useState<CaptionTargetCode>(captionTarget);
+  const [respondInTrainingLanguage, setRespondInTrainingLanguage] = useState(false);
   useEffect(() => {
     if (translationEntitlement.enabled) return;
     setGuestTtsEnabled(false);
@@ -3531,7 +4904,7 @@ export default function LiveKitCall({
       setVideoFit(aiVideoFitRestoreRef.current);
     }
   }, [backgroundMode, videoFit]);
-  const prevHostCaptionTargetRef = useRef<CaptionTarget>(captionTarget);
+  const prevHostCaptionTargetRef = useRef<CaptionTargetCode>(captionTarget);
   useEffect(() => {
     if (guestCaptionTarget === prevHostCaptionTargetRef.current) {
       setGuestCaptionTarget(captionTarget);
@@ -3545,25 +4918,13 @@ export default function LiveKitCall({
     []
   );
   const handleGuestCaptionTargetChange = useCallback(
-    (target: CaptionTarget) => {
+    (target: CaptionTargetCode) => {
       setGuestCaptionTarget(target);
     },
     []
   );
-  const positioningGuide = useMemo(() => {
-    const company = rumeurPositioning.company;
-    const expertise = rumeurPositioning.expertise.join(", ");
-    const values = company.positioning.value.join("; ");
-    const crisis = rumeurPositioning.corporate_comms.crisis_method;
-    return [
-      `Marque: ${company.name}.`,
-      `Tagline: ${company.tagline}.`,
-      `Positionnement: ${company.positioning.core}.`,
-      `Valeurs: ${values}.`,
-      `Expertises: ${expertise}.`,
-      `Crise (avant): ${crisis.before.join("; ")}.`,
-      `Crise (pendant): ${crisis.during.join("; ")}.`,
-    ].join(" ");
+  const handleRespondInTrainingLanguageChange = useCallback((next: boolean) => {
+    setRespondInTrainingLanguage(next);
   }, []);
   const captionsSupported = useMemo(() => {
     if (typeof window === "undefined") return false;
@@ -3584,10 +4945,7 @@ export default function LiveKitCall({
   }, []);
 
 
-  const identity = useMemo(
-    () => safeRandomId(),
-    []
-  );
+  const identity = useMemo(() => sessionIdentity?.trim() || safeRandomId(), [sessionIdentity]);
   const isMobileDevice = useMemo(() => {
     if (typeof navigator === "undefined") return false;
     return /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
@@ -3653,7 +5011,7 @@ export default function LiveKitCall({
 
     const syncTranslatorWorker = async () => {
       try {
-        const authHeader = await getAuthHeader();
+        const authHeader = await getAuthHeader({ forceRefresh: true });
         const response = await fetch("/api/livekit/translator/session", {
           method: "POST",
           headers: {
@@ -3691,7 +5049,7 @@ export default function LiveKitCall({
       if (!realtimeEnabled) return;
       void (async () => {
         try {
-          const authHeader = await getAuthHeader();
+          const authHeader = await getAuthHeader({ forceRefresh: true });
           await fetch("/api/livekit/translator/session", {
             method: "POST",
             headers: {
@@ -3745,19 +5103,57 @@ export default function LiveKitCall({
           sanitizeDisplayName(preJoinChoices?.username) ||
           sanitizeDisplayName(defaultDisplayName) ||
           (isHost ? `Hôte-${identity.slice(0, 6)}` : `Invité-${identity.slice(0, 6)}`);
-        const authHeader = await getAuthHeader();
-        const res = await fetch("/api/livekit/token", {
-          signal: controller.signal,
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...authHeader },
-          body: JSON.stringify({
-            room: roomId,
-            identity,
-            name: displayName,
-            role: isHost ? "host" : "guest",
-            includeGuestTtsToken: true,
-          }),
-        });
+        let res: Response;
+        if (!isHost && guestInviteId) {
+          if (tokenRetryTrigger === 0 && initialLivekitAuth?.token?.trim()) {
+            const nextToken = initialLivekitAuth.token.trim();
+            if (!nextToken || nextToken.split(".").length !== 3) {
+              throw new Error("Token LiveKit invalide");
+            }
+            if (!cancelled) {
+              autoResumeInFlightRef.current = false;
+              if (autoResumeActive) {
+                clearAutoResumeState();
+                setDisconnectNotice("");
+              }
+              setToken(nextToken);
+              setGuestTtsToken(initialLivekitAuth.guestTtsToken?.trim() || "");
+            }
+            return;
+          }
+          const authHeader = await getAuthHeader({ forceRefresh: true });
+          res = await fetch("/api/livekit/invite/redeem", {
+            signal: controller.signal,
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...authHeader },
+            body: JSON.stringify({
+              invite: guestInviteId,
+              identity,
+              name: displayName,
+              includeGuestTtsToken: true,
+            }),
+          });
+        } else {
+          if (!isHost && !isChatSession) {
+            throw new Error(
+              "Cette visioconférence n'accepte plus les codes de room. Utilise une invitation BFZoom."
+            );
+          }
+          const authHeader = await getAuthHeader({ forceRefresh: true });
+          res = await fetch("/api/livekit/token", {
+            signal: controller.signal,
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...authHeader },
+            body: JSON.stringify({
+              room: roomId,
+              identity,
+              name: displayName,
+              role: isHost ? "host" : "guest",
+              sessionMode,
+              includeGuestTtsToken: true,
+            }),
+          });
+        }
         if (!res.ok) {
           const body = await res.text().catch(() => "");
           throw new Error(
@@ -3827,8 +5223,13 @@ export default function LiveKitCall({
     roomId,
     identity,
     isHost,
+    isChatSession,
+    guestInviteId,
+    initialLivekitAuth?.guestTtsToken,
+    initialLivekitAuth?.token,
     preJoinChoices?.username,
     defaultDisplayName,
+    sessionMode,
     tokenRetryTrigger,
     autoResumeActive,
     clearAutoResumeState,
@@ -3964,6 +5365,7 @@ export default function LiveKitCall({
         token={token}
         serverUrl={LK_URL}
         connect
+        data-lk-theme="default"
         audio={audioOptions}
         video={videoOptions}
         options={roomOptions}
@@ -4035,6 +5437,8 @@ export default function LiveKitCall({
             sourceLanguageOption={sourceLanguageOption}
             sourceLanguage={sourceLanguage}
             onChangeSourceLanguage={handleSourceLanguageChange}
+            respondInTrainingLanguage={respondInTrainingLanguage}
+            onChangeRespondInTrainingLanguage={handleRespondInTrainingLanguageChange}
             ttsEnabled={ttsEnabled}
             onToggleTts={() => {
               if (!VOICE_TRANSLATION_ENABLED) return;
@@ -4109,6 +5513,7 @@ const CUSTOM_BACKGROUND_STORAGE_KEY = "bfzoom:custom-backgrounds";
 const CUSTOM_BACKGROUND_PREFIX = "custom";
 const CUSTOM_BACKGROUND_LIMIT = 5;
 const AI_GALLERY_STORAGE_KEY = "bfzoom:ai-gallery";
+const BROKEN_AI_IMAGE_STORAGE_KEY = "bfzoom:broken-ai-images";
 
 type AiGalleryItem = {
   id: string;
@@ -4124,12 +5529,12 @@ const BACKGROUND_OPTIONS: BackgroundOption[] = [
   { id: "grid", label: "Grille", mode: "image", imagePath: "/backgrounds/grid.svg" },
 ];
 
-function useIsMobileViewport(breakpoint = 900) {
+function useMediaQueryFlag(query: string) {
   const [isMobile, setIsMobile] = useState(false);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const mq = window.matchMedia(`(max-width: ${breakpoint}px)`);
+    const mq = window.matchMedia(query);
     const apply = () => setIsMobile(mq.matches);
     apply();
     if (mq.addEventListener) {
@@ -4138,9 +5543,13 @@ function useIsMobileViewport(breakpoint = 900) {
     }
     mq.addListener(apply);
     return () => mq.removeListener(apply);
-  }, [breakpoint]);
+  }, [query]);
 
   return isMobile;
+}
+
+function useIsMobileViewport(breakpoint = 900) {
+  return useMediaQueryFlag(`(max-width: ${breakpoint}px)`);
 }
 
 function LiveKitVideo({
@@ -4169,6 +5578,8 @@ function LiveKitVideo({
   sourceLanguageOption,
   sourceLanguage,
   onChangeSourceLanguage,
+  respondInTrainingLanguage,
+  onChangeRespondInTrainingLanguage,
   ttsEnabled,
   onToggleTts,
   realtimeEnabled,
@@ -4227,6 +5638,8 @@ function LiveKitVideo({
   sourceLanguageOption: SourceLanguageOption;
   sourceLanguage: SourceLanguageOption["code"];
   onChangeSourceLanguage: (value: SourceLanguageOption["code"]) => void;
+  respondInTrainingLanguage: boolean;
+  onChangeRespondInTrainingLanguage: (next: boolean) => void;
   ttsEnabled: boolean;
   onToggleTts: () => void;
   realtimeEnabled: boolean;
@@ -4263,14 +5676,13 @@ function LiveKitVideo({
   aiTrainingAutoStart?: boolean;
   sessionMode?: "conference" | "chat";
 }) {
-  const isMobileDevice = useIsMobileViewport();
-  const isIPhone = useMemo(() => {
-    return isAppleMobilePlatform();
-  }, []);
+  const viewportProfile = useAiPracticeViewportProfile();
+  const isMobileDevice = viewportProfile.isPhone;
+  const isIPhone = viewportProfile.isApplePhone;
   const backgroundEffectsDisabled = useMemo(() => {
     return isBackgroundEffectsBlockedOnBrowser();
   }, []);
-  const useMobileLayout = isMobileDevice || isIPhone;
+  const useMobileLayout = viewportProfile.isPhone;
   const { cameraTrack, isCameraEnabled, localParticipant } = useLocalParticipant();
   const [realtimeStatus, setRealtimeStatus] = useState<RealtimeStatus>("idle");
   const realtimeCaptionTargetName = useMemo(
@@ -4287,23 +5699,9 @@ function LiveKitVideo({
   } | null>(null);
   const processorDisabledRef = useRef(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [notebookOpen, setNotebookOpen] = useState(false);
-  const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [drawingEnabled, setDrawingEnabled] = useState(false);
   const [brushColor, setBrushColor] = useState("#f87171");
   const [brushWidth, setBrushWidth] = useState(3);
-  const notebookHref = useMemo(() => buildTranslationNotebookHref(roomId, isHost), [roomId, isHost]);
-  const notebookEmbedSrc = useMemo(
-    () => `${notebookHref}${notebookHref.includes("?") ? "&" : "?"}embedded=1`,
-    [notebookHref]
-  );
-  const openNotebookOverlay = useCallback(() => {
-    setSettingsOpen(false);
-    setNotebookOpen(true);
-  }, []);
-  const closeNotebookOverlay = useCallback(() => {
-    setNotebookOpen(false);
-  }, []);
   const realtimeFallbackTriggeredRef = useRef(false);
   const isDrawingRef = useRef(false);
   const currentStrokeRef = useRef<number | null>(null);
@@ -4335,6 +5733,8 @@ function LiveKitVideo({
       ),
     [realtimeAudioTracks]
   );
+  const hasRemotePublishedTranslationAudioTrack = hasServerTranslatorAudio;
+  const effectiveGuestTtsEnabled = guestTtsEnabled && (isHost || !hasServerTranslatorAudio);
   const [widgetState, setWidgetState] = useState<{
     showChat: boolean;
     unreadMessages: number;
@@ -4563,7 +5963,7 @@ function LiveKitVideo({
         shareMicToGuests={shareMicToGuests}
         onToggleShareMicToGuests={onToggleShareMicToGuests}
         guestCaptionTarget={guestCaptionTarget}
-        guestTtsEnabled={guestTtsEnabled}
+        guestTtsEnabled={effectiveGuestTtsEnabled}
         guestTtsDisabled={!isHost && hasServerTranslatorAudio}
         onToggleGuestTts={onToggleGuestTts}
         ttsError={ttsError}
@@ -4584,15 +5984,14 @@ function LiveKitVideo({
         aiGallery={aiGallery}
         onAiGallerySelect={onAiGallerySelect}
         onRefreshTranslationEntitlement={onRefreshTranslationEntitlement}
-        onSendToChat={roomChat.sendMessage}
-        onOpenNotebook={openNotebookOverlay}
         />
       {useMobileLayout ? (
         <LiveKitConferenceMobile
           roomId={roomId}
           isHost={isHost}
           captionsEnabled={captionsEnabled}
-          guestTtsEnabled={guestTtsEnabled}
+          guestTtsEnabled={effectiveGuestTtsEnabled}
+          hasRemotePublishedTranslationAudioTrack={hasRemotePublishedTranslationAudioTrack}
           onToggleGuestTts={onToggleGuestTts}
           shareMicToGuests={shareMicToGuests}
           realtimeEnabled={realtimeEnabled}
@@ -4610,6 +6009,8 @@ function LiveKitVideo({
           videoFit={videoFit}
           sourceLanguage={sourceLanguage}
           onChangeSourceLanguage={onChangeSourceLanguage}
+          respondInTrainingLanguage={respondInTrainingLanguage}
+          onChangeRespondInTrainingLanguage={onChangeRespondInTrainingLanguage}
           onChangeCaptionTarget={onChangeCaptionTarget}
           guestCaptionTarget={guestCaptionTarget}
           onChangeGuestCaptionTarget={onChangeGuestCaptionTarget}
@@ -4630,7 +6031,6 @@ function LiveKitVideo({
           aiGallery={aiGallery}
           onAiGallerySelect={onAiGallerySelect}
           onSaveAiBackground={onSaveAiBackground}
-          onOpenNotebook={openNotebookOverlay}
           aiTrainingAutoStart={aiTrainingAutoStart}
           isChatSession={isChatSession}
         />
@@ -4654,11 +6054,10 @@ function LiveKitVideo({
           onRealtimeError={onRealtimeError}
           hostLocalTtsEnabled={hostLocalTtsEnabled}
           shareMicToGuests={shareMicToGuests}
-          guestTtsEnabled={guestTtsEnabled}
+          guestTtsEnabled={effectiveGuestTtsEnabled}
+          hasRemotePublishedTranslationAudioTrack={hasRemotePublishedTranslationAudioTrack}
           onToggleGuestTts={onToggleGuestTts}
           ttsError={ttsError}
-          suggestionsOpen={suggestionsOpen}
-          onToggleSuggestions={() => setSuggestionsOpen((value) => !value)}
           isHost={isHost}
           onDisableCaptions={onDisableCaptions}
           captionSize={captionSize}
@@ -4667,6 +6066,8 @@ function LiveKitVideo({
           sourceLanguageOption={sourceLanguageOption}
           sourceLanguage={sourceLanguage}
           onChangeSourceLanguage={onChangeSourceLanguage}
+          respondInTrainingLanguage={respondInTrainingLanguage}
+          onChangeRespondInTrainingLanguage={onChangeRespondInTrainingLanguage}
           onChangeCaptionTarget={onChangeCaptionTarget}
           guestCaptionTarget={guestCaptionTarget}
           onChangeGuestCaptionTarget={onChangeGuestCaptionTarget}
@@ -4687,23 +6088,10 @@ function LiveKitVideo({
           onAiGallerySelect={onAiGallerySelect}
           onSaveAiBackground={onSaveAiBackground}
           isSettingsOpen={settingsOpen}
-          onOpenNotebook={openNotebookOverlay}
           aiTrainingAutoStart={aiTrainingAutoStart}
           isChatSession={isChatSession}
         />
       )}
-      <TranslationNotebookOverlay
-        isOpen={notebookOpen}
-        onClose={closeNotebookOverlay}
-        embedSrc={notebookEmbedSrc}
-        pageHref={notebookHref}
-        title={aiTrainingAutoStart ? "Bloc-notes Exercice IA" : "Bloc-notes traduction"}
-        subtitle={
-          aiTrainingAutoStart
-            ? "Retrouve tes échanges coach, traductions et reformulations utiles."
-            : "Exercice langue: dernières traductions mémorisées"
-        }
-      />
     </>
   );
 }
@@ -4720,13 +6108,6 @@ type ChatMessage = {
   to: "all" | string;
   timestamp: number;
   roomId?: string;
-};
-
-type SuggestedResponse = {
-  id: string;
-  text: string;
-  heard: string;
-  createdAt: number;
 };
 
 type RoomTimerState = {
@@ -5032,10 +6413,9 @@ function LiveKitConference({
   hostLocalTtsEnabled,
   shareMicToGuests,
   guestTtsEnabled,
+  hasRemotePublishedTranslationAudioTrack,
   onToggleGuestTts,
   ttsError,
-  suggestionsOpen,
-  onToggleSuggestions,
   isHost,
   onDisableCaptions,
   captionSize,
@@ -5044,6 +6424,8 @@ function LiveKitConference({
   sourceLanguageOption,
   sourceLanguage,
   onChangeSourceLanguage,
+  respondInTrainingLanguage,
+  onChangeRespondInTrainingLanguage,
   onChangeCaptionTarget,
   guestCaptionTarget,
   onChangeGuestCaptionTarget,
@@ -5064,7 +6446,6 @@ function LiveKitConference({
   onClearAiBackground,
   onSaveAiBackground,
   isSettingsOpen,
-  onOpenNotebook,
   aiTrainingAutoStart = false,
   isChatSession = false,
 }: {
@@ -5087,10 +6468,9 @@ function LiveKitConference({
   hostLocalTtsEnabled: boolean;
   shareMicToGuests: boolean;
   guestTtsEnabled: boolean;
+  hasRemotePublishedTranslationAudioTrack: boolean;
   onToggleGuestTts: () => void;
   ttsError: string;
-  suggestionsOpen: boolean;
-  onToggleSuggestions: () => void;
   isHost: boolean;
   onDisableCaptions: () => void;
   captionSize: "sm" | "md" | "lg";
@@ -5099,6 +6479,8 @@ function LiveKitConference({
   sourceLanguageOption: SourceLanguageOption;
   sourceLanguage: SourceLanguageOption["code"];
   onChangeSourceLanguage: (value: SourceLanguageOption["code"]) => void;
+  respondInTrainingLanguage: boolean;
+  onChangeRespondInTrainingLanguage: (next: boolean) => void;
   onChangeCaptionTarget: (target: CaptionTarget) => void;
   guestCaptionTarget: CaptionTarget;
   onChangeGuestCaptionTarget: (target: CaptionTarget) => void;
@@ -5122,15 +6504,17 @@ function LiveKitConference({
   aiGallery: AiGalleryItem[];
   onAiGallerySelect: (item: AiGalleryItem) => void;
   isSettingsOpen: boolean;
-  onOpenNotebook: () => void;
   aiTrainingAutoStart?: boolean;
   isChatSession?: boolean;
 }) {
+  const { locale } = useUiLocale();
+  const ui = LIVEKIT_UI_COPY[locale];
   const layoutContext = useCreateLayoutContext();
   const [isMobile, setIsMobile] = useState(false);
   const [controlsHidden, setControlsHidden] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [inviteCopied, setInviteCopied] = useState<InviteCopyFeedback | null>(null);
+  const [shareInviteId, setShareInviteId] = useState("");
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [screenShareError, setScreenShareError] = useState("");
   const [actionControlsState, setActionControlsState] = useState({
@@ -5138,7 +6522,7 @@ function LiveKitConference({
     lastAction: "",
   });
   const isIPhone = useMemo(() => {
-    return isAppleMobilePlatform();
+    return isApplePhonePlatform();
   }, []);
   const backgroundEffectsDisabled = useMemo(() => {
     return isBackgroundEffectsBlockedOnBrowser();
@@ -5189,16 +6573,16 @@ function LiveKitConference({
     if (!localParticipant) return;
     void localParticipant.setMicrophoneEnabled(false);
   }, [isHost, localParticipant, shareMicToGuests]);
-  const remoteAudioTrack = useMemo(() => {
-    for (const participant of remoteParticipants) {
-      if (participant.identity === localParticipant?.identity) continue;
-      const pub = participant.getTrackPublication(Track.Source.Microphone);
-      const track = pub?.track as { mediaStreamTrack?: MediaStreamTrack } | undefined;
-      if (track?.mediaStreamTrack) return track.mediaStreamTrack;
-    }
-    return null;
-  }, [remoteParticipants, localParticipant?.identity]);
   const room = useRoomContext();
+  useHostRoomHeartbeat({
+    room,
+    roomId,
+    isHost,
+    sessionMode: isChatSession ? "chat" : "conference",
+  });
+  const roomIsRecovering =
+    room.state === ConnectionState.Reconnecting ||
+    room.state === ConnectionState.SignalReconnecting;
   const [audioUnlockRequired, setAudioUnlockRequired] = useState(false);
   const activateRoomAudio = useCallback(async () => {
     try {
@@ -5299,6 +6683,10 @@ function LiveKitConference({
   const [pushToTalkDraft, setPushToTalkDraft] = useState<PushToTalkDraft | null>(null);
   const [pushToTalkDraftText, setPushToTalkDraftText] = useState("");
   const [pushToTalkDraftEditing, setPushToTalkDraftEditing] = useState(false);
+  const [pushToTalkDraftReview, setPushToTalkDraftReview] = useState<PushToTalkDraftReview | null>(
+    null
+  );
+  const [pushToTalkDraftReviewBusy, setPushToTalkDraftReviewBusy] = useState(false);
   const [pushToTalkGestureHint, setPushToTalkGestureHint] = useState("");
   const captionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pushToTalkInterruptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -5307,6 +6695,14 @@ function LiveKitConference({
   const { message: captionIncoming, send: sendCaption } = useDataChannel("bfzoom-captions");
   const { message: translationAccessIncoming, send: sendTranslationAccess } =
     useDataChannel(TRANSLATION_ACCESS_TOPIC);
+  const { message: talkieLockIncoming, send: sendTalkieLock } =
+    useDataChannel(TALKIE_LOCK_TOPIC);
+  const [talkieLockHolderIdentity, setTalkieLockHolderIdentity] = useState("");
+  const [talkieLockHolderName, setTalkieLockHolderName] = useState("");
+  const talkieLockHolderRef = useRef("");
+  const talkieLockExpiresAtRef = useRef(0);
+  const talkieLockTimestampRef = useRef(0);
+  const talkieLockExpiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastCaptionSentAtRef = useRef(0);
   const recognitionRef = useRef<any>(null);
   const ttsTrackRef = useRef<LocalAudioTrack | null>(null);
@@ -5316,15 +6712,6 @@ function LiveKitConference({
   const ttsDestinationRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   const { speakCaption: speakGuestCaption, stopCaptionPlayback: stopGuestCaptionPlayback } =
     useGuestCaptionPlayer(realtimeVoice, setCaptionError, guestTtsToken);
-  const [suggestions, setSuggestions] = useState<SuggestedResponse[]>([]);
-  const [listening, setListening] = useState(false);
-  const [lastHeard, setLastHeard] = useState("");
-  const [suggesting, setSuggesting] = useState(false);
-  const [suggestError, setSuggestError] = useState("");
-  const [useGuidelines, setUseGuidelines] = useState(true);
-  const [suggestionMode, setSuggestionMode] = useState<SuggestionMode>("rp");
-  const lastSuggestAtRef = useRef(0);
-  const recorderRef = useRef<MediaRecorder | null>(null);
   const pushToTalkRecorderRef = useRef<MediaRecorder | null>(null);
   const pushToTalkStreamRef = useRef<MediaStream | null>(null);
   const pushToTalkWarmStreamTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -5339,6 +6726,9 @@ function LiveKitConference({
   const pushToTalkPointerStartRef = useRef<{ x: number; y: number } | null>(null);
   const pushToTalkCancelArmedRef = useRef(false);
   const pushToTalkDraftIdRef = useRef(0);
+  const pushToTalkDraftReviewRequestRef = useRef(0);
+  const pushToTalkDraftReviewAbortRef = useRef<AbortController | null>(null);
+  const pushToTalkDraftReviewCacheRef = useRef<Map<string, PushToTalkDraftReview>>(new Map());
   const activeTranslationRequestRef = useRef(0);
   const activeTranslationAbortRef = useRef<AbortController | null>(null);
   const activeAiPartnerRequestRef = useRef(0);
@@ -5348,8 +6738,6 @@ function LiveKitConference({
   const guestTranslationInFlightRef = useRef<Map<string, Promise<string>>>(new Map());
   const phoneticCacheRef = useRef<Map<string, string>>(new Map());
   const phoneticRequestRef = useRef(0);
-  const listeningRef = useRef(false);
-  const suggestingRef = useRef(false);
   const guestCaptionTargetName = useMemo(
     () => CAPTION_TARGETS_CONFIG.find((item) => item.code === guestCaptionTarget)?.name || "English",
     [guestCaptionTarget]
@@ -5359,9 +6747,17 @@ function LiveKitConference({
   const [exercisePhoneticEnabled] = useState(true);
   const localReceptionTarget = guestCaptionTarget;
   const localReceptionTargetName = guestCaptionTargetName;
+  const captionDisplayTarget = captionPhoneticTarget || localReceptionTarget;
+  const captionDisplayTargetName = useMemo(
+    () =>
+      CAPTION_TARGETS_CONFIG.find((item) => item.code === captionDisplayTarget)?.name ||
+      resolveLanguageNameFromCode(captionDisplayTarget) ||
+      localReceptionTargetName,
+    [captionDisplayTarget, localReceptionTargetName]
+  );
   const captionTargetLabel = useMemo(
-    () => CAPTION_TARGETS_CONFIG.find((item) => item.code === localReceptionTarget)?.label || "EN",
-    [localReceptionTarget]
+    () => CAPTION_TARGETS_CONFIG.find((item) => item.code === captionDisplayTarget)?.label || "EN",
+    [captionDisplayTarget]
   );
   const localReceptionHint = guestTtsEnabled
     ? "Communication: choisis la langue dans laquelle tu recois texte + voix sur ton appareil."
@@ -5413,6 +6809,65 @@ function LiveKitConference({
   const translationControlsDisabled = !effectiveTranslationEnabled;
   const translationUnavailableMessage =
     effectiveTranslationLockMessage || TRANSLATION_UNLOCK_HINT;
+  const resolveGuestTranslationForTarget = useCallback(
+    async (
+      translationInput: string,
+      translationFromCode: string | undefined,
+      translationFromName: string,
+      targetCode: CaptionTargetCode,
+      targetName: string,
+      signal?: AbortSignal
+    ) => {
+      const normalizedInput = translationInput.trim();
+      if (!normalizedInput) return "";
+      if (normalizeCaptionTargetCode(translationFromCode) === targetCode) {
+        return normalizedInput;
+      }
+      const translationCacheKey = buildTranslationCacheKey(
+        normalizedInput,
+        translationFromCode || "",
+        targetCode
+      );
+      const cachedTranslation = guestTranslationCacheRef.current.get(translationCacheKey);
+      if (cachedTranslation) return cachedTranslation;
+
+      let inFlightTranslation = guestTranslationInFlightRef.current.get(translationCacheKey);
+      if (!inFlightTranslation) {
+        inFlightTranslation = translateWithOpenAi(
+          normalizedInput,
+          translationFromName,
+          targetName,
+          {
+            fromCode: translationFromCode,
+            toCode: targetCode,
+            guestToken: guestTtsToken,
+            signal,
+            intent: "translation",
+          }
+        ).then((result) => result.trim());
+        guestTranslationInFlightRef.current.set(translationCacheKey, inFlightTranslation);
+      }
+
+      try {
+        const translated = await inFlightTranslation;
+        if (translated) {
+          upsertLruValue(
+            guestTranslationCacheRef.current,
+            translationCacheKey,
+            translated,
+            GUEST_TRANSLATION_CACHE_LIMIT
+          );
+        }
+        return translated;
+      } finally {
+        const currentInFlight = guestTranslationInFlightRef.current.get(translationCacheKey);
+        if (currentInFlight === inFlightTranslation) {
+          guestTranslationInFlightRef.current.delete(translationCacheKey);
+        }
+      }
+    },
+    [guestTtsToken]
+  );
   const aiPartnerAvailable =
     AI_PARTNER_TRAINING_ENABLED && isHost && (aiTrainingAutoStart || remoteParticipants.length === 0);
   const [aiPartnerEnabled, setAiPartnerEnabled] = useState(false);
@@ -5433,13 +6888,33 @@ function LiveKitConference({
     useState<AiPartnerAvatarTheme>("neutral");
   const [aiPartnerCoachPhoneticText, setAiPartnerCoachPhoneticText] = useState("");
   const [aiPartnerCoachPhoneticBusy, setAiPartnerCoachPhoneticBusy] = useState(false);
-  const [aiPartnerCoachSavedToNotebook, setAiPartnerCoachSavedToNotebook] = useState(false);
   const aiPartnerBusyRef = useRef(false);
   const aiPartnerCameraWasAutoDisabledRef = useRef(false);
+  const aiPartnerConversationRef = useRef<AiPartnerConversationMessage[]>([]);
+  const aiPracticeLanguageConfigRef = useRef({
+    sourceLanguage,
+    trainingTarget: localReceptionTarget,
+    respondInTrainingLanguage,
+  });
   const aiPartnerCoachPhoneticCacheRef = useRef<Map<string, string>>(new Map());
   const aiPartnerCoachPhoneticRequestRef = useRef(0);
-  const aiPartnerCoachSavedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const aiPartnerActive = aiPartnerAvailable && aiPartnerEnabled;
+  const pushToTalkDraftReviewMode: PushToTalkDraftReviewMode = aiTrainingAutoStart
+    ? "coach"
+    : "translation";
+  const shouldUsePushToTalkDraftReview = aiTrainingAutoStart
+    ? aiPartnerActive
+    : captionsEnabled && !isChatSession;
+  const activeSpeechLanguageCode =
+    respondInTrainingLanguage && aiPartnerActive ? localReceptionTarget : sourceLanguage;
+  const activeSpeechLanguageName =
+    respondInTrainingLanguage && aiPartnerActive
+      ? resolveLanguageNameFromCode(localReceptionTarget) || localReceptionTargetName
+      : sourceLanguageName;
+  const activeSpeechLanguageLocale =
+    respondInTrainingLanguage && aiPartnerActive
+      ? resolveSpeechLocaleFromLanguage(localReceptionTarget) || sourceLanguageLocale
+      : sourceLanguageLocale;
   const aiPartnerOverlayVisible = aiPartnerActive && Boolean(aiPartnerOverlayText);
   const aiPartnerCanToggleView =
     aiPartnerLastTranslatedReply.trim().length > 0 &&
@@ -5473,10 +6948,10 @@ function LiveKitConference({
   const aiPartnerCoachActionText = aiPartnerDisplayText.trim();
   const aiPartnerCoachActionLanguageCode = aiPartnerDisplayUsesTranslation
     ? localReceptionTarget
-    : sourceLanguage;
+    : activeSpeechLanguageCode;
   const aiPartnerCoachActionLanguageName = aiPartnerDisplayUsesTranslation
     ? localReceptionTargetName
-    : sourceLanguageName;
+    : activeSpeechLanguageName;
   const aiPartnerCoachPlaybackTarget = useMemo<CaptionTarget | undefined>(() => {
     return CAPTION_TARGETS_CONFIG.some(
       (target) => target.code === aiPartnerCoachActionLanguageCode
@@ -5498,6 +6973,8 @@ function LiveKitConference({
     if (aiPartnerAvailable) return;
     setAiPartnerEnabled(false);
     setAiPartnerBusy(false);
+    aiPartnerConversationRef.current = [];
+    setAiPartnerLastReply("");
     setAiPartnerLastTranslatedReply("");
     setAiPartnerFeedbackSource("");
     setAiPartnerFeedbackTranslated("");
@@ -5508,11 +6985,6 @@ function LiveKitConference({
     setAiPartnerView("translation");
     setAiPartnerCoachPhoneticText("");
     setAiPartnerCoachPhoneticBusy(false);
-    setAiPartnerCoachSavedToNotebook(false);
-    if (aiPartnerCoachSavedTimerRef.current) {
-      clearTimeout(aiPartnerCoachSavedTimerRef.current);
-      aiPartnerCoachSavedTimerRef.current = null;
-    }
     if (aiPartnerOverlayTimerRef.current) {
       clearTimeout(aiPartnerOverlayTimerRef.current);
       aiPartnerOverlayTimerRef.current = null;
@@ -5525,12 +6997,12 @@ function LiveKitConference({
   }, [aiPartnerAvailable, aiTrainingAutoStart, isChatSession]);
   useEffect(() => {
     setAiPartnerCoachPhoneticText("");
-    setAiPartnerCoachSavedToNotebook(false);
   }, [aiPartnerCoachActionText, aiPartnerCoachActionLanguageCode, aiPartnerView]);
   useEffect(() => {
     if (!localParticipant) return;
     let cancelled = false;
     const syncCameraForAiPartner = async () => {
+      if (roomIsRecovering) return;
       if (aiPartnerActive) {
         if (!isCameraEnabled) return;
         try {
@@ -5567,7 +7039,7 @@ function LiveKitConference({
     return () => {
       cancelled = true;
     };
-  }, [aiPartnerActive, isCameraEnabled, localParticipant]);
+  }, [aiPartnerActive, isCameraEnabled, localParticipant, roomIsRecovering]);
   const broadcastRoomTranslationAccess = useCallback(async () => {
     if (!isHost || !sendTranslationAccess) return;
     const payload: TranslationAccessPayload = {
@@ -5605,6 +7077,13 @@ function LiveKitConference({
     void broadcastRoomTranslationAccess();
   }, [broadcastRoomTranslationAccess, isHost, remoteParticipants.length]);
   useEffect(() => {
+    if (!isHost || !sendTranslationAccess) return;
+    const syncTimer = setInterval(() => {
+      void broadcastRoomTranslationAccess();
+    }, 1500);
+    return () => clearInterval(syncTimer);
+  }, [broadcastRoomTranslationAccess, isHost, sendTranslationAccess]);
+  useEffect(() => {
     if (isHost) return;
     if (!translationAccessIncoming?.payload) return;
     const decoder = new TextDecoder();
@@ -5629,6 +7108,152 @@ function LiveKitConference({
       // Ignore malformed payload.
     }
   }, [isHost, roomId, translationAccessIncoming]);
+  const clearTalkieLock = useCallback(() => {
+    talkieLockHolderRef.current = "";
+    talkieLockExpiresAtRef.current = 0;
+    setTalkieLockHolderIdentity("");
+    setTalkieLockHolderName("");
+    if (talkieLockExpiryTimerRef.current) {
+      clearTimeout(talkieLockExpiryTimerRef.current);
+      talkieLockExpiryTimerRef.current = null;
+    }
+  }, []);
+  const armTalkieLockExpiry = useCallback(
+    (expiresAt: number) => {
+      if (talkieLockExpiryTimerRef.current) {
+        clearTimeout(talkieLockExpiryTimerRef.current);
+        talkieLockExpiryTimerRef.current = null;
+      }
+      const delay = Math.max(0, expiresAt - Date.now());
+      talkieLockExpiryTimerRef.current = setTimeout(() => {
+        if (talkieLockExpiresAtRef.current > Date.now()) return;
+        clearTalkieLock();
+      }, delay + 40);
+    },
+    [clearTalkieLock]
+  );
+  const applyTalkieLockPayload = useCallback(
+    (payload: TalkieLockPayload) => {
+      if (payload.roomId && payload.roomId !== roomId) return;
+      const nextTimestamp =
+        typeof payload.timestamp === "number" ? payload.timestamp : Date.now();
+      if (nextTimestamp < talkieLockTimestampRef.current) return;
+      talkieLockTimestampRef.current = nextTimestamp;
+
+      const holder = String(payload.holder || "").trim();
+      const action = payload.action || "claim";
+      if (action === "release") {
+        if (!holder || holder === talkieLockHolderRef.current) {
+          clearTalkieLock();
+        }
+        return;
+      }
+      if (!holder) return;
+      const expiresAt =
+        typeof payload.expiresAt === "number"
+          ? payload.expiresAt
+          : Date.now() + TALKIE_LOCK_TIMEOUT_MS;
+      talkieLockHolderRef.current = holder;
+      talkieLockExpiresAtRef.current = expiresAt;
+      setTalkieLockHolderIdentity(holder);
+      setTalkieLockHolderName(String(payload.holderName || "").trim());
+      armTalkieLockExpiry(expiresAt);
+    },
+    [armTalkieLockExpiry, clearTalkieLock, roomId]
+  );
+  const publishTalkieLock = useCallback(
+    async (action: "claim" | "release" | "heartbeat") => {
+      if (!localParticipant) return;
+      const expiresAt =
+        action === "release" ? Date.now() : Date.now() + TALKIE_LOCK_TIMEOUT_MS;
+      const payload: TalkieLockPayload = {
+        roomId,
+        holder: localParticipant.identity,
+        holderName: localParticipant.name || localParticipant.identity || "BFZoom",
+        action,
+        expiresAt,
+        timestamp: Date.now(),
+      };
+      applyTalkieLockPayload(payload);
+      const encoded = new TextEncoder().encode(JSON.stringify(payload));
+      try {
+        if (sendTalkieLock) {
+          await sendTalkieLock(encoded, {
+            reliable: true,
+            topic: TALKIE_LOCK_TOPIC,
+          });
+        } else {
+          await localParticipant.publishData(encoded, {
+            reliable: true,
+            topic: TALKIE_LOCK_TOPIC,
+          });
+        }
+      } catch {
+        // Keep local receiver-side suppression even if the data channel is flaky.
+      }
+    },
+    [applyTalkieLockPayload, localParticipant, roomId, sendTalkieLock]
+  );
+  useEffect(() => {
+    if (!talkieLockIncoming?.payload) return;
+    const decoder = new TextDecoder();
+    try {
+      const raw = decoder.decode(talkieLockIncoming.payload);
+      const payload = JSON.parse(raw) as TalkieLockPayload;
+      applyTalkieLockPayload(payload);
+    } catch {
+      // Ignore malformed talkie lock payloads.
+    }
+  }, [applyTalkieLockPayload, talkieLockIncoming]);
+  useEffect(() => {
+    if (!pushToTalkActive && !pushToTalkBusy) return;
+    const heartbeatId = setInterval(() => {
+      void publishTalkieLock("heartbeat");
+    }, TALKIE_LOCK_HEARTBEAT_MS);
+    return () => {
+      clearInterval(heartbeatId);
+    };
+  }, [publishTalkieLock, pushToTalkActive, pushToTalkBusy]);
+  useEffect(() => {
+    if (!room) return;
+    const applyTalkieRemoteAudioSuppression = () => {
+      room.remoteParticipants.forEach((participant) => {
+        const shouldSuppress =
+          Boolean(talkieLockHolderIdentity) &&
+          participant.identity === talkieLockHolderIdentity;
+        participant.setVolume(
+          shouldSuppress ? TALKIE_REMOTE_AUDIO_MUTED_VOLUME : TALKIE_REMOTE_AUDIO_VOLUME_NORMAL,
+          Track.Source.Microphone
+        );
+      });
+    };
+
+    applyTalkieRemoteAudioSuppression();
+    room.on(RoomEvent.ParticipantConnected, applyTalkieRemoteAudioSuppression);
+    room.on(RoomEvent.ParticipantDisconnected, applyTalkieRemoteAudioSuppression);
+    room.on(RoomEvent.TrackSubscribed, applyTalkieRemoteAudioSuppression);
+
+    return () => {
+      room.off(RoomEvent.ParticipantConnected, applyTalkieRemoteAudioSuppression);
+      room.off(RoomEvent.ParticipantDisconnected, applyTalkieRemoteAudioSuppression);
+      room.off(RoomEvent.TrackSubscribed, applyTalkieRemoteAudioSuppression);
+      room.remoteParticipants.forEach((participant) => {
+        participant.setVolume(TALKIE_REMOTE_AUDIO_VOLUME_NORMAL, Track.Source.Microphone);
+      });
+    };
+  }, [room, talkieLockHolderIdentity]);
+  useEffect(() => {
+    return () => {
+      void publishTalkieLock("release");
+    };
+  }, [publishTalkieLock]);
+  const isTalkieLockedByOther = useMemo(() => {
+    if (!talkieLockHolderIdentity) return false;
+    return talkieLockHolderIdentity !== (localParticipant?.identity || "");
+  }, [localParticipant?.identity, talkieLockHolderIdentity]);
+  const talkieLockedMessage = isTalkieLockedByOther
+    ? ui.talkieBusyBy(talkieLockHolderName || talkieLockHolderIdentity)
+    : "";
   const handleLocalReceptionTargetChange = useCallback(
     (target: CaptionTarget) => {
       onChangeGuestCaptionTarget(target);
@@ -5643,6 +7268,16 @@ function LiveKitConference({
       webkitSpeechRecognition?: new () => any;
     };
     return Boolean(maybeWindow.SpeechRecognition || maybeWindow.webkitSpeechRecognition);
+  }, []);
+  const preferRecorderPushToTalk = useMemo(() => {
+    if (typeof window === "undefined") return false;
+    const ua = navigator.userAgent || "";
+    const isMacDesktop = /Macintosh|MacIntel|MacPPC|Mac68K/i.test(ua) && !/iPhone|iPad|iPod/i.test(ua);
+    return (
+      isMacDesktop &&
+      typeof MediaRecorder !== "undefined" &&
+      Boolean(navigator.mediaDevices?.getUserMedia)
+    );
   }, []);
   const pushToTalkSupported = useMemo(() => {
     if (typeof window === "undefined") return false;
@@ -5784,21 +7419,6 @@ function LiveKitConference({
     guestTtsToken,
     localReceptionTarget,
   ]);
-  const positioningGuide = useMemo(() => {
-    const company = rumeurPositioning.company;
-    const expertise = rumeurPositioning.expertise.join(", ");
-    const values = company.positioning.value.join("; ");
-    const crisis = rumeurPositioning.corporate_comms.crisis_method;
-    return [
-      `Marque: ${company.name}.`,
-      `Tagline: ${company.tagline}.`,
-      `Positionnement: ${company.positioning.core}.`,
-      `Valeurs: ${values}.`,
-      `Expertises: ${expertise}.`,
-      `Crise (avant): ${crisis.before.join("; ")}.`,
-      `Crise (pendant): ${crisis.during.join("; ")}.`,
-    ].join(" ");
-  }, []);
 
   const tracks = useTracks(
     [
@@ -5871,14 +7491,6 @@ function LiveKitConference({
     widgetDispatchRef.current?.({ msg: "unread_msg", count: roomChat.unreadCount });
   }, [roomChat.unreadCount]);
 
-  useEffect(() => {
-    listeningRef.current = listening;
-  }, [listening]);
-
-  useEffect(() => {
-    suggestingRef.current = suggesting;
-  }, [suggesting]);
-
   const getRecorderMimeType = useCallback(() => {
     if (typeof MediaRecorder === "undefined") return "";
     const candidates = [
@@ -5888,16 +7500,6 @@ function LiveKitConference({
       "audio/mpeg",
     ];
     return candidates.find((type) => MediaRecorder.isTypeSupported(type)) || "";
-  }, []);
-
-  const stopRecorder = useCallback(() => {
-    const recorder = recorderRef.current;
-    if (recorder && recorder.state !== "inactive") {
-      try {
-        recorder.stop();
-      } catch {}
-    }
-    recorderRef.current = null;
   }, []);
 
   const releasePushToTalkStream = useCallback(() => {
@@ -5920,8 +7522,8 @@ function LiveKitConference({
     const formData = new FormData();
     formData.append("file", blob, `push-to-talk.${fileExt}`);
     formData.append("roomId", roomId);
-    formData.append("language", sourceLanguage);
-    const authHeader = await getAuthHeader();
+    formData.append("language", activeSpeechLanguageCode);
+    const authHeader = await getAuthHeader({ forceRefresh: true });
     const headers: Record<string, string> = { ...authHeader };
     const guestToken = guestTtsToken.trim();
     if (!authHeader.Authorization && guestToken) {
@@ -5939,159 +7541,7 @@ function LiveKitConference({
       );
     }
     return String((transcriptPayload as { text?: string })?.text || "").trim();
-  }, [guestTtsToken, roomId, sourceLanguage]);
-
-  const requestSuggestions = useCallback(
-    async (blob: Blob) => {
-      if (!listeningRef.current || suggestingRef.current) return;
-      const now = Date.now();
-      if (now - lastSuggestAtRef.current < 4500) return;
-      lastSuggestAtRef.current = now;
-
-      setSuggesting(true);
-      suggestingRef.current = true;
-      try {
-        const formData = new FormData();
-        formData.append("file", blob, "audio.webm");
-        formData.append("roomId", roomId);
-        const authHeader = await getAuthHeader();
-        const headers: Record<string, string> = { ...authHeader };
-        const guestToken = guestTtsToken.trim();
-        if (!authHeader.Authorization && guestToken) {
-          headers["x-bfzoom-guest-tts-token"] = guestToken;
-        }
-        const transcriptResponse = await fetch("/api/transcribe", {
-          method: "POST",
-          headers,
-          body: formData,
-        });
-        const transcriptPayload = await transcriptResponse.json();
-        if (!transcriptResponse.ok) {
-          throw new Error(transcriptPayload?.error || "Transcription impossible.");
-        }
-        const transcript = String(transcriptPayload?.text || "").trim();
-        if (!transcript || transcript.length < 6) return;
-        if (transcript === lastHeard) return;
-        setLastHeard(transcript);
-
-        const systemPrompt = [
-          "Donne 3 reponses possibles, courtes (1-2 phrases) et concretes.",
-          "Ne fabrique pas de faits, reste prudent.",
-          "Reponds en francais.",
-          suggestionMode === "general"
-            ? "Ton naturel, clair, sans jargon."
-            : "",
-          suggestionMode === "rp"
-            ? "Tu es un coach RP qui aide un porte-parole a repondre avec impact."
-            : "",
-          suggestionMode === "business"
-            ? "Tu es un coach mental pour dirigeants: clarté, assertivite, structure."
-            : "",
-          suggestionMode === "fitness"
-            ? "Tu es un preparateur physique: motivation, rythme, progression concrete."
-            : "",
-          suggestionMode === "writer"
-            ? "Tu ecris avec le ton de Brice Faradji: direct, image vive, oralite soignee. Pas d'insulte."
-            : "",
-          suggestionMode === "care"
-            ? "Tu offres une ecoute bienveillante: reformule, pose des questions ouvertes, propose du soutien. Pas de diagnostic ni conseil medical."
-            : "",
-          suggestionMode === "rp" && useGuidelines
-            ? `Contexte entreprise: ${positioningGuide}`
-            : "",
-        ]
-          .filter(Boolean)
-          .join(" ");
-        const suggestResponse = await fetch("/api/openai", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...headers,
-          },
-          body: JSON.stringify({
-            messages: [
-              { role: "system", content: systemPrompt },
-              { role: "user", content: transcript },
-            ],
-          }),
-        });
-        const suggestPayload = await suggestResponse.json();
-        if (!suggestResponse.ok) {
-          throw new Error(suggestPayload?.error || "Suggestions indisponibles.");
-        }
-        const content = String(
-          suggestPayload?.choices?.[0]?.message?.content || ""
-        ).trim();
-        const parsed = content
-          .split("\n")
-          .map((line) => line.replace(/^[-\\d.).\\s]+/, "").trim())
-          .filter(Boolean)
-          .slice(0, 3);
-        if (parsed.length === 0) return;
-        const createdAt = Date.now();
-        const entries = parsed.map((text, index) => ({
-          id: `${createdAt}-${index}`,
-          text,
-          heard: transcript,
-          createdAt,
-        }));
-        setSuggestions((prev) => [...entries, ...prev].slice(0, 12));
-        setSuggestError("");
-      } catch (err) {
-        const message =
-          err instanceof Error ? err.message : "Erreur suggestions.";
-        setSuggestError(message);
-      } finally {
-        setSuggesting(false);
-        suggestingRef.current = false;
-      }
-    },
-    [guestTtsToken, lastHeard, positioningGuide, roomId, suggestionMode, useGuidelines]
-  );
-
-  const startRecorder = useCallback(() => {
-    if (!remoteAudioTrack) {
-      setSuggestError("Aucun audio interlocuteur.");
-      setListening(false);
-      return;
-    }
-    if (typeof MediaRecorder === "undefined") {
-      setSuggestError("Enregistrement audio non supporte.");
-      return;
-    }
-    const mimeType = getRecorderMimeType();
-    const stream = new MediaStream([remoteAudioTrack]);
-    const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-    recorderRef.current = recorder;
-    recorder.ondataavailable = (event) => {
-      if (!event.data || event.data.size === 0) return;
-      void requestSuggestions(event.data);
-    };
-    recorder.onerror = () => {
-      setSuggestError("Enregistrement audio interrompu.");
-      setListening(false);
-    };
-    try {
-      recorder.start(4000);
-    } catch {
-      setSuggestError("Impossible de demarrer l'ecoute.");
-      setListening(false);
-    }
-  }, [getRecorderMimeType, remoteAudioTrack, requestSuggestions]);
-
-  useEffect(() => {
-    if (!suggestionsOpen) {
-      setListening(false);
-      return;
-    }
-    if (!listening) {
-      stopRecorder();
-      return;
-    }
-    stopRecorder();
-    startRecorder();
-    return () => stopRecorder();
-  }, [listening, startRecorder, stopRecorder, suggestionsOpen]);
+  }, [activeSpeechLanguageCode, guestTtsToken, roomId]);
 
   const stopTts = useCallback(async () => {
     ttsQueueRef.current = [];
@@ -6130,8 +7580,6 @@ function LiveKitConference({
   }, [realtimeEnabled, stopTts]);
 
   const ensureTtsTrack = useCallback(async () => {
-    if (!localParticipant) return false;
-    if (ttsTrackRef.current) return true;
     const context = ttsContextRef.current ?? new AudioContext();
     ttsContextRef.current = context;
     if (context.state === "suspended") {
@@ -6139,25 +7587,10 @@ function LiveKitConference({
         await context.resume();
       } catch {}
     }
-    const destination = ttsDestinationRef.current ?? context.createMediaStreamDestination();
-    ttsDestinationRef.current = destination;
-    const [audioTrack] = destination.stream.getAudioTracks();
-    if (!audioTrack) {
-      onTtsError("Synthese vocale: aucun flux audio.");
-      return false;
-    }
-    const localTrack = new LocalAudioTrack(audioTrack, undefined, true);
-    ttsTrackRef.current = localTrack;
-    try {
-      await localParticipant.publishTrack(localTrack, { source: Track.Source.ScreenShareAudio });
-    } catch (err) {
-      onTtsError("Synthese vocale: publication audio impossible.");
-      localTrack.stop();
-      ttsTrackRef.current = null;
-      return false;
-    }
+    ttsDestinationRef.current =
+      ttsDestinationRef.current ?? context.createMediaStreamDestination();
     return true;
-  }, [localParticipant, onTtsError]);
+  }, []);
 
   const playNextTts = useCallback(async () => {
     if (ttsPlayingRef.current) return;
@@ -6186,10 +7619,18 @@ function LiveKitConference({
         } catch {}
       }
       const authHeader = await getAuthHeader();
+      const guestToken = guestTtsToken.trim();
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        ...authHeader,
+      };
+      if (guestToken) {
+        headers["x-bfzoom-guest-tts-token"] = guestToken;
+      }
       const res = await fetch("/api/tts", {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeader },
-      body: JSON.stringify({ text: nextText, voice: realtimeVoice, roomId }),
+        headers,
+        body: JSON.stringify({ text: nextText, voice: realtimeVoice, roomId, format: "mp3" }),
       });
       if (!res.ok) {
         const data = (await res.json()) as { error?: string };
@@ -6201,7 +7642,7 @@ function LiveKitConference({
       source.buffer = audioBuffer;
       source.connect(destination);
       // In exercise mode (or when host is alone), monitor translated voice locally.
-      if (guestTtsEnabled || remoteParticipants.length === 0) {
+      if (!hostLocalTtsEnabled && (guestTtsEnabled || remoteParticipants.length === 0)) {
         source.connect(context.destination);
       }
       source.onended = () => {
@@ -6223,6 +7664,7 @@ function LiveKitConference({
     realtimeVoice,
     roomId,
     guestTtsEnabled,
+    guestTtsToken,
     remoteParticipants.length,
     speakGuestCaption,
     ttsEnabled,
@@ -6298,7 +7740,8 @@ function LiveKitConference({
         setSourceText(incomingSourceText);
         setSourceFromLocal(false);
         let localText = payload.text;
-        let localTarget = payload.target;
+        let localTarget = normalizeCaptionTargetCode(payload.target);
+        let fallbackMessage = "";
         if (
           localReceptionTarget &&
           localReceptionTargetName &&
@@ -6317,87 +7760,54 @@ function LiveKitConference({
                 resolveLanguageNameFromCode(payload.sourceLang) ||
                 "Source";
           if (translationInput) {
-            const translationCacheKey = buildTranslationCacheKey(
-              translationInput,
-              translationFromCode || "",
-              localReceptionTarget
-            );
-            const cachedTranslation =
-              guestTranslationCacheRef.current.get(translationCacheKey);
-            if (cachedTranslation) {
-              localText = cachedTranslation;
-              localTarget = localReceptionTarget;
-            } else {
-              let inFlightTranslation =
-                guestTranslationInFlightRef.current.get(translationCacheKey);
-              if (!inFlightTranslation) {
-                inFlightTranslation = translateWithOpenAi(
-                  translationInput,
-                  translationFromName,
+            try {
+              const guestTranslation = await resolveGuestTranslationForTarget(
+                translationInput,
+                translationFromCode,
+                translationFromName,
+                localReceptionTarget,
+                localReceptionTargetName
+              );
+              if (guestTranslation.trim()) {
+                localText = guestTranslation.trim();
+                localTarget = localReceptionTarget;
+              } else {
+                fallbackMessage = buildCaptionFallbackMessage(
                   localReceptionTargetName,
-                  {
-                    fromCode: translationFromCode,
-                    toCode: localReceptionTarget,
-                    guestToken: guestTtsToken,
-                    intent: "translation",
-                  }
-                ).then((result) => result.trim());
-                guestTranslationInFlightRef.current.set(
-                  translationCacheKey,
-                  inFlightTranslation
+                  localTarget ?? payload.target
                 );
               }
-              try {
-                const guestTranslation = await inFlightTranslation;
-                if (guestTranslation) {
-                  localText = guestTranslation;
-                  localTarget = localReceptionTarget;
-                  upsertLruValue(
-                    guestTranslationCacheRef.current,
-                    translationCacheKey,
-                    guestTranslation,
-                    GUEST_TRANSLATION_CACHE_LIMIT
-                  );
-                }
-              } catch (err) {
-                console.warn("Guest translation failed", err);
-              } finally {
-                const currentInFlight =
-                  guestTranslationInFlightRef.current.get(translationCacheKey);
-                if (currentInFlight === inFlightTranslation) {
-                  guestTranslationInFlightRef.current.delete(translationCacheKey);
-                }
-              }
+            } catch (err) {
+              console.warn("Guest translation failed", err);
+              fallbackMessage = buildCaptionFallbackMessage(
+                localReceptionTargetName,
+                localTarget ?? payload.target
+              );
             }
           }
         }
+        const resolvedCaptionTarget = resolveCaptionDisplayTarget(
+          localTarget ?? payload.target,
+          localReceptionTarget
+        );
+        const captionMatchesReception =
+          !localReceptionTarget || resolvedCaptionTarget === localReceptionTarget;
+        const captionErrorMessage = captionMatchesReception
+          ? ""
+          : fallbackMessage ||
+            buildCaptionFallbackMessage(localReceptionTargetName, resolvedCaptionTarget);
         if (cancelled) return;
         setCaptionText(localText);
-        setCaptionPhoneticTarget((localTarget ?? localReceptionTarget) as CaptionTarget);
-        if (guestTtsEnabled) {
-          const notebookSourceText = (payload.sourceText || payload.text || "").trim();
-          const notebookTargetCode = ((localTarget ?? localReceptionTarget) || "").trim();
-          const notebookTargetName =
-            resolveLanguageNameFromCode(notebookTargetCode) || localReceptionTargetName;
-          if (notebookSourceText && localText?.trim()) {
-            saveTranslationNotebookEntry({
-              sourceText: notebookSourceText,
-              translatedText: localText.trim(),
-              sourceLanguageCode: payload.sourceLang || payload.target || "",
-              sourceLanguageName:
-                payload.sourceLangName ||
-                resolveLanguageNameFromCode(payload.sourceLang) ||
-                resolveLanguageNameFromCode(payload.target) ||
-                "Source",
-              targetLanguageCode: notebookTargetCode,
-              targetLanguageName: notebookTargetName,
-              direction: "incoming",
-            });
-          }
-        }
+        setCaptionPhoneticTarget(resolvedCaptionTarget);
+        setCaptionError(captionErrorMessage);
         scheduleCaptionClear();
-        if (guestTtsEnabled) {
-          void speakGuestCaption(localText ?? payload.text, localTarget ?? payload.target);
+        const remotePublishedAudioHandlesPlayback = Boolean(
+          payload.audioTrackPublished &&
+            hasRemotePublishedTranslationAudioTrack &&
+            captionMatchesReception
+        );
+        if (guestTtsEnabled && !remotePublishedAudioHandlesPlayback && captionMatchesReception) {
+          void speakGuestCaption(localText ?? payload.text, resolvedCaptionTarget);
         }
       } catch (err) {
         console.warn("Caption payload invalide", err);
@@ -6411,17 +7821,18 @@ function LiveKitConference({
     captionIncoming,
     guestTtsToken,
     guestTtsEnabled,
+    hasRemotePublishedTranslationAudioTrack,
     isHost,
     localParticipant?.identity,
     localReceptionTarget,
     localReceptionTargetName,
     onConsumeTranslationSeconds,
+    resolveGuestTranslationForTarget,
     roomId,
     scheduleCaptionClear,
     speakGuestCaption,
     translationUnavailableMessage,
   ]);
-
   useEffect(() => {
     return () => {
       if (captionTimerRef.current) clearTimeout(captionTimerRef.current);
@@ -6434,10 +7845,6 @@ function LiveKitConference({
         pushToTalkDraftTimerRef.current = null;
       }
       if (aiPartnerOverlayTimerRef.current) clearTimeout(aiPartnerOverlayTimerRef.current);
-      if (aiPartnerCoachSavedTimerRef.current) {
-        clearTimeout(aiPartnerCoachSavedTimerRef.current);
-        aiPartnerCoachSavedTimerRef.current = null;
-      }
       const recognition = recognitionRef.current;
       if (recognition) {
         try {
@@ -6458,6 +7865,9 @@ function LiveKitConference({
       activeTranslationAbortRef.current = null;
       activeAiPartnerAbortRef.current?.abort();
       activeAiPartnerAbortRef.current = null;
+      pushToTalkDraftReviewRequestRef.current += 1;
+      pushToTalkDraftReviewAbortRef.current?.abort();
+      pushToTalkDraftReviewAbortRef.current = null;
       stopGuestCaptionPlayback();
     };
   }, [releasePushToTalkStream, stopGuestCaptionPlayback]);
@@ -6493,6 +7903,13 @@ function LiveKitConference({
       pushToTalkInterruptTimerRef.current = null;
     }, 1800);
   }, []);
+  const resetPushToTalkDraftReview = useCallback(() => {
+    pushToTalkDraftReviewRequestRef.current += 1;
+    pushToTalkDraftReviewAbortRef.current?.abort();
+    pushToTalkDraftReviewAbortRef.current = null;
+    setPushToTalkDraftReview(null);
+    setPushToTalkDraftReviewBusy(false);
+  }, []);
   const interruptCurrentTurn = useCallback(() => {
     pushToTalkSessionRef.current += 1;
     pushToTalkDraftIdRef.current += 1;
@@ -6511,12 +7928,71 @@ function LiveKitConference({
     setPushToTalkDraft(null);
     setPushToTalkDraftText("");
     setPushToTalkDraftEditing(false);
+    resetPushToTalkDraftReview();
     setAiPartnerBusy(false);
     setAiPartnerOverlayText("");
     stopPushToTalkRecognition();
+    void publishTalkieLock("release");
     void stopTts();
     stopGuestCaptionPlayback();
-  }, [stopPushToTalkRecognition, stopGuestCaptionPlayback, stopTts]);
+  }, [
+    publishTalkieLock,
+    resetPushToTalkDraftReview,
+    stopPushToTalkRecognition,
+    stopGuestCaptionPlayback,
+    stopTts,
+  ]);
+  const resetAiPartnerConversationState = useCallback(() => {
+    interruptCurrentTurn();
+    aiPartnerConversationRef.current = [];
+    if (captionTimerRef.current) {
+      clearTimeout(captionTimerRef.current);
+      captionTimerRef.current = null;
+    }
+    if (aiPartnerOverlayTimerRef.current) {
+      clearTimeout(aiPartnerOverlayTimerRef.current);
+      aiPartnerOverlayTimerRef.current = null;
+    }
+    setCaptionError("");
+    setSourceText("");
+    setCaptionText("");
+    setCaptionPhoneticText("");
+    setAiPartnerBusy(false);
+    setAiPartnerLastReply("");
+    setAiPartnerLastTranslatedReply("");
+    setAiPartnerFeedbackSource("");
+    setAiPartnerFeedbackTranslated("");
+    setAiPartnerFeedbackFrench("");
+    setAiPartnerFeedbackFrenchBusy(false);
+    setAiPartnerFeedbackView("target");
+    setAiPartnerOverlayText("");
+    setAiPartnerView("translation");
+    setAiPartnerCoachPhoneticText("");
+    setAiPartnerCoachPhoneticBusy(false);
+  }, [interruptCurrentTurn]);
+  useEffect(() => {
+    const nextConfig = {
+      sourceLanguage,
+      trainingTarget: localReceptionTarget,
+      respondInTrainingLanguage,
+    };
+    const previousConfig = aiPracticeLanguageConfigRef.current;
+    aiPracticeLanguageConfigRef.current = nextConfig;
+    if (!aiTrainingAutoStart || isChatSession) return;
+    const changed =
+      previousConfig.sourceLanguage !== nextConfig.sourceLanguage ||
+      previousConfig.trainingTarget !== nextConfig.trainingTarget ||
+      previousConfig.respondInTrainingLanguage !== nextConfig.respondInTrainingLanguage;
+    if (!changed) return;
+    resetAiPartnerConversationState();
+  }, [
+    aiTrainingAutoStart,
+    isChatSession,
+    localReceptionTarget,
+    resetAiPartnerConversationState,
+    respondInTrainingLanguage,
+    sourceLanguage,
+  ]);
   const requestAiPartnerReply = useCallback(
     async (userInput: string) => {
       if (!aiPartnerActive || aiPartnerBusyRef.current) return;
@@ -6535,7 +8011,7 @@ function LiveKitConference({
       setAiPartnerFeedbackSource("");
       setAiPartnerFeedbackTranslated("");
       try {
-        const authHeader = await getAuthHeader();
+        const authHeader = await getAuthHeader({ forceRefresh: true });
         if (!authHeader.Authorization) {
           setCaptionError("Partenaire IA: connecte-toi pour activer l'entrainement.");
           return;
@@ -6552,7 +8028,7 @@ function LiveKitConference({
             coachMode: "partner",
             coachScenario: aiPartnerScenario,
             coachTone: aiPartnerTone,
-            coachLanguage: sourceLanguageName,
+            coachLanguage: activeSpeechLanguageName,
             roomId,
             timeoutMs: 18_000,
             maxTokens: 300,
@@ -6561,11 +8037,12 @@ function LiveKitConference({
               {
                 role: "system",
                 content: buildAiPartnerSystemPrompt(
-                  sourceLanguageName,
+                  activeSpeechLanguageName,
                   aiPartnerScenario,
                   aiPartnerTone
                 ),
               },
+              ...aiPartnerConversationRef.current,
               { role: "user", content: prompt },
             ],
           }),
@@ -6586,6 +8063,12 @@ function LiveKitConference({
         const aiReplySource = parsedCoachPayload.reply.replace(/\s+/g, " ").trim();
         if (!aiReplySource) return;
         if (requestId !== activeAiPartnerRequestRef.current) return;
+        const nextConversation: AiPartnerConversationMessage[] = [
+          ...aiPartnerConversationRef.current,
+          { role: "user", content: prompt },
+          { role: "assistant", content: aiReplySource },
+        ];
+        aiPartnerConversationRef.current = nextConversation.slice(-AI_PARTNER_HISTORY_LIMIT);
         setAiPartnerLastReply(aiReplySource);
         let feedbackSource = parsedCoachPayload.feedback.trim();
         const previousFeedbackSnapshot = aiPartnerFeedbackSource.trim();
@@ -6603,7 +8086,7 @@ function LiveKitConference({
               body: JSON.stringify({
                 intent: "coach_ai",
                 coachMode: "partner_feedback",
-                coachLanguage: sourceLanguageName,
+                coachLanguage: activeSpeechLanguageName,
                 roomId,
                 timeoutMs: 12_000,
                 maxTokens: 220,
@@ -6611,7 +8094,7 @@ function LiveKitConference({
                 messages: [
                   {
                     role: "system",
-                    content: buildAiPartnerFeedbackRecoveryPrompt(sourceLanguageName),
+                    content: buildAiPartnerFeedbackRecoveryPrompt(activeSpeechLanguageName),
                   },
                   {
                     role: "user",
@@ -6649,14 +8132,14 @@ function LiveKitConference({
 
         let aiReplyForUser = aiReplySource;
         let feedbackForUser = feedbackSource;
-        if (sourceLanguage !== localReceptionTarget) {
+        if (activeSpeechLanguageCode !== localReceptionTarget) {
           try {
             const translated = await translateWithOpenAi(
               aiReplySource,
-              sourceLanguageName,
+              activeSpeechLanguageName,
               localReceptionTargetName,
               {
-                fromCode: sourceLanguage,
+                fromCode: activeSpeechLanguageCode,
                 toCode: localReceptionTarget,
                 guestToken: guestTtsToken,
                 intent: "translation",
@@ -6673,10 +8156,10 @@ function LiveKitConference({
             try {
               const translatedFeedback = await translateWithOpenAi(
                 feedbackSource,
-                sourceLanguageName,
+                activeSpeechLanguageName,
                 localReceptionTargetName,
                 {
-                  fromCode: sourceLanguage,
+                  fromCode: activeSpeechLanguageCode,
                   toCode: localReceptionTarget,
                   guestToken: guestTtsToken,
                   intent: "translation",
@@ -6732,17 +8215,18 @@ function LiveKitConference({
       activeAiPartnerAbortRef,
       activeAiPartnerRequestRef,
       aiPartnerActive,
+      aiPartnerConversationRef,
       aiPartnerFeedbackSource,
       guestTtsEnabled,
       guestTtsToken,
       aiPartnerScenario,
       aiPartnerTone,
+      activeSpeechLanguageCode,
+      activeSpeechLanguageName,
       localReceptionTarget,
       localReceptionTargetName,
       roomChat,
       roomId,
-      sourceLanguage,
-      sourceLanguageName,
       speakGuestCaption,
     ]
   );
@@ -6765,8 +8249,8 @@ function LiveKitConference({
     if (aiPartnerFeedbackFrench.trim()) return;
     if (aiPartnerFeedbackFrenchBusy) return;
 
-    const fromCode = feedbackTarget ? localReceptionTarget : sourceLanguage;
-    const fromName = feedbackTarget ? localReceptionTargetName : sourceLanguageName;
+    const fromCode = feedbackTarget ? localReceptionTarget : activeSpeechLanguageCode;
+    const fromName = feedbackTarget ? localReceptionTargetName : activeSpeechLanguageName;
     if (fromCode === "fr") {
       setAiPartnerFeedbackFrench(baseText);
       return;
@@ -6795,10 +8279,10 @@ function LiveKitConference({
     aiPartnerFeedbackSource,
     aiPartnerFeedbackTranslated,
     guestTtsToken,
+    activeSpeechLanguageCode,
+    activeSpeechLanguageName,
     localReceptionTarget,
     localReceptionTargetName,
-    sourceLanguage,
-    sourceLanguageName,
   ]);
   const requestAiPartnerCoachPhonetic = useCallback(async () => {
     const text = aiPartnerCoachActionText.trim();
@@ -6852,39 +8336,12 @@ function LiveKitConference({
     aiPartnerView,
     requestAiPartnerCoachPhonetic,
   ]);
-  const saveAiPartnerCoachToNotebook = useCallback(() => {
-    const sourceTextForNotebook = aiPartnerLastReply.trim() || aiPartnerCoachActionText.trim();
-    const translatedTextForNotebook =
-      aiPartnerLastTranslatedReply.trim() || aiPartnerCoachActionText.trim();
-    if (!sourceTextForNotebook || !translatedTextForNotebook) return;
-    saveTranslationNotebookEntry({
-      sourceText: sourceTextForNotebook,
-      translatedText: translatedTextForNotebook,
-      sourceLanguageCode: sourceLanguage,
-      sourceLanguageName,
-      targetLanguageCode: localReceptionTarget,
-      targetLanguageName: localReceptionTargetName,
-      direction: "incoming",
-    });
-    setAiPartnerCoachSavedToNotebook(true);
-    if (aiPartnerCoachSavedTimerRef.current) {
-      clearTimeout(aiPartnerCoachSavedTimerRef.current);
-    }
-    aiPartnerCoachSavedTimerRef.current = setTimeout(() => {
-      setAiPartnerCoachSavedToNotebook(false);
-    }, 1800);
-  }, [
-    aiPartnerCoachActionText,
-    aiPartnerLastReply,
-    aiPartnerLastTranslatedReply,
-    localReceptionTarget,
-    localReceptionTargetName,
-    sourceLanguage,
-    sourceLanguageName,
-  ]);
-
   const translateAndBroadcast = useCallback(
-    async (input: string, durationSeconds = 1) => {
+    async (
+      input: string,
+      durationSeconds = 1,
+      deliveryGate?: Promise<boolean>
+    ) => {
       if (!effectiveTranslationEnabled) {
         setCaptionError(translationUnavailableMessage);
         return;
@@ -6906,21 +8363,28 @@ function LiveKitConference({
       setSourceText(trimmed);
       setSourceFromLocal(true);
       try {
+        if (aiTrainingAutoStart) {
+          const deliveryAllowed = await (deliveryGate ?? Promise.resolve(true)).catch(
+            () => false
+          );
+          if (requestId !== activeTranslationRequestRef.current) return;
+          if (!deliveryAllowed) {
+            setCaptionError(translationUnavailableMessage);
+            return;
+          }
+        }
+        const sameLanguage = activeSpeechLanguageCode === outgoingTarget;
         let finalText = trimmed;
         let translationWarning = "";
-        const sameLanguage = sourceLanguage === outgoingTarget;
         if (!sameLanguage) {
           try {
-            const translated = await translateWithOpenAi(
+            const translated = await resolveGuestTranslationForTarget(
               trimmed,
-              sourceLanguageName,
+              activeSpeechLanguageCode,
+              activeSpeechLanguageName,
+              outgoingTarget,
               outgoingTargetName,
-              {
-                fromCode: sourceLanguage,
-                toCode: outgoingTarget,
-                guestToken: guestTtsToken,
-                signal: requestController.signal,
-              }
+              requestController.signal
             );
             if (requestId !== activeTranslationRequestRef.current) return;
             if (translated.trim()) {
@@ -6931,7 +8395,7 @@ function LiveKitConference({
               requestController.signal.aborted ||
               (err instanceof Error && err.name === "AbortError")
             ) {
-              return;
+              throw err;
             }
             const message = err instanceof Error ? err.message : "Erreur de traduction.";
             translationWarning = toFriendlyAiError(message);
@@ -6942,21 +8406,22 @@ function LiveKitConference({
           return;
         }
         if (requestId !== activeTranslationRequestRef.current) return;
+        if (!aiTrainingAutoStart) {
+          const deliveryAllowed = await (deliveryGate ?? Promise.resolve(true)).catch(
+            () => false
+          );
+          if (requestId !== activeTranslationRequestRef.current) return;
+          if (!deliveryAllowed) {
+            setCaptionError(translationUnavailableMessage);
+            return;
+          }
+        }
 
         setCaptionText(finalText);
         setCaptionPhoneticTarget(outgoingTarget);
         scheduleCaptionClear();
         enqueueTts(finalText);
         if (guestTtsEnabled) {
-          saveTranslationNotebookEntry({
-            sourceText: trimmed,
-            translatedText: finalText,
-            sourceLanguageCode: sourceLanguage,
-            sourceLanguageName,
-            targetLanguageCode: outgoingTarget,
-            targetLanguageName: outgoingTargetName,
-            direction: "outgoing",
-          });
           if (!ttsEnabled) {
             void speakGuestCaption(finalText, outgoingTarget);
           }
@@ -6966,9 +8431,10 @@ function LiveKitConference({
           id: safeRandomId(),
           text: finalText,
           target: outgoingTarget,
+          audioTrackPublished: false,
           sourceText: trimmed,
-          sourceLang: sourceLanguage,
-          sourceLangName: sourceLanguageName,
+          sourceLang: activeSpeechLanguageCode,
+          sourceLangName: activeSpeechLanguageName,
           durationSeconds: Math.max(1, Math.floor(durationSeconds || 1)),
           from: localParticipant?.identity || "host",
           timestamp: Date.now(),
@@ -7025,6 +8491,7 @@ function LiveKitConference({
     [
       activeTranslationAbortRef,
       activeTranslationRequestRef,
+      aiTrainingAutoStart,
       aiPartnerActive,
       enqueueTts,
       localParticipant?.identity,
@@ -7033,12 +8500,12 @@ function LiveKitConference({
       roomId,
       scheduleCaptionClear,
       sendCaption,
-      guestTtsToken,
       guestTtsEnabled,
+      resolveGuestTranslationForTarget,
       ttsEnabled,
       speakGuestCaption,
-      sourceLanguage,
-      sourceLanguageName,
+      activeSpeechLanguageCode,
+      activeSpeechLanguageName,
       requestAiPartnerReply,
       effectiveTranslationEnabled,
       translationUnavailableMessage,
@@ -7050,6 +8517,113 @@ function LiveKitConference({
       pushToTalkDraftTimerRef.current = null;
     }
   }, []);
+  const requestPushToTalkDraftReview = useCallback(
+    async (
+      draftId: number,
+      transcript: string,
+      captureSource: PushToTalkDraftCaptureSource = "speech"
+    ) => {
+      if (!shouldUsePushToTalkDraftReview) return;
+      const normalizedTranscript = normalizeComparableText(transcript);
+      if (!normalizedTranscript) return;
+      const cacheKey = `${activeSpeechLanguageCode}:${captureSource}:${normalizedTranscript}`;
+      const cached = pushToTalkDraftReviewCacheRef.current.get(cacheKey);
+      if (cached) {
+        if (pushToTalkDraftIdRef.current !== draftId) return;
+        setPushToTalkDraftReview(cached);
+        setPushToTalkDraftReviewBusy(false);
+        return;
+      }
+
+      pushToTalkDraftReviewAbortRef.current?.abort();
+      const requestController = new AbortController();
+      pushToTalkDraftReviewAbortRef.current = requestController;
+      const requestId = ++pushToTalkDraftReviewRequestRef.current;
+      setPushToTalkDraftReview(null);
+      setPushToTalkDraftReviewBusy(true);
+      try {
+        const review = await reviewPushToTalkDraftWithOpenAi(transcript, activeSpeechLanguageName, {
+          signal: requestController.signal,
+          targetCode: activeSpeechLanguageCode,
+          guestToken: guestTtsToken,
+          mode: pushToTalkDraftReviewMode,
+          captureSource,
+        });
+        if (
+          requestId !== pushToTalkDraftReviewRequestRef.current ||
+          pushToTalkDraftIdRef.current !== draftId
+        ) {
+          return;
+        }
+        pushToTalkDraftReviewCacheRef.current.set(cacheKey, review);
+        setPushToTalkDraftReview(review);
+      } catch (err) {
+        if (
+          requestController.signal.aborted ||
+          (err instanceof Error && err.name === "AbortError")
+        ) {
+          return;
+        }
+        if (
+          requestId !== pushToTalkDraftReviewRequestRef.current ||
+          pushToTalkDraftIdRef.current !== draftId
+        ) {
+          return;
+        }
+        const message =
+          err instanceof Error ? err.message : "Analyse avant envoi indisponible.";
+        setCaptionError(
+          `${pushToTalkDraftReviewMode === "translation" ? "Verification avant traduction" : "Verification avant envoi"}: ${toFriendlyAiError(message)}`
+        );
+        setPushToTalkDraftReview({
+          status: "review",
+          message: "Analyse indisponible. Corrige manuellement ou envoie tel quel.",
+          correctedText: "",
+          naturalText: "",
+          familiarText: "",
+          reviewedText: transcript,
+        });
+      } finally {
+        if (pushToTalkDraftReviewAbortRef.current === requestController) {
+          pushToTalkDraftReviewAbortRef.current = null;
+        }
+        if (
+          requestId === pushToTalkDraftReviewRequestRef.current &&
+          pushToTalkDraftIdRef.current === draftId
+        ) {
+          setPushToTalkDraftReviewBusy(false);
+        }
+      }
+    },
+    [
+      activeSpeechLanguageCode,
+      activeSpeechLanguageName,
+      guestTtsToken,
+      pushToTalkDraftReviewMode,
+      shouldUsePushToTalkDraftReview,
+    ]
+  );
+  const openPushToTalkManualDraft = useCallback(
+    (message: string, elapsedSeconds: number, initialText = "") => {
+      const transcript = initialText.trim();
+      clearPushToTalkDraftTimer();
+      const draftId = pushToTalkDraftIdRef.current + 1;
+      pushToTalkDraftIdRef.current = draftId;
+      setPushToTalkDraft({
+        id: draftId,
+        transcript,
+        elapsedSeconds: Math.max(1, Math.floor(elapsedSeconds || 1)),
+        captureSource: transcript ? "recording" : "manual",
+        requiresExplicitConfirmation: true,
+      });
+      setPushToTalkDraftText(transcript);
+      resetPushToTalkDraftReview();
+      setPushToTalkDraftReview(buildManualPushToTalkDraftReview(message, transcript));
+      setPushToTalkDraftEditing(true);
+      setCaptionError(message);
+    },
+    [clearPushToTalkDraftTimer, resetPushToTalkDraftReview]
+  );
   const submitPushToTalkDraft = useCallback(
     async (overrideText?: string) => {
       const draft = pushToTalkDraft;
@@ -7060,65 +8634,88 @@ function LiveKitConference({
         return;
       }
       clearPushToTalkDraftTimer();
+      resetPushToTalkDraftReview();
       pushToTalkDraftIdRef.current += 1;
       setPushToTalkDraft(null);
       setPushToTalkDraftEditing(false);
       setPushToTalkDraftText("");
       setPushToTalkGestureHint("");
-      if (translationController) {
-        const consumed = await onConsumeTranslationSeconds(draft.elapsedSeconds, "local");
-        if (!consumed) {
-          setCaptionError(translationUnavailableMessage);
-          return;
-        }
+      const deliveryGate = translationController
+        ? onConsumeTranslationSeconds(draft.elapsedSeconds, "local")
+        : undefined;
+      try {
+        await publishTalkieLock("claim");
+        await translateAndBroadcast(finalTranscript, draft.elapsedSeconds, deliveryGate);
+      } finally {
+        void publishTalkieLock("release");
       }
-      await translateAndBroadcast(finalTranscript, draft.elapsedSeconds);
     },
     [
       clearPushToTalkDraftTimer,
       onConsumeTranslationSeconds,
+      publishTalkieLock,
       pushToTalkDraft,
       pushToTalkDraftText,
+      resetPushToTalkDraftReview,
       translationController,
-      translationUnavailableMessage,
       translateAndBroadcast,
     ]
   );
   const queuePushToTalkDraft = useCallback(
-    (rawTranscript: string, elapsedSeconds: number) => {
+    (
+      rawTranscript: string,
+      elapsedSeconds: number,
+      options: QueuePushToTalkDraftOptions = {}
+    ) => {
       const transcript = rawTranscript.trim();
-      if (!transcript) {
-        setCaptionError("Aucune voix detectee. Maintiens le bouton puis parle.");
+      if (!transcript && !options.forceEditing) {
+        void publishTalkieLock("release");
+        setCaptionError(ui.noVoiceDetected);
         return;
       }
       clearPushToTalkDraftTimer();
+      void publishTalkieLock("release");
       const draftId = pushToTalkDraftIdRef.current + 1;
       pushToTalkDraftIdRef.current = draftId;
       const draft: PushToTalkDraft = {
         id: draftId,
         transcript,
         elapsedSeconds: Math.max(1, Math.floor(elapsedSeconds || 1)),
+        captureSource: options.captureSource || "speech",
+        requiresExplicitConfirmation: Boolean(options.requiresExplicitConfirmation),
       };
       setPushToTalkDraft(draft);
       setPushToTalkDraftText(transcript);
-      const requireCorrection = shouldForcePushToTalkCorrection(transcript);
-      setPushToTalkDraftEditing(requireCorrection);
-      if (requireCorrection) {
-        setCaptionError(
-          "Vérifie la phrase captée puis clique Envoyer. La détection semble incomplète."
-        );
+      resetPushToTalkDraftReview();
+      if (options.reviewOverride) {
+        setPushToTalkDraftReview(options.reviewOverride);
+      }
+      const requireCorrection = transcript ? shouldForcePushToTalkCorrection(transcript) : true;
+      const shouldStartEditing = Boolean(options.forceEditing) || requireCorrection;
+      setPushToTalkDraftEditing(shouldStartEditing);
+      if (shouldStartEditing) {
+        setCaptionError(options.reviewOverride?.message || ui.incompleteDetection);
         return;
       }
-      pushToTalkDraftTimerRef.current = setTimeout(() => {
-        if (pushToTalkDraftIdRef.current !== draftId) return;
-        void submitPushToTalkDraft(transcript);
-      }, PUSH_TO_TALK_AUTO_SEND_MS);
+      if (shouldUsePushToTalkDraftReview) {
+        void requestPushToTalkDraftReview(draftId, transcript, draft.captureSource);
+      }
     },
-    [clearPushToTalkDraftTimer, submitPushToTalkDraft]
+    [
+      clearPushToTalkDraftTimer,
+      publishTalkieLock,
+      requestPushToTalkDraftReview,
+      resetPushToTalkDraftReview,
+      shouldUsePushToTalkDraftReview,
+      ui.incompleteDetection,
+      ui.noVoiceDetected,
+    ]
   );
   const cancelPushToTalkDraft = useCallback(
     (message = "Capture annulee.") => {
       clearPushToTalkDraftTimer();
+      resetPushToTalkDraftReview();
+      void publishTalkieLock("release");
       pushToTalkDraftIdRef.current += 1;
       setPushToTalkDraft(null);
       setPushToTalkDraftText("");
@@ -7126,7 +8723,7 @@ function LiveKitConference({
       setPushToTalkGestureHint("");
       setCaptionError(message);
     },
-    [clearPushToTalkDraftTimer]
+    [clearPushToTalkDraftTimer, publishTalkieLock, resetPushToTalkDraftReview]
   );
   const cancelPushToTalkCapture = useCallback(
     (message = "Capture annulee.") => {
@@ -7152,6 +8749,7 @@ function LiveKitConference({
       pushToTalkRecorderRef.current = null;
       pushToTalkChunksRef.current = [];
       releasePushToTalkStream();
+      void publishTalkieLock("release");
       setPushToTalkActive(false);
       setPushToTalkBusy(false);
       cancelPushToTalkDraft(message);
@@ -7166,12 +8764,64 @@ function LiveKitConference({
       void stopTts();
       stopGuestCaptionPlayback();
     },
-    [cancelPushToTalkDraft, releasePushToTalkStream, stopGuestCaptionPlayback, stopTts]
+    [
+      cancelPushToTalkDraft,
+      publishTalkieLock,
+      releasePushToTalkStream,
+      stopGuestCaptionPlayback,
+      stopTts,
+    ]
   );
   const setPushToTalkDraftEditMode = useCallback(() => {
     clearPushToTalkDraftTimer();
     setPushToTalkDraftEditing(true);
   }, [clearPushToTalkDraftTimer]);
+  const handlePushToTalkDraftTextChange = useCallback(
+    (nextValue: string) => {
+      clearPushToTalkDraftTimer();
+      resetPushToTalkDraftReview();
+      setPushToTalkDraftEditing(true);
+      setPushToTalkDraftText(nextValue);
+    },
+    [clearPushToTalkDraftTimer, resetPushToTalkDraftReview]
+  );
+  const applyPushToTalkDraftSuggestion = useCallback(
+    (nextValue: string) => {
+      clearPushToTalkDraftTimer();
+      resetPushToTalkDraftReview();
+      setPushToTalkDraftText(nextValue);
+      setPushToTalkDraftEditing(true);
+    },
+    [clearPushToTalkDraftTimer, resetPushToTalkDraftReview]
+  );
+  const pushToTalkDraftReviewCurrent = isPushToTalkDraftReviewCurrent(
+    pushToTalkDraftReview,
+    pushToTalkDraftText
+  );
+  const pushToTalkDraftAutoSendEnabled =
+    Boolean(pushToTalkDraft) &&
+    !pushToTalkDraftEditing &&
+    !pushToTalkDraft?.requiresExplicitConfirmation &&
+    !shouldForcePushToTalkCorrection(pushToTalkDraftText) &&
+    (!shouldUsePushToTalkDraftReview ||
+      (!pushToTalkDraftReviewBusy &&
+        pushToTalkDraftReviewCurrent &&
+        pushToTalkDraftReview?.status === "ok"));
+  useEffect(() => {
+    clearPushToTalkDraftTimer();
+    if (!pushToTalkDraft || !pushToTalkDraftAutoSendEnabled) return;
+    const draftId = pushToTalkDraft.id;
+    pushToTalkDraftTimerRef.current = setTimeout(() => {
+      if (pushToTalkDraftIdRef.current !== draftId) return;
+      void submitPushToTalkDraft();
+    }, PUSH_TO_TALK_AUTO_SEND_MS);
+    return clearPushToTalkDraftTimer;
+  }, [
+    clearPushToTalkDraftTimer,
+    pushToTalkDraft,
+    pushToTalkDraftAutoSendEnabled,
+    submitPushToTalkDraft,
+  ]);
 
   const startPushToTalkRecognition = useCallback(() => {
     if (!effectiveTranslationEnabled) {
@@ -7179,13 +8829,17 @@ function LiveKitConference({
       return;
     }
     if (!captionsEnabled) return;
+    if (isTalkieLockedByOther) {
+      setCaptionError(talkieLockedMessage);
+      return;
+    }
     if (pushToTalkPressedRef.current) return;
     if (pushToTalkBusy || aiPartnerBusyRef.current) {
       interruptCurrentTurn();
       showPushToTalkInterruptHint();
     }
     if (realtimeEnabled) {
-      setCaptionError("Desactive Realtime pour utiliser le mode appuyer pour parler.");
+      setCaptionError(ui.disableRealtimeForPushToTalk);
       return;
     }
     if (!captionsSupported || typeof window === "undefined") return;
@@ -7203,8 +8857,9 @@ function LiveKitConference({
     pushToTalkStartedAtRef.current = Date.now();
     setCaptionError("");
     setPushToTalkActive(true);
+    void publishTalkieLock("claim");
 
-    if (speechRecognitionSupported) {
+    if (speechRecognitionSupported && !preferRecorderPushToTalk) {
       const maybeWindow = window as unknown as {
         SpeechRecognition?: new () => any;
         webkitSpeechRecognition?: new () => any;
@@ -7213,7 +8868,7 @@ function LiveKitConference({
       if (SpeechCtor) {
         let finalTranscript = "";
         const recognition = new SpeechCtor();
-        recognition.lang = sourceLanguageLocale || "fr-FR";
+        recognition.lang = activeSpeechLanguageLocale || "fr-FR";
         recognition.continuous = true;
         recognition.interimResults = true;
         recognition.maxAlternatives = 1;
@@ -7245,8 +8900,9 @@ function LiveKitConference({
           if (sessionId !== pushToTalkSessionRef.current) return;
           const reason = String(event?.error || "Erreur micro");
           if (reason === "aborted") return;
+          void publishTalkieLock("release");
           if (reason === "no-speech") {
-            setCaptionError("Aucune voix detectee. Maintiens le bouton puis parle.");
+      setCaptionError(ui.noVoiceDetected);
             return;
           }
           const friendly = toFriendlyAiError(reason);
@@ -7268,12 +8924,16 @@ function LiveKitConference({
           );
           pushToTalkStartedAtRef.current = null;
           if (!transcript) {
+            void publishTalkieLock("release");
             if (!pushToTalkBusy) {
-              setCaptionError("Aucune voix detectee. Maintiens le bouton puis parle.");
+              setCaptionError(ui.noVoiceDetected);
             }
             return;
           }
-          queuePushToTalkDraft(transcript, elapsedSeconds);
+          void publishTalkieLock("release");
+          queuePushToTalkDraft(transcript, elapsedSeconds, {
+            captureSource: "speech",
+          });
         };
         try {
           recognition.start();
@@ -7286,6 +8946,7 @@ function LiveKitConference({
 
     if (typeof MediaRecorder === "undefined" || !navigator.mediaDevices?.getUserMedia) {
       setPushToTalkActive(false);
+      void publishTalkieLock("release");
       setCaptionError("Push-to-talk indisponible sur ce navigateur.");
       return;
     }
@@ -7314,6 +8975,7 @@ function LiveKitConference({
         };
         recorder.onerror = () => {
           if (sessionId !== pushToTalkSessionRef.current) return;
+          void publishTalkieLock("release");
           setCaptionError("Enregistrement audio interrompu.");
           setPushToTalkBusy(false);
           setPushToTalkActive(false);
@@ -7329,6 +8991,7 @@ function LiveKitConference({
           releasePushToTalkStream();
           if (chunks.length === 0) {
             pushToTalkStartedAtRef.current = null;
+            void publishTalkieLock("release");
             setPushToTalkBusy(false);
             return;
           }
@@ -7336,31 +8999,52 @@ function LiveKitConference({
           const blob = new Blob(chunks, { type: mimeTypeValue });
           if (blob.size < 1400) {
             pushToTalkStartedAtRef.current = null;
+            void publishTalkieLock("release");
             setCaptionError("Audio trop court. Maintiens le bouton un peu plus longtemps.");
             setPushToTalkBusy(false);
             return;
           }
           void (async () => {
+            const elapsedSeconds = Math.max(
+              1,
+              Math.round(
+                ((Date.now() - (pushToTalkStartedAtRef.current ?? Date.now())) / 1000) || 1
+              )
+            );
+            pushToTalkStartedAtRef.current = null;
             try {
               if (sessionId !== pushToTalkSessionRef.current) return;
               setPushToTalkBusy(true);
               const transcript = await transcribePushToTalkBlob(blob, mimeTypeValue);
               if (sessionId !== pushToTalkSessionRef.current) return;
               if (!transcript) {
-                setCaptionError("Aucune voix detectee. Maintiens le bouton puis parle.");
+                void publishTalkieLock("release");
+                if (aiTrainingAutoStart) {
+                  openPushToTalkManualDraft(
+                    ui.mobileTranscriptionUnclear,
+                    elapsedSeconds
+                  );
+                  return;
+                }
+                setCaptionError(ui.noVoiceDetected);
                 return;
               }
-              const elapsedSeconds = Math.max(
-                1,
-                Math.round(
-                  ((Date.now() - (pushToTalkStartedAtRef.current ?? Date.now())) / 1000) || 1
-                )
-              );
-              pushToTalkStartedAtRef.current = null;
-              queuePushToTalkDraft(transcript, elapsedSeconds);
+              void publishTalkieLock("release");
+              queuePushToTalkDraft(transcript, elapsedSeconds, {
+                captureSource: "recording",
+                requiresExplicitConfirmation: aiTrainingAutoStart,
+              });
             } catch (err) {
               if (sessionId !== pushToTalkSessionRef.current) return;
+              void publishTalkieLock("release");
               const message = err instanceof Error ? err.message : "Transcription impossible.";
+              if (aiTrainingAutoStart) {
+                openPushToTalkManualDraft(
+                  `${ui.mobileTranscriptionFailed} (${toFriendlyAiError(message)})`,
+                  elapsedSeconds
+                );
+                return;
+              }
               setCaptionError(`Traduction: ${toFriendlyAiError(message)}`);
             } finally {
               if (sessionId !== pushToTalkSessionRef.current) return;
@@ -7377,6 +9061,7 @@ function LiveKitConference({
         pushToTalkStartedAtRef.current = null;
         setPushToTalkActive(false);
         setPushToTalkBusy(false);
+        void publishTalkieLock("release");
         const message = err instanceof Error ? err.message : "Acces micro refuse.";
         setCaptionError(`Micro: ${toFriendlyAiError(message)}`);
         if (/denied|notallowed|permission/i.test(message)) {
@@ -7395,17 +9080,27 @@ function LiveKitConference({
     pushToTalkBusy,
     realtimeEnabled,
     releasePushToTalkStream,
-    sourceLanguageLocale,
+    activeSpeechLanguageLocale,
+    preferRecorderPushToTalk,
     speechRecognitionSupported,
     interruptCurrentTurn,
+    isTalkieLockedByOther,
+    publishTalkieLock,
     showPushToTalkInterruptHint,
     stopGuestCaptionPlayback,
     stopPushToTalkRecognition,
     stopTts,
     transcribePushToTalkBlob,
     effectiveTranslationEnabled,
+    aiTrainingAutoStart,
+    openPushToTalkManualDraft,
     queuePushToTalkDraft,
     translationUnavailableMessage,
+    talkieLockedMessage,
+    ui.disableRealtimeForPushToTalk,
+    ui.mobileTranscriptionFailed,
+    ui.mobileTranscriptionUnclear,
+    ui.noVoiceDetected,
   ]);
   const handlePushToTalkPointerDown = useCallback(
     (event: any) => {
@@ -7478,20 +9173,24 @@ function LiveKitConference({
   useEffect(() => {
     if (!captionsEnabled || realtimeEnabled || !effectiveTranslationEnabled) {
       stopPushToTalkRecognition();
+      void publishTalkieLock("release");
       setPushToTalkActive(false);
       setPushToTalkBusy(false);
       clearPushToTalkDraftTimer();
       setPushToTalkDraft(null);
       setPushToTalkDraftText("");
       setPushToTalkDraftEditing(false);
+      resetPushToTalkDraftReview();
       setPushToTalkGestureHint("");
     }
   }, [
     captionsEnabled,
     realtimeEnabled,
+    publishTalkieLock,
     stopPushToTalkRecognition,
     effectiveTranslationEnabled,
     clearPushToTalkDraftTimer,
+    resetPushToTalkDraftReview,
   ]);
 
   const retryMicrophone = async () => {
@@ -7506,6 +9205,7 @@ function LiveKitConference({
   const toggleCamera = async () => {
     if (!localParticipant) return;
     if (isTogglingCamera) return;
+    if (roomIsRecovering) return;
     setIsTogglingCamera(true);
     setMediaError("");
 
@@ -7642,6 +9342,7 @@ function LiveKitConference({
     if (!isIOS || !localParticipant) return;
 
     const refreshCamera = (eventType?: "visibilitychange" | "pageshow" | "orientationchange") => {
+      if (roomIsRecovering) return;
       if (eventType === "pageshow" && initialPageShowRef.current) {
         initialPageShowRef.current = false;
         return;
@@ -7672,7 +9373,7 @@ function LiveKitConference({
       window.removeEventListener("pageshow", handlePageShow);
       window.removeEventListener("orientationchange", handleOrientation);
     };
-  }, [isCameraEnabled, localParticipant]);
+  }, [isCameraEnabled, localParticipant, roomIsRecovering]);
 
   const handleTrackSelect = useCallback(
     (trackRef: TrackReferenceOrPlaceholder) => {
@@ -7800,11 +9501,26 @@ function LiveKitConference({
     },
     [addTextEntry, sendTextEntry]
   );
+  const ensureShareInviteId = useCallback(async () => {
+    if (!isHost || !roomId) return "";
+    if (shareInviteId) return shareInviteId;
+    const inviteId = await createLivekitRoomInviteId(roomId);
+    setShareInviteId((current) => current || inviteId);
+    return inviteId;
+  }, [isHost, roomId, shareInviteId]);
+  useEffect(() => {
+    setShareInviteId("");
+  }, [roomId]);
+  useEffect(() => {
+    if (!isHost || !roomId) return;
+    void ensureShareInviteId().catch(() => {});
+  }, [ensureShareInviteId, isHost, roomId]);
 
-  const inviteLinks = buildInviteLinks(roomId);
+  const inviteLinks = shareInviteId ? buildInviteLinks(shareInviteId) : { smart: "" };
 
   const copyInvite = async (kind: InviteLinkKind) => {
-    const link = inviteLinks[kind];
+    const activeInviteId = await ensureShareInviteId().catch(() => "");
+    const link = activeInviteId ? buildInviteLinks(activeInviteId)[kind] : inviteLinks[kind];
     if (!link) return;
     try {
       await navigator.clipboard.writeText(link);
@@ -7815,27 +9531,198 @@ function LiveKitConference({
     }
   };
   const shareInvite = async () => {
-    const link = inviteLinks.smart;
+    const activeInviteId = await ensureShareInviteId().catch(() => "");
+    const link = activeInviteId ? buildInviteLinks(activeInviteId).smart : inviteLinks.smart;
     if (!link) return;
-    const shareTitle = "Invitation BFZoom";
-    const shareText = "Rejoins ma visioconference BFZoom avec ce lien.";
-    try {
-      if (typeof navigator !== "undefined" && typeof navigator.share === "function") {
-        await navigator.share({
-          title: shareTitle,
-          text: shareText,
-          url: link,
-        });
-        setInviteCopied("shared");
-      } else {
-        await navigator.clipboard.writeText(link);
-        setInviteCopied("smart");
-      }
-      setTimeout(() => setInviteCopied(null), 1500);
-    } catch {
+    if (typeof navigator === "undefined" || typeof navigator.share !== "function") {
       setInviteCopied(null);
+      return;
     }
+    const shareTitle = ui.inviteEmailSubject;
+    const shareText = ui.inviteEmailBody;
+    void navigator
+      .share({
+        title: shareTitle,
+        text: shareText,
+        url: link,
+      })
+      .then(() => {
+        setInviteCopied("shared");
+        setTimeout(() => setInviteCopied(null), 1500);
+      })
+      .catch(() => {
+        setInviteCopied(null);
+      });
   };
+  const pushToTalkDisabled =
+    translationControlsDisabled ||
+    !captionsSupported ||
+    !pushToTalkSupported ||
+    realtimeEnabled ||
+    isTalkieLockedByOther;
+  const pushToTalkTitle = translationControlsDisabled
+    ? translationUnavailableMessage
+    : isTalkieLockedByOther
+    ? talkieLockedMessage
+    : realtimeEnabled
+    ? "Desactive Realtime pour utiliser ce mode."
+    : "Maintiens le bouton pendant que tu parles, puis relache pour traduire.";
+  const pushToTalkOverlay =
+    captionsEnabled && !aiPartnerActive ? (
+      <div className="pointer-events-none absolute inset-x-0 bottom-6 z-30 flex justify-center px-4 sm:bottom-8">
+        <button
+          type="button"
+          onClick={(event) => event.stopPropagation()}
+          onPointerDown={handlePushToTalkPointerDown}
+          onPointerMove={handlePushToTalkPointerMove}
+          onPointerUp={handlePushToTalkPointerEnd}
+          onPointerCancel={(event) => handlePushToTalkPointerEnd(event, true)}
+          onTouchStart={(event) => {
+            event.preventDefault();
+            startPushToTalkRecognition();
+          }}
+          onTouchEnd={(event) => {
+            event.preventDefault();
+            handlePushToTalkPointerEnd();
+          }}
+          onTouchCancel={(event) => {
+            event.preventDefault();
+            handlePushToTalkPointerEnd(undefined, true);
+          }}
+          onMouseDown={startPushToTalkRecognition}
+          onMouseUp={() => handlePushToTalkPointerEnd()}
+          onMouseLeave={() => {
+            if (!pushToTalkPressedRef.current) return;
+            handlePushToTalkPointerEnd(undefined, true);
+          }}
+          disabled={pushToTalkDisabled}
+          className={`pointer-events-auto inline-flex min-h-11 w-full max-w-sm items-center justify-center gap-2 rounded-full border px-5 py-3 text-[13px] font-semibold shadow-2xl ring-1 ring-black/40 transition ${
+            pushToTalkActive
+              ? "border-rose-200! bg-rose-600! text-white!"
+              : pushToTalkBusy
+              ? "border-sky-200! bg-sky-600! text-white!"
+              : "border-emerald-200! bg-emerald-700! text-white! hover:bg-emerald-600!"
+          } disabled:cursor-not-allowed disabled:opacity-50`}
+          title={pushToTalkTitle}
+          style={{
+            backgroundColor: pushToTalkActive
+              ? "rgba(225, 29, 72, 0.95)"
+              : pushToTalkBusy
+              ? "rgba(2, 132, 199, 0.95)"
+              : "rgba(4, 120, 87, 0.95)",
+            color: "#ffffff",
+            borderColor: "rgba(226, 232, 240, 0.95)",
+          }}
+        >
+          <Mic className="h-4 w-4" />
+          <span className="whitespace-nowrap">
+            {pushToTalkActive
+              ? ui.releaseToTranslate
+              : pushToTalkBusy
+              ? ui.translating
+              : ui.holdToTalk}
+          </span>
+        </button>
+      </div>
+    ) : null;
+  const languageOverlay = !aiPartnerActive ? (
+    <div className="pointer-events-none absolute left-4 top-4 z-30 w-[min(22rem,calc(100%-2rem))]">
+      <details
+        onClick={(event) => event.stopPropagation()}
+        className="pointer-events-auto rounded-2xl border px-3 py-2 text-[11px] text-slate-100 shadow-xl backdrop-blur"
+        style={{
+          backgroundColor: "rgba(2, 6, 23, 0.9)",
+          color: "#f8fafc",
+          borderColor: "rgba(100, 116, 139, 0.8)",
+        }}
+      >
+        <summary className="cursor-pointer select-none text-[10px] font-semibold uppercase tracking-[0.18em] text-sky-200/90">
+          {ui.translationLanguages}
+        </summary>
+        <div className="mt-3 space-y-3">
+          <label className="flex flex-col gap-1">
+            <span className="font-semibold text-slate-100">{ui.spokenLanguage}</span>
+            <select
+              value={sourceLanguage}
+              onChange={(event) =>
+                onChangeSourceLanguage(event.target.value as SourceLanguageOption["code"])
+              }
+              disabled={translationControlsDisabled}
+              className="rounded-md border border-slate-500 bg-slate-900 px-2 py-2 text-[11px] text-slate-100"
+              style={{
+                backgroundColor: "rgba(15, 23, 42, 0.95)",
+                color: "#f8fafc",
+                borderColor: "rgba(100, 116, 139, 0.85)",
+              }}
+            >
+              {SOURCE_LANGUAGE_OPTIONS.map((option) => (
+                <option key={option.code} value={option.code}>
+                  {`${option.name} (${option.label})`}
+                </option>
+              ))}
+            </select>
+          </label>
+          {!isChatSession && !aiTrainingAutoStart && (
+            <button
+              type="button"
+              onClick={onToggleGuestTts}
+              disabled={translationControlsDisabled}
+              className={`inline-flex w-full min-h-10 items-center justify-center gap-2 rounded-full border px-3 py-2 text-[12px] font-semibold shadow-sm disabled:cursor-not-allowed disabled:opacity-55 ${
+                guestTtsEnabled
+                  ? "border-sky-300/80 bg-sky-600/90 text-white"
+                  : "border-slate-500/70 bg-slate-800/80 text-slate-100"
+              }`}
+              title="Active la voix traduite locale pour s'exercer."
+              style={{
+                backgroundColor: guestTtsEnabled
+                  ? "rgba(2, 132, 199, 0.95)"
+                  : "rgba(15, 23, 42, 0.95)",
+                color: "#ffffff",
+                borderColor: guestTtsEnabled
+                  ? "rgba(125, 211, 252, 0.95)"
+                  : "rgba(148, 163, 184, 0.85)",
+              }}
+            >
+              <Volume2 className="h-4 w-4" />
+              <span>
+                {ui.localPlayback}:{" "}
+                {translationControlsDisabled ? ui.blocked : guestTtsEnabled ? "ON" : "OFF"}
+              </span>
+            </button>
+          )}
+          <label className="flex flex-col gap-1">
+            <span className="font-semibold text-slate-100">
+              {guestTtsEnabled ? ui.communicationLanguage : ui.personalReceptionLanguage}
+            </span>
+            <select
+              value={localReceptionTarget}
+              onChange={(event) =>
+                handleLocalReceptionTargetChange(event.target.value as CaptionTarget)
+              }
+              disabled={translationControlsDisabled}
+              className="rounded-md border border-slate-500 bg-slate-900 px-2 py-2 text-[11px] text-slate-100"
+              style={{
+                backgroundColor: "rgba(15, 23, 42, 0.95)",
+                color: "#f8fafc",
+                borderColor: "rgba(100, 116, 139, 0.85)",
+              }}
+            >
+              {CAPTION_TARGETS_CONFIG.map((target) => (
+                <option key={target.code} value={target.code}>
+                  {`${target.name} (${target.label})`}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="inline-flex items-center gap-1">
+            <span className="text-[10px] text-slate-300">{ui.info}</span>
+            <InfoBubble text={localReceptionHint} label={ui.receptionInfoLabel} align="right" />
+          </div>
+        </div>
+      </details>
+    </div>
+  ) : null;
+
   return (
     <div
       className="lk-video-conference"
@@ -7898,17 +9785,17 @@ function LiveKitConference({
             </div>
           )}
           {showCaptionStack && (
-            <div className="absolute inset-x-0 bottom-[calc(var(--lk-control-bar-height)+16px)] z-20 flex justify-center px-4">
+            <div className="pointer-events-none absolute inset-x-0 top-18 z-20 flex justify-center px-4 sm:top-20">
               <div className="w-full max-w-4xl space-y-2">
                 {sourceText && (
                   <div className="rounded-xl border border-slate-400/70 bg-slate-950/90 px-3 py-2 text-slate-50 shadow-lg backdrop-blur">
                     <div className="flex items-center justify-between gap-2">
                       <p className="text-[10px] font-semibold uppercase tracking-wide text-sky-200/90">
-                        Source ({sourceLanguageName})
+                        {ui.sourceLabel(activeSpeechLanguageName)}
                       </p>
                       {sourceFromLocal && (
                         <span className="rounded-full border border-emerald-300/70 bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-100">
-                          Oral direct
+                          {ui.directSpeech}
                         </span>
                       )}
                     </div>
@@ -7928,7 +9815,7 @@ function LiveKitConference({
                 {captionText && (
                   <div className="rounded-xl border border-sky-300/80 bg-slate-950/90 px-4 py-2 text-center text-slate-50 shadow-lg backdrop-blur">
                     <p className="text-[10px] font-semibold uppercase tracking-wide text-sky-200/90">
-                      Traduction ({captionTargetLabel})
+                      {ui.translationLabel(captionTargetLabel)}
                     </p>
                     <p
                       className={
@@ -7968,14 +9855,20 @@ function LiveKitConference({
           )}
           {aiPartnerActive ? (
             <AiPartnerAvatarStage
+              roomId={roomId}
               sourceLanguageCode={sourceLanguage}
               sourceLanguageName={sourceLanguageName}
-              targetLanguageName={localReceptionTargetName}
+              spokenLanguageCode={activeSpeechLanguageCode}
+              spokenLanguageName={activeSpeechLanguageName}
+              targetLanguageName={captionDisplayTargetName}
               sourceText={sourceText}
               userTranslatedText={captionText}
               userPhoneticText={captionPhoneticText}
               coachText={aiPartnerDisplayText}
               coachSourceText={aiPartnerLastReply}
+              coachTranslatedText={aiPartnerLastTranslatedReply}
+              coachFeedbackSourceText={aiPartnerFeedbackSource}
+              coachFeedbackFrenchText={aiPartnerFeedbackFrench}
               coachFeedback={aiPartnerFeedbackDisplay}
               coachHelpView={aiPartnerFeedbackView}
               coachHelpFrenchBusy={aiPartnerFeedbackFrenchBusy}
@@ -7987,12 +9880,17 @@ function LiveKitConference({
               avatarTheme={aiPartnerAvatarTheme}
               coachPhoneticText={aiPartnerCoachPhoneticText}
               coachPhoneticBusy={aiPartnerCoachPhoneticBusy}
-              coachSavedToNotebook={aiPartnerCoachSavedToNotebook}
+              realtimeVoice={realtimeVoice}
               pushToTalkActive={pushToTalkActive}
               pushToTalkBusy={pushToTalkBusy}
               pushToTalkDisabled={
-                translationControlsDisabled || !captionsSupported || !pushToTalkSupported || realtimeEnabled
+                translationControlsDisabled ||
+                !captionsSupported ||
+                !pushToTalkSupported ||
+                realtimeEnabled ||
+                isTalkieLockedByOther
               }
+              pushToTalkDraftVisible={Boolean(pushToTalkDraft)}
               onReplayUserTranslation={replayAiPartnerUserTranslation}
               onReplayCoach={replayAiPartnerCoach}
               onPushToTalkPointerDown={handlePushToTalkPointerDown}
@@ -8000,17 +9898,18 @@ function LiveKitConference({
               onPushToTalkPointerEnd={handlePushToTalkPointerEnd}
               onPushToTalkStart={startPushToTalkRecognition}
               onChangeSourceLanguage={onChangeSourceLanguage}
+              respondInTrainingLanguage={respondInTrainingLanguage}
+              onChangeRespondInTrainingLanguage={onChangeRespondInTrainingLanguage}
               trainingTarget={localReceptionTarget}
               onChangeTrainingTarget={handleLocalReceptionTargetChange}
               onSetCoachHelpView={setAiPartnerFeedbackView}
               onEnsureCoachHelpFrench={ensureAiPartnerFeedbackFrench}
-              onSaveCoachToNotebook={saveAiPartnerCoachToNotebook}
-              onOpenNotebook={onOpenNotebook}
               onToggleView={setAiPartnerView}
             />
           ) : isIPhone ? (
             <div className="lk-focus-layout-wrapper">
-              <div className="bf-iphone-layout" onClick={(event) => event.stopPropagation()}>
+              <div className="bf-iphone-layout relative" onClick={(event) => event.stopPropagation()}>
+                {languageOverlay}
                 <div className="bf-iphone-focus">
                   {resolvedIphoneFocus && <ParticipantTile trackRef={resolvedIphoneFocus} />}
                 </div>
@@ -8037,6 +9936,7 @@ function LiveKitConference({
                       </button>
                     ))}
                 </div>
+                {pushToTalkOverlay}
               </div>
             </div>
           ) : (
@@ -8080,11 +9980,9 @@ function LiveKitConference({
                     {screenShareTracks.length > 0 && (
                       <div className="pointer-events-none absolute inset-0 flex items-start justify-end p-3">
                         <span className="rounded-full bg-slate-900/80 px-3 py-1 text-[10px] text-white">
-                          {`Partage d’écran en cours${
+                          {ui.screenShareInProgress(
                             screenShareTracks[0]?.publication?.trackName
-                              ? ` • ${screenShareTracks[0].publication.trackName}`
-                              : ""
-                          }`}
+                          )}
                         </span>
                       </div>
                     )}
@@ -8094,17 +9992,15 @@ function LiveKitConference({
               {screenShareTracks.length > 0 && (
                 <div className="pointer-events-none absolute inset-0 flex items-start justify-end p-4">
                   <div className="pointer-events-auto rounded-full bg-slate-900/80 px-3 py-2 text-[11px] text-white">
-                    {`Partage d’écran en cours${
+                    {ui.screenShareInProgress(
                       screenShareTracks[0]?.publication?.trackName
-                        ? ` • ${screenShareTracks[0].publication.trackName}`
-                        : ""
-                    }`}
+                    )}
                     <button
                       onClick={() => setGalleryVisible((value) => !value)}
                       className="ml-3 rounded-full border border-slate-500/60 bg-slate-900/60 px-2 py-1 text-[10px] text-slate-200"
                       type="button"
                     >
-                      {galleryVisible ? "Masquer galerie" : "Afficher galerie"}
+                      {galleryVisible ? ui.hideGallery : ui.showGallery}
                     </button>
                   </div>
                 </div>
@@ -8113,16 +10009,18 @@ function LiveKitConference({
                 <div className="pointer-events-none absolute inset-0 flex items-end justify-center pb-6">
                   <button
                     onClick={() => {
-                      if (confirm("Arrêter le partage d’écran ?")) {
+                      if (confirm(ui.stopShareConfirm)) {
                         handleToggleScreenShare();
                       }
                     }}
                     className="pointer-events-auto rounded-full bg-rose-600 px-4 py-2 text-xs font-semibold text-white shadow-lg"
                   >
-                    Arrêter le partage
+                    {ui.stopSharing}
                   </button>
                 </div>
               )}
+              {languageOverlay}
+              {pushToTalkOverlay}
             </div>
           )}
           <div
@@ -8136,15 +10034,15 @@ function LiveKitConference({
                   <button
                     onClick={() => setInviteOpen(true)}
                     className="lk-button"
-                    aria-label="Partager le lien"
+                    aria-label={ui.shareAria}
                   >
                     <Share2 className="h-4 w-4" />
-                    <span className="hidden sm:inline">Partager</span>
+                    <span className="hidden sm:inline">{ui.share}</span>
                   </button>
                 )}
                 {isHost && !aiTrainingAutoStart && inviteCopied && (
                   <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-100">
-                    {getInviteCopiedLabel(inviteCopied)}
+                    {getInviteCopiedLabel(inviteCopied, locale)}
                   </span>
                 )}
               </div>
@@ -8159,14 +10057,14 @@ function LiveKitConference({
                   ) : (
                     <MicOff className="h-4 w-4 text-red-300" />
                   )}
-                  <span className="hidden text-slate-100 sm:inline">Micro</span>
+                  <span className="hidden text-slate-100 sm:inline">{ui.microphone}</span>
                 </TrackToggle>
                 <button
                   type="button"
                   onClick={toggleCamera}
                   disabled={isTogglingCamera}
                   className="lk-button"
-                  aria-label={isCameraEnabled ? "Couper la camera" : "Activer la camera"}
+                  aria-label={isCameraEnabled ? ui.disableCameraAria : ui.enableCameraAria}
                 >
                   {isCameraEnabled ? (
                     <Camera className="h-4 w-4 text-slate-100" />
@@ -8174,7 +10072,7 @@ function LiveKitConference({
                     <CameraOff className="h-4 w-4 text-red-300" />
                   )}
                   <span className="hidden text-slate-100 sm:inline">
-                    {isTogglingCamera ? "Camera..." : "Camera"}
+                    {isTogglingCamera ? ui.cameraBusy : ui.camera}
                   </span>
                 </button>
                 {isMobile && (
@@ -8182,10 +10080,10 @@ function LiveKitConference({
                     onClick={flipCamera}
                     className="lk-button"
                     disabled={!isCameraEnabled || isFlippingCamera}
-                    aria-label="Retourner la camera"
+                    aria-label={ui.flipCameraAria}
                   >
                     <SwitchCamera className="h-4 w-4 text-slate-100" />
-                    <span className="hidden text-slate-100 sm:inline">Retourner</span>
+                    <span className="hidden text-slate-100 sm:inline">{ui.flip}</span>
                   </button>
                 )}
                 <button
@@ -8193,15 +10091,15 @@ function LiveKitConference({
                   className={`lk-button ${isScreenSharing ? "bg-sky-600" : ""}`}
                 >
                   <ScreenShare className="h-4 w-4 text-slate-100" />
-                  <span className="hidden text-slate-100 sm:inline">Ecran</span>
+                  <span className="hidden text-slate-100 sm:inline">{ui.screen}</span>
                 </button>
                 <ChatToggle>
                   <MessageCircle className="h-4 w-4 text-slate-100" />
-                  <span className="hidden text-slate-100 sm:inline">Chat</span>
+                  <span className="hidden text-slate-100 sm:inline">{ui.chat}</span>
                 </ChatToggle>
                 <button onClick={onOpenSettings} className="lk-button">
                   <Settings className="h-4 w-4 text-slate-100" />
-                  <span className="hidden text-slate-100 sm:inline">Reglages</span>
+                  <span className="hidden text-slate-100 sm:inline">{ui.settings}</span>
                 </button>
               </div>
               <div className="flex items-center gap-2">
@@ -8219,7 +10117,7 @@ function LiveKitConference({
                   >
                     <Power className="h-4 w-4" />
                     <span className="hidden sm:inline">
-                      {endingRoomForAll ? "Fermeture..." : "Terminer pour tous"}
+                      {endingRoomForAll ? ui.ending : ui.endForAll}
                     </span>
                   </button>
                 )}
@@ -8229,7 +10127,7 @@ function LiveKitConference({
                   className="lk-disconnect-button bg-rose-600/90! text-white! hover:bg-rose-600!"
                 >
                   <LogOut className="h-4 w-4" />
-                  <span className="hidden sm:inline">Quitter</span>
+                  <span className="hidden sm:inline">{ui.leave}</span>
                 </button>
               </div>
             </div>
@@ -8237,158 +10135,12 @@ function LiveKitConference({
             {captionsEnabled && (
               <>
               <div className="mt-2 flex flex-wrap items-center gap-2">
-                {!isChatSession && !aiTrainingAutoStart && (
-                  <button
-                    type="button"
-                    onClick={onToggleGuestTts}
-                    disabled={translationControlsDisabled}
-                    className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold shadow-sm disabled:cursor-not-allowed disabled:opacity-55 ${
-                      guestTtsEnabled
-                        ? "border-sky-300/80 bg-sky-600/90 text-white"
-                        : "border-slate-500/70 bg-slate-800/80 text-slate-100"
-                    }`}
-                    title="Active la voix traduite locale pour s'exercer."
-                    style={{
-                      backgroundColor: guestTtsEnabled
-                        ? "rgba(2, 132, 199, 0.95)"
-                        : "rgba(15, 23, 42, 0.95)",
-                      color: "#ffffff",
-                      borderColor: guestTtsEnabled
-                        ? "rgba(125, 211, 252, 0.95)"
-                        : "rgba(148, 163, 184, 0.85)",
-                    }}
-                  >
-                    <Volume2 className="h-4 w-4" />
-                    <span>
-                      Lecture locale:{" "}
-                      {translationControlsDisabled ? "BLOQUE" : guestTtsEnabled ? "ON" : "OFF"}
-                    </span>
-                  </button>
-                )}
-                {!isChatSession && AI_PARTNER_TRAINING_ENABLED && !aiTrainingAutoStart && (
-                  <button
-                    type="button"
-                    onClick={() => setAiPartnerEnabled((value) => !value)}
-                    disabled={translationControlsDisabled || !aiPartnerAvailable || aiPartnerBusy}
-                    className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold shadow-sm disabled:cursor-not-allowed disabled:opacity-60 ${
-                      aiPartnerActive
-                        ? "border-amber-300/80 bg-amber-600/90 text-white"
-                        : "border-slate-500/70 bg-slate-800/80 text-slate-100"
-                    }`}
-                    style={{
-                      backgroundColor: aiPartnerActive
-                        ? "rgba(217, 119, 6, 0.95)"
-                        : "rgba(15, 23, 42, 0.95)",
-                      color: "#ffffff",
-                      borderColor: aiPartnerActive
-                        ? "rgba(252, 211, 77, 0.95)"
-                        : "rgba(148, 163, 184, 0.85)",
-                    }}
-                    title={
-                      !aiPartnerAvailable
-                        ? "Mode entrainement IA disponible uniquement en solo (sans invite)."
-                        : "Simule un interlocuteur IA dans la room."
-                    }
-                  >
-                    <Bot className="h-4 w-4" />
-                    <span>{AI_PARTNER_TOGGLE_LABEL}: {aiPartnerActive ? "ON" : "OFF"}</span>
-                  </button>
-                )}
-                {!isChatSession && AI_PARTNER_TRAINING_ENABLED && !aiTrainingAutoStart && (
-                  <div className="inline-flex items-center">
-                    <InfoBubble
-                      text={AI_PARTNER_TOGGLE_INFO}
-                      label="Info coach conversation IA"
-                      align="left"
-                    />
-                  </div>
-                )}
-                {!aiPartnerActive && (
-                  <button
-                    type="button"
-                    onPointerDown={handlePushToTalkPointerDown}
-                    onPointerMove={handlePushToTalkPointerMove}
-                    onPointerUp={handlePushToTalkPointerEnd}
-                    onPointerCancel={(event) => handlePushToTalkPointerEnd(event, true)}
-                    onTouchStart={(event) => {
-                      event.preventDefault();
-                      startPushToTalkRecognition();
-                    }}
-                    onTouchEnd={(event) => {
-                      event.preventDefault();
-                      handlePushToTalkPointerEnd();
-                    }}
-                    onTouchCancel={(event) => {
-                      event.preventDefault();
-                      handlePushToTalkPointerEnd(undefined, true);
-                    }}
-                    onMouseDown={startPushToTalkRecognition}
-                    onMouseUp={() => handlePushToTalkPointerEnd()}
-                    onMouseLeave={() => {
-                      if (!pushToTalkPressedRef.current) return;
-                      handlePushToTalkPointerEnd(undefined, true);
-                    }}
-                    disabled={
-                      translationControlsDisabled ||
-                      !captionsSupported ||
-                      !pushToTalkSupported ||
-                      realtimeEnabled
-                    }
-                    className={`inline-flex w-full min-h-10 items-center justify-center gap-2 rounded-full border px-4 py-2 text-[12px] font-semibold shadow-lg ring-1 ring-black/30 transition sm:w-auto ${
-                      pushToTalkActive
-                        ? "border-rose-200! bg-rose-600! text-white!"
-                        : pushToTalkBusy
-                        ? "border-sky-200! bg-sky-600! text-white!"
-                        : "border-emerald-200! bg-emerald-700! text-white! hover:bg-emerald-600!"
-                    } disabled:cursor-not-allowed disabled:opacity-50`}
-                    title={
-                      translationControlsDisabled
-                        ? translationUnavailableMessage
-                        : realtimeEnabled
-                        ? "Desactive Realtime pour utiliser ce mode."
-                        : "Maintiens le bouton pendant que tu parles, puis relache pour traduire."
-                    }
-                    style={{
-                      backgroundColor: pushToTalkActive
-                        ? "rgba(225, 29, 72, 0.95)"
-                        : pushToTalkBusy
-                        ? "rgba(2, 132, 199, 0.95)"
-                        : "rgba(4, 120, 87, 0.95)",
-                      color: "#ffffff",
-                      borderColor: "rgba(226, 232, 240, 0.95)",
-                    }}
-                  >
-                    <Mic className="h-4 w-4" />
-                    <span className="whitespace-nowrap">
-                      {pushToTalkActive
-                        ? "Relache pour traduire"
-                        : pushToTalkBusy
-                        ? "Traduction..."
-                        : "Maintenir pour parler"}
-                    </span>
-                  </button>
-                )}
-                {!aiTrainingAutoStart && (
-                  <button
-                    type="button"
-                    onClick={onOpenNotebook}
-                    disabled={translationControlsDisabled}
-                    className="inline-flex min-h-10 items-center justify-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold shadow-sm disabled:cursor-not-allowed disabled:opacity-55"
-                    title="Ouvrir les 10 dernieres traductions d'exercice."
-                    style={{
-                      backgroundColor: "rgba(30, 41, 59, 0.95)",
-                      color: "#f8fafc",
-                      borderColor: "rgba(148, 163, 184, 0.85)",
-                    }}
-                  >
-                    <BookOpen className="h-4 w-4" />
-                    <span>Bloc-notes</span>
-                  </button>
-                )}
+                {/* Coach conversation IA et info-bulle masqués en visio classique */}
+                {/* Bloc-notes masqué en visio conférence */}
                 {!aiTrainingAutoStart && (
                   <div className="inline-flex items-center">
                     <InfoBubble
-                      text='Talkie traduction: maintiens "Maintenir pour parler", puis relache.'
+                      text={ui.talkieInfo}
                       label="Info talkie traduction"
                       align="left"
                     />
@@ -8407,6 +10159,18 @@ function LiveKitConference({
                   {pushToTalkInterruptHint}
                 </div>
               )}
+              {isTalkieLockedByOther && !pushToTalkActive && !pushToTalkBusy && captionsEnabled && (
+                <div
+                  className="mt-2 rounded-lg border px-3 py-2 text-[11px] font-semibold shadow-sm"
+                  style={{
+                    backgroundColor: "rgba(51, 65, 85, 0.96)",
+                    color: "#e2e8f0",
+                    borderColor: "rgba(148, 163, 184, 0.85)",
+                  }}
+                >
+                  {talkieLockedMessage}
+                </div>
+              )}
               {pushToTalkGestureHint && pushToTalkActive && (
                 <div
                   className="mt-2 rounded-lg border px-3 py-2 text-[11px] font-semibold shadow-sm"
@@ -8420,60 +10184,25 @@ function LiveKitConference({
                 </div>
               )}
               {pushToTalkDraft && (
-                <div
-                  className="mt-2 rounded-lg border px-3 py-2 text-[11px] shadow-sm"
-                  style={{
-                    backgroundColor: "rgba(15, 23, 42, 0.96)",
-                    color: "#f8fafc",
-                    borderColor: "rgba(148, 163, 184, 0.85)",
-                  }}
-                >
-                  <p className="text-[10px] font-semibold uppercase tracking-wide text-sky-100">
-                    Verification avant envoi
-                  </p>
-                  {pushToTalkDraftEditing ? (
-                    <textarea
-                      value={pushToTalkDraftText}
-                      onChange={(event) => setPushToTalkDraftText(event.target.value)}
-                      rows={3}
-                      className="mt-2 w-full rounded-md border border-slate-500/80 bg-slate-900/80 px-2 py-1.5 text-[12px] text-slate-50 outline-none ring-sky-400/60 focus:ring-1"
-                    />
-                  ) : (
-                    <p className="mt-1 whitespace-pre-wrap text-[12px] text-slate-100">
-                      {pushToTalkDraftText}
-                    </p>
-                  )}
-                  <div className="mt-2 flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => void submitPushToTalkDraft()}
-                      className="inline-flex items-center rounded-full border border-emerald-300/80 bg-emerald-600/85 px-3 py-1 text-[11px] font-semibold text-white"
-                    >
-                      Envoyer
-                    </button>
-                    {!pushToTalkDraftEditing && (
-                      <button
-                        type="button"
-                        onClick={setPushToTalkDraftEditMode}
-                        className="inline-flex items-center rounded-full border border-sky-300/80 bg-sky-700/70 px-3 py-1 text-[11px] font-semibold text-white"
-                      >
-                        Corriger
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => cancelPushToTalkDraft("Capture annulee.")}
-                      className="inline-flex items-center rounded-full border border-slate-300/70 bg-slate-700/70 px-3 py-1 text-[11px] font-semibold text-slate-100"
-                    >
-                      Annuler
-                    </button>
-                    {!pushToTalkDraftEditing && (
-                      <span className="text-[10px] text-slate-300">
-                        Envoi auto dans {Math.round(PUSH_TO_TALK_AUTO_SEND_MS / 1000)}s
-                      </span>
-                    )}
-                  </div>
-                </div>
+                <PushToTalkDraftModal
+                  draftText={pushToTalkDraftText}
+                  editing={pushToTalkDraftEditing}
+                  review={pushToTalkDraftReview}
+                  reviewBusy={pushToTalkDraftReviewBusy}
+                  reviewMode={pushToTalkDraftReviewMode}
+                  showAutoSendHint={pushToTalkDraftAutoSendEnabled}
+                  notebookEnabled={aiPartnerActive && activeSpeechLanguageCode === localReceptionTarget}
+                  notebookBaseText={pushToTalkDraftReview?.reviewedText || pushToTalkDraftText}
+                  notebookRoomId={roomId}
+                  notebookTargetLanguageCode={activeSpeechLanguageCode}
+                  notebookTargetLanguageName={activeSpeechLanguageName}
+                  notebookVoice={realtimeVoice}
+                  onChangeText={handlePushToTalkDraftTextChange}
+                  onSubmit={() => void submitPushToTalkDraft()}
+                  onEdit={setPushToTalkDraftEditMode}
+                  onCancel={() => cancelPushToTalkDraft("Capture annulee.")}
+                  onApplySuggestion={applyPushToTalkDraftSuggestion}
+                />
               )}
               {!aiTrainingAutoStart && (
                 <div
@@ -8485,21 +10214,9 @@ function LiveKitConference({
                   }}
                 >
                   {isChatSession
-                    ? "Temps traduction restant: "
-                    : "Temps traduction restant (hote): "}
+                    ? ui.translationRemaining
+                    : ui.translationRemainingHost}
                   {translationRemainingLabel}
-                </div>
-              )}
-              {AI_PARTNER_TRAINING_ENABLED && !isChatSession && !aiPartnerAvailable && (
-                <div
-                  className="mt-2 rounded-lg border px-3 py-2 text-[11px] font-semibold shadow-sm"
-                  style={{
-                    backgroundColor: "rgba(30, 41, 59, 0.96)",
-                    color: "#e2e8f0",
-                    borderColor: "rgba(148, 163, 184, 0.85)",
-                  }}
-                >
-                  {AI_PARTNER_TOGGLE_LABEL}: mode solo uniquement. Invite un participant pour la visio classique.
                 </div>
               )}
               </>
@@ -8513,99 +10230,20 @@ function LiveKitConference({
                   borderColor: "rgba(251, 191, 36, 0.9)",
                 }}
               >
-                {translationUnavailableMessage}
-              </div>
-            )}
-            {!aiPartnerActive && (
-              <div
-                className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-slate-500/60 bg-slate-950/85 px-3 py-2 text-[11px] text-slate-100 shadow-sm"
-                style={{
-                  backgroundColor: "rgba(2, 6, 23, 0.96)",
-                  color: "#f8fafc",
-                  borderColor: "rgba(100, 116, 139, 0.8)",
-                }}
-              >
-              <span className="font-semibold" style={{ color: "#f8fafc" }}>Langue que tu parles</span>
-              <select
-                value={sourceLanguage}
-                onChange={(event) =>
-                  onChangeSourceLanguage(event.target.value as SourceLanguageOption["code"])
-                }
-                disabled={translationControlsDisabled}
-                className="rounded-md border border-slate-500 bg-slate-900 px-2 py-1 text-[11px] text-slate-100"
-                style={{
-                  backgroundColor: "rgba(15, 23, 42, 0.95)",
-                  color: "#f8fafc",
-                  borderColor: "rgba(100, 116, 139, 0.85)",
-                }}
-              >
-                {SOURCE_LANGUAGE_OPTIONS.map((option) => (
-                  <option key={option.code} value={option.code}>
-                    {`${option.name} (${option.label})`}
-                  </option>
-                ))}
-              </select>
-              {guestTtsEnabled ? (
-                <>
-                  <span className="font-semibold" style={{ color: "#f8fafc" }}>
-                    Langue de communication (texte + voix)
-                  </span>
-                  <select
-                    value={localReceptionTarget}
-                    onChange={(event) =>
-                      handleLocalReceptionTargetChange(event.target.value as CaptionTarget)
-                    }
-                    disabled={translationControlsDisabled}
-                    className="rounded-md border border-slate-500 bg-slate-900 px-2 py-1 text-[11px] text-slate-100"
-                    style={{
-                      backgroundColor: "rgba(15, 23, 42, 0.95)",
-                      color: "#f8fafc",
-                      borderColor: "rgba(100, 116, 139, 0.85)",
-                    }}
+                <div>{translationUnavailableMessage}</div>
+                {translationController ? (
+                  <button
+                    type="button"
+                    onClick={openCreditsTopUpFromCall}
+                    className="mt-2 inline-flex items-center rounded-full border border-amber-200/70 bg-amber-100/12 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-amber-50 transition hover:bg-amber-100/20"
                   >
-                    {CAPTION_TARGETS_CONFIG.map((target) => (
-                      <option key={target.code} value={target.code}>
-                        {`${target.name} (${target.label})`}
-                      </option>
-                    ))}
-                  </select>
-                </>
-              ) : (
-                <>
-                  <span className="font-semibold" style={{ color: "#f8fafc" }}>
-                    Langue de réception (personnelle)
-                  </span>
-                  <select
-                    value={localReceptionTarget}
-                    onChange={(event) =>
-                      handleLocalReceptionTargetChange(event.target.value as CaptionTarget)
-                    }
-                    disabled={translationControlsDisabled}
-                    className="rounded-md border border-slate-500 bg-slate-900 px-2 py-1 text-[11px] text-slate-100"
-                    style={{
-                      backgroundColor: "rgba(15, 23, 42, 0.95)",
-                      color: "#f8fafc",
-                      borderColor: "rgba(100, 116, 139, 0.85)",
-                    }}
-                  >
-                    {CAPTION_TARGETS_CONFIG.map((target) => (
-                      <option key={target.code} value={target.code}>
-                        {`${target.name} (${target.label})`}
-                      </option>
-                    ))}
-                  </select>
-                </>
-              )}
-              <div className="inline-flex items-center gap-1">
-                <span className="text-[10px] text-slate-300" style={{ color: "#cbd5e1" }}>
-                  Info
-                </span>
-                <InfoBubble
-                  text={localReceptionHint}
-                  label="Info langue de reception"
-                  align="right"
-                />
-              </div>
+                    {ui.topUpNow}
+                  </button>
+                ) : (
+                  <div className="mt-2 text-[10px] font-semibold text-amber-100/90">
+                    {ui.askHostToTopUp}
+                  </div>
+                )}
               </div>
             )}
             {endRoomError && (
@@ -8667,23 +10305,6 @@ function LiveKitConference({
           onConsumeTranslationSeconds={onConsumeTranslationSeconds}
           onUnreadChange={(count) => roomChat.setUnreadCount(count)}
         />
-        {isHost && (
-          <SuggestionsDrawer
-            isOpen={suggestionsOpen}
-            onClose={onToggleSuggestions}
-            listening={listening}
-            onToggleListening={() => setListening((value) => !value)}
-            lastHeard={lastHeard}
-            suggestions={suggestions}
-            suggesting={suggesting}
-            suggestError={suggestError}
-            useGuidelines={useGuidelines}
-            onToggleGuidelines={() => setUseGuidelines((value) => !value)}
-            mode={suggestionMode}
-            onChangeMode={setSuggestionMode}
-            onSendToChat={roomChat.sendMessage}
-          />
-        )}
         {!aiTrainingAutoStart && (
           <InviteDrawer
             isOpen={inviteOpen}
@@ -8701,14 +10322,20 @@ function LiveKitConference({
 }
 
 function AiPartnerAvatarStage({
+  roomId,
   sourceLanguageCode,
   sourceLanguageName,
+  spokenLanguageCode,
+  spokenLanguageName,
   targetLanguageName,
   sourceText,
   userTranslatedText,
   userPhoneticText,
   coachText,
   coachSourceText,
+  coachTranslatedText,
+  coachFeedbackSourceText,
+  coachFeedbackFrenchText,
   coachFeedback,
   coachHelpView,
   coachHelpFrenchBusy,
@@ -8720,10 +10347,11 @@ function AiPartnerAvatarStage({
   avatarTheme,
   coachPhoneticText,
   coachPhoneticBusy,
-  coachSavedToNotebook,
+  realtimeVoice,
   pushToTalkActive,
   pushToTalkBusy,
   pushToTalkDisabled,
+  pushToTalkDraftVisible,
   onReplayUserTranslation,
   onReplayCoach,
   onPushToTalkPointerDown,
@@ -8731,22 +10359,28 @@ function AiPartnerAvatarStage({
   onPushToTalkPointerEnd,
   onPushToTalkStart,
   onChangeSourceLanguage,
+  respondInTrainingLanguage,
+  onChangeRespondInTrainingLanguage,
   trainingTarget,
   onChangeTrainingTarget,
   onSetCoachHelpView,
   onEnsureCoachHelpFrench,
-  onSaveCoachToNotebook,
-  onOpenNotebook,
   onToggleView,
 }: {
+  roomId: string;
   sourceLanguageCode: SourceLanguageOption["code"];
   sourceLanguageName: string;
+  spokenLanguageCode: string;
+  spokenLanguageName: string;
   targetLanguageName: string;
   sourceText: string;
   userTranslatedText: string;
   userPhoneticText: string;
   coachText: string;
   coachSourceText: string;
+  coachTranslatedText: string;
+  coachFeedbackSourceText: string;
+  coachFeedbackFrenchText: string;
   coachFeedback: string;
   coachHelpView: AiPartnerFeedbackView;
   coachHelpFrenchBusy: boolean;
@@ -8758,10 +10392,11 @@ function AiPartnerAvatarStage({
   avatarTheme: AiPartnerAvatarTheme;
   coachPhoneticText: string;
   coachPhoneticBusy: boolean;
-  coachSavedToNotebook: boolean;
+  realtimeVoice: string;
   pushToTalkActive: boolean;
   pushToTalkBusy: boolean;
   pushToTalkDisabled: boolean;
+  pushToTalkDraftVisible: boolean;
   onReplayUserTranslation: (text?: string, target?: CaptionTarget) => void;
   onReplayCoach: (textOverride?: string, targetOverride?: CaptionTarget) => void;
   onPushToTalkPointerDown: (event: any) => void;
@@ -8769,14 +10404,17 @@ function AiPartnerAvatarStage({
   onPushToTalkPointerEnd: (event?: any, forcedCancel?: boolean) => void;
   onPushToTalkStart: () => void;
   onChangeSourceLanguage: (value: SourceLanguageOption["code"]) => void;
+  respondInTrainingLanguage: boolean;
+  onChangeRespondInTrainingLanguage: (next: boolean) => void;
   trainingTarget: CaptionTarget;
   onChangeTrainingTarget: (target: CaptionTarget) => void;
   onSetCoachHelpView: (next: AiPartnerFeedbackView) => void;
   onEnsureCoachHelpFrench: () => void;
-  onSaveCoachToNotebook: () => void;
-  onOpenNotebook: () => void;
   onToggleView: (next: "translation" | "source") => void;
 }) {
+  const { locale } = useUiLocale();
+  const ui = LIVEKIT_UI_COPY[locale];
+  const isFr = locale === "fr";
   const hasSource = sourceText.trim().length > 0;
   const hasUserTranslation = userTranslatedText.trim().length > 0;
   const hasCoach = coachText.trim().length > 0;
@@ -8785,10 +10423,66 @@ function AiPartnerAvatarStage({
     ? "radial-gradient(120% 120% at 10% 0%, rgba(190, 24, 93, 0.22), rgba(2, 6, 23, 0.95) 42%), linear-gradient(155deg, rgba(2, 6, 23, 0.97), rgba(69, 10, 10, 0.92))"
     : "radial-gradient(120% 120% at 10% 0%, rgba(14, 116, 144, 0.25), rgba(2, 6, 23, 0.95) 42%), linear-gradient(155deg, rgba(2, 6, 23, 0.97), rgba(15, 23, 42, 0.95))";
   const stageBorderColor = boxingTheme ? "rgba(251, 113, 133, 0.5)" : "rgba(56, 189, 248, 0.45)";
-  const coachTitle = boxingTheme ? "Coach IA (Boxe)" : "Partenaire IA";
+  const coachTitle = boxingTheme
+    ? isFr
+      ? "Coach IA (Boxe)"
+      : "AI Coach (Boxing)"
+    : isFr
+    ? AI_PARTNER_NAME
+    : "AI Partner";
   const coachSubtitle = coachBusy
-    ? "Analyse en cours..."
-    : `Reponse en ${targetLanguageName}`;
+    ? isFr
+      ? "Analyse en cours..."
+      : "Thinking..."
+    : isFr
+    ? `Reponse en ${targetLanguageName}`
+    : `Reply in ${targetLanguageName}`;
+  const baseLanguageLabel = isFr ? "Langue de base" : "Base language";
+  const targetLanguageLabel = isFr ? "Langue a travailler" : "Target language";
+  const workLanguageLine = isFr
+    ? `Langue de travail: ${targetLanguageName} (traduction de l'echange).`
+    : `Practice language: ${targetLanguageName} (translated exchange).`;
+  const quickTranslationLabel = isFr ? "Traduction rapide" : "Quick translation";
+  const translateLabel = isFr ? "Traduire" : "Translate";
+  const playTranslationLabel = isFr ? "Lire la traduction" : "Play translation";
+  const phoneticLabel = isFr ? "Phonetique" : "Phonetic";
+  const userCardTitle = isFr ? "Utilisateur" : "User";
+  const userMicLabel = isFr ? `Micro en ${spokenLanguageName}` : `Mic in ${spokenLanguageName}`;
+  const userSectionTitle = isFr
+    ? `Ce que tu dis (${spokenLanguageName})`
+    : `What you say (${spokenLanguageName})`;
+  const holdToTalkHint = isFr
+    ? 'Maintiens "Maintenir pour parler" pour envoyer ta phrase.'
+    : 'Hold "Hold to talk" to send your sentence.';
+  const formatUserTranslationLine = (text: string) =>
+    isFr ? `Traduction de ta phrase: ${text}` : `Translation of your sentence: ${text}`;
+  const directReplyLabel = isFr
+    ? `Je réponds directement en ${targetLanguageName}`
+    : `I reply directly in ${targetLanguageName}`;
+  const micTranscriptionLine = isFr
+    ? `Base conservée: ${sourceLanguageName}. Le micro sera transcrit en ${
+        respondInTrainingLanguage ? targetLanguageName : sourceLanguageName
+      }.`
+    : `Base kept: ${sourceLanguageName}. The microphone will be transcribed in ${
+        respondInTrainingLanguage ? targetLanguageName : sourceLanguageName
+      }.`;
+  const coachHelpHiddenLabel = isFr
+    ? "Aide coach masquée pendant la vérification du texte capté."
+    : "Coach help is hidden while the captured text is being reviewed.";
+  const coachHelpTitle = isFr ? "Aide pour repondre" : "Reply help";
+  const receptionLabel = isFr ? "Reception" : "Target";
+  const frenchLabel = isFr ? "Francais" : "French";
+  const coachReplyTitle = isFr ? "Réponse Coach IA" : "AI coach reply";
+  const coachReplyPlaceholder = isFr
+    ? "Le coach IA repondra ici."
+    : "The AI coach will answer here.";
+  const playCoachLabel = isFr ? "Lire" : "Play";
+  const notebookSimpleLabel = isFr
+    ? `Ajouter au carnet (${formatNotebookChargeMinutes(AI_PRACTICE_NOTEBOOK_SIMPLE_SECONDS)})`
+    : `Add to notebook (${formatNotebookChargeMinutes(AI_PRACTICE_NOTEBOOK_SIMPLE_SECONDS)})`;
+  const notebookEnrichedLabel = isFr
+    ? `Ajouter au carnet enrichi (${formatNotebookChargeMinutes(AI_PRACTICE_NOTEBOOK_ENRICHED_SECONDS)})`
+    : `Add enriched note (${formatNotebookChargeMinutes(AI_PRACTICE_NOTEBOOK_ENRICHED_SECONDS)})`;
   const quickTranslationOptions = useMemo(
     () => CAPTION_TARGETS_CONFIG.filter((option) => option.code !== trainingTarget),
     [trainingTarget]
@@ -8824,8 +10518,8 @@ function AiPartnerAvatarStage({
     if (sourceText) {
       return {
         text: sourceText,
-        fromCode: sourceLanguageCode,
-        fromName: sourceLanguageName,
+        fromCode: spokenLanguageCode,
+        fromName: spokenLanguageName,
       };
     }
     return {
@@ -8836,8 +10530,8 @@ function AiPartnerAvatarStage({
   }, [
     coachSourceText,
     coachText,
-    sourceLanguageCode,
-    sourceLanguageName,
+    spokenLanguageCode,
+    spokenLanguageName,
     trainingTarget,
     targetLanguageName,
   ]);
@@ -8881,7 +10575,9 @@ function AiPartnerAvatarStage({
         if (requestId !== userQuickRequestRef.current) return;
         const message = err instanceof Error ? err.message : "Traduction indisponible.";
         setUserQuickError(
-          `Traduction ${targetConfig.name} indisponible: ${toFriendlyAiError(message)}`
+          `${
+            isFr ? "Traduction" : "Translation"
+          } ${targetConfig.name} ${isFr ? "indisponible" : "unavailable"}: ${toFriendlyAiError(message)}`
         );
       } finally {
         if (requestId === userQuickRequestRef.current) {
@@ -8889,7 +10585,7 @@ function AiPartnerAvatarStage({
         }
       }
     },
-    [trainingTarget, targetLanguageName, userBaseText]
+    [isFr, trainingTarget, targetLanguageName, userBaseText]
   );
 
   const onSelectUserQuickTarget = useCallback(
@@ -8921,7 +10617,9 @@ function AiPartnerAvatarStage({
       ? userTranslatedText
       : userQuickBusyCode === userQuickTargetCode &&
         !(userQuickTranslations[userQuickTargetCode] || "").trim()
-      ? `Traduction ${userQuickTargetLabel} en cours...`
+      ? `${
+          isFr ? "Traduction" : "Translation"
+        } ${userQuickTargetLabel} ${isFr ? "en cours..." : "in progress..."}`
       : (userQuickTranslations[userQuickTargetCode] || "").trim() || userTranslatedText;
 
   useEffect(() => {
@@ -8963,7 +10661,9 @@ function AiPartnerAvatarStage({
         if (requestId !== coachQuickRequestRef.current) return;
         const message = err instanceof Error ? err.message : "Traduction indisponible.";
         setCoachQuickError(
-          `Traduction ${targetConfig.name} indisponible: ${toFriendlyAiError(message)}`
+          `${
+            isFr ? "Traduction" : "Translation"
+          } ${targetConfig.name} ${isFr ? "indisponible" : "unavailable"}: ${toFriendlyAiError(message)}`
         );
       } finally {
         if (requestId === coachQuickRequestRef.current) {
@@ -8971,7 +10671,7 @@ function AiPartnerAvatarStage({
         }
       }
     },
-    [coachTranslationSource]
+    [coachTranslationSource, isFr]
   );
 
   const onSelectCoachQuickTarget = useCallback(
@@ -9003,20 +10703,195 @@ function AiPartnerAvatarStage({
       ? coachText
       : coachQuickBusyCode === coachQuickTargetCode &&
         !(coachQuickTranslations[coachQuickTargetCode] || "").trim()
-      ? `Traduction ${coachQuickTargetLabel} en cours...`
+      ? `${
+          isFr ? "Traduction" : "Translation"
+        } ${coachQuickTargetLabel} ${isFr ? "en cours..." : "in progress..."}`
       : (coachQuickTranslations[coachQuickTargetCode] || "").trim() || coachText;
+  const coachHelpDisplayLanguageCode =
+    coachHelpView === "target"
+      ? trainingTarget
+      : coachHelpView === "source"
+      ? spokenLanguageCode
+      : "fr";
+  const coachHelpDisplayLanguageName =
+    coachHelpView === "target"
+      ? targetLanguageName
+      : coachHelpView === "source"
+      ? spokenLanguageName
+      : frenchLabel;
+  const coachHelpPlaybackTarget = useMemo<CaptionTarget | undefined>(() => {
+    return CAPTION_TARGETS_CONFIG.some(
+      (target) => target.code === coachHelpDisplayLanguageCode
+    )
+      ? (coachHelpDisplayLanguageCode as CaptionTarget)
+      : undefined;
+  }, [coachHelpDisplayLanguageCode]);
+  const coachFeedbackLines = useMemo(() => parseCoachFeedbackLines(coachFeedback), [coachFeedback]);
+  const coachFeedbackSourceLines = useMemo(
+    () => parseCoachFeedbackLines(coachFeedbackSourceText),
+    [coachFeedbackSourceText]
+  );
+  const coachFeedbackFrenchLines = useMemo(
+    () => parseCoachFeedbackLines(coachFeedbackFrenchText),
+    [coachFeedbackFrenchText]
+  );
+  const coachFeedbackBaseSuggestionByIndex = useMemo(() => {
+    const preferredLines =
+      sourceLanguageCode === spokenLanguageCode
+        ? coachFeedbackSourceLines
+        : sourceLanguageCode === "fr"
+        ? coachFeedbackFrenchLines
+        : coachFeedbackSourceLines.length > 0
+        ? coachFeedbackSourceLines
+        : coachFeedbackFrenchLines;
+
+    return preferredLines.map((line) => line.suggestionText.trim());
+  }, [
+    coachFeedbackFrenchLines,
+    coachFeedbackSourceLines,
+    sourceLanguageCode,
+    spokenLanguageCode,
+  ]);
+  const coachFeedbackSuggestionLines = useMemo(
+    () =>
+      coachFeedbackLines.filter(
+        (line) => line.phoneticId && line.suggestionText
+      ),
+    [coachFeedbackLines]
+  );
+  const coachFeedbackPhoneticCacheRef = useRef<Map<string, string>>(new Map());
+  const [coachFeedbackSuggestionPhonetics, setCoachFeedbackSuggestionPhonetics] = useState<
+    Record<string, string>
+  >({});
+  useEffect(() => {
+    let cancelled = false;
+    setCoachFeedbackSuggestionPhonetics({});
+    if (!shouldShowPhoneticAidForLanguage(coachHelpDisplayLanguageCode)) return;
+    if (coachFeedbackSuggestionLines.length === 0) return;
+
+    const loadPhonetics = async () => {
+      const missingLines: Array<{ phoneticId: string; suggestionText: string; cacheKey: string }> = [];
+      for (const line of coachFeedbackSuggestionLines) {
+        const cacheKey = `${coachHelpDisplayLanguageCode}:${line.suggestionText}`;
+        const cached = coachFeedbackPhoneticCacheRef.current.get(cacheKey);
+        if (typeof cached === "string") {
+          if (cached) {
+            setCoachFeedbackSuggestionPhonetics((previous) =>
+              previous[line.phoneticId]
+                ? previous
+                : { ...previous, [line.phoneticId]: cached }
+            );
+          }
+          continue;
+        }
+        missingLines.push({
+          phoneticId: line.phoneticId,
+          suggestionText: line.suggestionText,
+          cacheKey,
+        });
+      }
+
+      if (missingLines.length === 0) return;
+
+      try {
+        const phoneticsByText = await phoneticBatchWithOpenAi(
+          missingLines.map((line) => line.suggestionText),
+          coachHelpDisplayLanguageName,
+          { targetCode: coachHelpDisplayLanguageCode }
+        );
+        if (cancelled) return;
+
+        for (const line of missingLines) {
+          const cleaned = String(phoneticsByText.get(line.suggestionText) || "").trim();
+          const sourceNormalized = line.suggestionText
+            .replace(/\s+/g, " ")
+            .trim()
+            .toLowerCase();
+          const phoneticNormalized = cleaned
+            .replace(/\s+/g, " ")
+            .trim()
+            .toLowerCase();
+          const finalPhonetic =
+            cleaned && phoneticNormalized !== sourceNormalized ? cleaned : "";
+          coachFeedbackPhoneticCacheRef.current.set(line.cacheKey, finalPhonetic);
+          if (!finalPhonetic) continue;
+          setCoachFeedbackSuggestionPhonetics((previous) => ({
+            ...previous,
+            [line.phoneticId]: finalPhonetic,
+          }));
+        }
+      } catch {
+        if (cancelled) return;
+        for (const line of missingLines) {
+          coachFeedbackPhoneticCacheRef.current.set(line.cacheKey, "");
+        }
+      }
+    };
+
+    void loadPhonetics();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    coachFeedbackSuggestionLines,
+    coachHelpDisplayLanguageCode,
+    coachHelpDisplayLanguageName,
+  ]);
+  const userNotebookPayload: AiPracticeNotebookSaveInput | null =
+    hasSource && hasUserTranslation
+      ? {
+          kind: "user_translation",
+          mode: "enriched",
+          baseText: sourceText.trim(),
+          targetText: userTranslatedText.trim(),
+          baseLanguageCode: spokenLanguageCode,
+          baseLanguageName: spokenLanguageName,
+          targetLanguageCode: trainingTarget,
+          targetLanguageName,
+          phoneticText: userPhoneticText.trim(),
+          contextLabel: "Traduction perso",
+          roomId,
+          voice: realtimeVoice,
+        }
+      : null;
+  const coachNotebookBaseText =
+    coachSourceText.trim() &&
+    normalizeComparableText(coachSourceText) !== normalizeComparableText(coachText)
+      ? coachSourceText.trim()
+      : coachTranslatedText.trim() &&
+          normalizeComparableText(coachTranslatedText) !== normalizeComparableText(coachText)
+        ? coachTranslatedText.trim()
+        : "";
+  const canSaveCoachReply = hasCoach && (!canToggleView || view === "translation");
+  const coachNotebookPayload: AiPracticeNotebookSaveInput | null =
+    canSaveCoachReply && coachText.trim()
+      ? {
+          kind: "coach_reply",
+          mode: "enriched",
+          baseText: coachNotebookBaseText,
+          targetText: coachText.trim(),
+          baseLanguageCode: spokenLanguageCode,
+          baseLanguageName: spokenLanguageName,
+          targetLanguageCode: trainingTarget,
+          targetLanguageName,
+          phoneticText: coachPhoneticText.trim(),
+          contextLabel: "Reponse coach",
+          roomId,
+          voice: realtimeVoice,
+        }
+      : null;
 
   return (
-    <div className="lk-focus-layout-wrapper h-full">
-      <div className="h-full w-full p-3 pb-[calc(var(--lk-control-bar-height)+72px)] sm:p-5 sm:pb-[calc(var(--lk-control-bar-height)+88px)]">
+    <div className="relative flex h-full w-full items-start justify-center overflow-y-auto">
+      <div className="w-full p-3 pb-[calc(var(--lk-control-bar-height)+72px)] sm:p-5 sm:pb-[calc(var(--lk-control-bar-height)+88px)]">
         <div
-          className="relative mx-auto flex h-full w-full max-w-6xl min-h-0 overflow-hidden rounded-2xl border shadow-2xl"
+          className="relative mx-auto flex w-full max-w-6xl rounded-2xl border shadow-2xl"
           style={{
             background: stageBackground,
             borderColor: stageBorderColor,
           }}
         >
-          <div className="relative z-10 flex h-full w-full min-h-0 flex-col gap-3 p-4 sm:gap-4 sm:p-6">
+          <div className="relative z-10 flex w-full flex-col gap-3 p-4 sm:gap-4 sm:p-6">
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <div
                 className="rounded-xl border bg-slate-900/55 p-3"
@@ -9040,9 +10915,9 @@ function AiPartnerAvatarStage({
                       className="truncate text-[11px] font-semibold"
                       style={{ color: boxingTheme ? "#fecdd3" : "#e0f2fe" }}
                     >
-                      Utilisateur
+                      {userCardTitle}
                     </p>
-                    <p className="truncate text-[9px] text-slate-300">Parle en {sourceLanguageName}</p>
+                    <p className="truncate text-[9px] text-slate-300">{userMicLabel}</p>
                   </div>
                 </div>
               </div>
@@ -9078,7 +10953,7 @@ function AiPartnerAvatarStage({
               </div>
             </div>
 
-            <div className="grid min-h-0 flex-1 gap-3 md:grid-cols-2">
+            <div className="grid grid-cols-1 gap-3 xl:min-h-0 xl:flex-1 xl:grid-cols-2">
               <div
                 className="flex min-h-45 min-w-0 flex-col rounded-xl border bg-slate-950/55 p-3"
                 style={{
@@ -9089,20 +10964,20 @@ function AiPartnerAvatarStage({
                   className="text-[10px] font-semibold uppercase tracking-wide"
                   style={{ color: boxingTheme ? "#fecdd3" : "#bae6fd" }}
                 >
-                  Ce que tu dis ({sourceLanguageName})
+                  {userSectionTitle}
                 </p>
-                <div className="mt-2 min-h-0 flex-1 overflow-auto pr-1">
+                <div className="mt-2 pr-1">
                   <p className="whitespace-pre-wrap text-[12px] leading-relaxed text-slate-100">
-                    {hasSource ? sourceText : "Maintiens \"Maintenir pour parler\" pour envoyer ta phrase."}
+                    {hasSource ? sourceText : holdToTalkHint}
                   </p>
                 </div>
                 <div className="mt-2 flex flex-wrap items-center gap-2">
                   <span
                     className="text-[9px] font-semibold uppercase tracking-wide"
                     style={{ color: boxingTheme ? "#fecdd3" : "#e0f2fe" }}
-                  >
-                    Langue que tu parles
-                  </span>
+                    >
+                      {baseLanguageLabel}
+                    </span>
                   <select
                     value={sourceLanguageCode}
                     onChange={(event) =>
@@ -9133,7 +11008,7 @@ function AiPartnerAvatarStage({
                       className="text-[9px] font-semibold uppercase tracking-wide"
                       style={{ color: "#e0f2fe" }}
                     >
-                      Langue a travailler
+                      {targetLanguageLabel}
                     </span>
                     <select
                       value={trainingTarget}
@@ -9152,7 +11027,7 @@ function AiPartnerAvatarStage({
                     </select>
                   </div>
                   <p className="mt-1 text-[9px]" style={{ color: "#e0f2fe" }}>
-                    Langue de travail: {targetLanguageName} (traduction de l'echange).
+                    {workLanguageLine}
                   </p>
                   {hasSource && hasUserTranslation && (
                     <div className="mt-1">
@@ -9160,11 +11035,11 @@ function AiPartnerAvatarStage({
                         className="whitespace-pre-wrap text-[11px] font-medium leading-relaxed"
                         style={{ color: "#ffffff" }}
                       >
-                        Traduction de ta phrase: {userDisplayText}
+                        {formatUserTranslationLine(userDisplayText)}
                       </p>
                       <div className="mt-1 flex flex-wrap items-center gap-1.5">
                         <span className="text-[9px] font-semibold uppercase tracking-wide text-slate-300">
-                          Traduction rapide
+                          {quickTranslationLabel}
                         </span>
                         <button
                           type="button"
@@ -9212,8 +11087,8 @@ function AiPartnerAvatarStage({
                           }}
                         >
                           {userQuickBusyCode === userQuickTargetCode && userQuickActive
-                            ? "Traduction..."
-                            : "Traduire"}
+                            ? ui.translating
+                            : translateLabel}
                         </button>
                       </div>
                       <button
@@ -9231,7 +11106,7 @@ function AiPartnerAvatarStage({
                         }}
                       >
                         <Volume2 className="h-3.5 w-3.5" />
-                        Lire la traduction
+                        {playTranslationLabel}
                       </button>
                       {userQuickError && (
                         <p className="mt-1 text-[10px] text-amber-200">{userQuickError}</p>
@@ -9245,9 +11120,14 @@ function AiPartnerAvatarStage({
                             color: "#ffffff",
                           }}
                         >
-                          Phonetique: {userPhoneticText}
+                          {phoneticLabel}: {userPhoneticText}
                         </p>
                       )}
+                      <AiPracticeNotebookSaveButton
+                        payload={userNotebookPayload}
+                        label={notebookEnrichedLabel}
+                        className="mt-2 inline-flex items-center gap-1 rounded-full border border-white/20 bg-white/8 px-3 py-1 text-[10px] font-semibold text-white transition hover:bg-white/12 disabled:opacity-60"
+                      />
                     </div>
                   )}
                 </div>
@@ -9280,8 +11160,8 @@ function AiPartnerAvatarStage({
                       ? "border-sky-200! bg-sky-600! text-white!"
                       : "border-emerald-200! bg-emerald-700! text-white! hover:bg-emerald-600!"
                   } disabled:cursor-not-allowed disabled:opacity-50`}
-                  title='Maintiens "Maintenir pour parler", puis relache.'
-                  aria-label="Maintenir pour parler"
+                  title={ui.talkieInfo}
+                  aria-label={ui.holdToTalk}
                   style={{
                     backgroundColor: pushToTalkActive
                       ? "rgba(225, 29, 72, 0.95)"
@@ -9298,13 +11178,39 @@ function AiPartnerAvatarStage({
                   <Mic className="h-4 w-4" />
                   <span className="whitespace-nowrap">
                     {pushToTalkActive
-                      ? "Relache pour traduire"
+                      ? ui.releaseToTranslate
                       : pushToTalkBusy
-                      ? "Traduction..."
-                      : "Maintenir pour parler"}
+                      ? ui.translating
+                      : ui.holdToTalk}
                   </span>
                 </button>
-                {coachFeedback.trim().length > 0 && (
+                <label className="mt-2 flex cursor-pointer items-start gap-2 rounded-lg border border-slate-600/80 bg-slate-950/65 px-3 py-2 text-[10px] text-slate-100">
+                  <input
+                    type="checkbox"
+                    checked={respondInTrainingLanguage}
+                    onChange={(event) => onChangeRespondInTrainingLanguage(event.target.checked)}
+                    className="mt-0.5 h-3.5 w-3.5 rounded border-slate-400 bg-slate-900 text-sky-400"
+                  />
+                  <span className="leading-relaxed">
+                    <span className="block font-semibold text-sky-100">
+                      {directReplyLabel}
+                    </span>
+                    <span className="block text-slate-300">
+                      {micTranscriptionLine}
+                    </span>
+                  </span>
+                </label>
+                {pushToTalkDraftVisible && coachFeedback.trim().length > 0 ? (
+                  <div
+                    className="mt-3 rounded-lg border px-2 py-1.5"
+                    style={{
+                      borderColor: "rgba(125, 211, 252, 0.45)",
+                      backgroundColor: "rgba(15, 23, 42, 0.58)",
+                    }}
+                  >
+                    <p className="text-[10px] text-slate-200">{coachHelpHiddenLabel}</p>
+                  </div>
+                ) : coachFeedback.trim().length > 0 && (
                   <div
                     className="mt-3 rounded-lg border px-2 py-1.5"
                     style={{
@@ -9316,7 +11222,7 @@ function AiPartnerAvatarStage({
                       className="text-[9px] font-semibold uppercase tracking-wide"
                       style={{ color: "#e0f2fe" }}
                     >
-                      Aide pour repondre
+                      {coachHelpTitle}
                     </p>
                     <div className="mt-1 flex flex-wrap gap-1">
                       {canShowCoachHelpTarget && (
@@ -9336,7 +11242,7 @@ function AiPartnerAvatarStage({
                                 : "rgba(15, 23, 42, 0.35)",
                           }}
                         >
-                          Reception
+                          {receptionLabel}
                         </button>
                       )}
                       {canShowCoachHelpSource && (
@@ -9375,15 +11281,72 @@ function AiPartnerAvatarStage({
                               : "rgba(15, 23, 42, 0.35)",
                         }}
                       >
-                        {coachHelpFrenchBusy && coachHelpView === "fr" ? "Francais..." : "Francais"}
+                        {coachHelpFrenchBusy && coachHelpView === "fr"
+                          ? `${frenchLabel}...`
+                          : frenchLabel}
                       </button>
                     </div>
-                    <p
-                      className="mt-1 whitespace-pre-wrap text-[10px]"
-                      style={{ color: "#ffffff" }}
-                    >
-                      {coachFeedback}
-                    </p>
+                    <div className="mt-1 max-h-64 space-y-1 overflow-y-auto pr-1 sm:max-h-72">
+                      {coachFeedbackLines.map((line, index) => (
+                        <div key={line.id}>
+                          <div className="flex items-start gap-2">
+                            <p
+                              className="min-w-0 flex-1 whitespace-pre-wrap wrap-break-word text-[10px]"
+                              style={{ color: "#ffffff" }}
+                            >
+                              {line.text}
+                            </p>
+                            {line.suggestionText &&
+                              coachHelpPlaybackTarget &&
+                              !/:\s*$/.test(line.suggestionText) && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    onReplayCoach(
+                                      line.suggestionText,
+                                      coachHelpPlaybackTarget
+                                    )
+                                  }
+                                  className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-sky-300/80 bg-sky-500/18 text-sky-100 hover:bg-sky-500/28"
+                                  aria-label={`${ui.listen}: ${line.suggestionText}`}
+                                  title={isFr ? "Ecouter cette suggestion" : "Listen to this suggestion"}
+                                >
+                                  <Volume2 className="h-3 w-3" />
+                                </button>
+                              )}
+                          </div>
+                          {coachHelpView === "target" &&
+                            line.suggestionText &&
+                            !/:\s*$/.test(line.suggestionText) && (
+                              <AiPracticeNotebookSaveButton
+                                payload={{
+                                  kind: "coach_suggestion",
+                                  mode: "simple",
+                                  baseText: coachFeedbackBaseSuggestionByIndex[index] || "",
+                                  baseLanguageCode: sourceLanguageCode,
+                                  baseLanguageName: sourceLanguageName,
+                                  targetText: line.suggestionText,
+                                  targetLanguageCode: trainingTarget,
+                                  targetLanguageName,
+                                  phoneticText:
+                                    coachFeedbackSuggestionPhonetics[line.phoneticId] || "",
+                                  contextLabel: "Suggestion coach",
+                                  roomId,
+                                  voice: realtimeVoice,
+                                }}
+                                label={notebookSimpleLabel}
+                                className="mt-1 inline-flex items-center gap-1 rounded-full border border-white/18 bg-white/6 px-2.5 py-1 text-[9px] font-semibold text-white transition hover:bg-white/10 disabled:opacity-60"
+                              />
+                            )}
+                          {line.phoneticId &&
+                            coachFeedbackSuggestionPhonetics[line.phoneticId] && (
+                              <p className="mt-0.5 whitespace-pre-wrap wrap-break-word text-[9px] text-violet-100/95">
+                                {phoneticLabel}: {coachFeedbackSuggestionPhonetics[line.phoneticId]}
+                              </p>
+                            )}
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
@@ -9400,7 +11363,7 @@ function AiPartnerAvatarStage({
                     className="text-[10px] font-semibold uppercase tracking-wide"
                     style={{ color: boxingTheme ? "#fecdd3" : "#fde68a" }}
                   >
-                    Réponse Coach IA
+                    {coachReplyTitle}
                   </p>
                   {canToggleView && (
                     <>
@@ -9420,7 +11383,7 @@ function AiPartnerAvatarStage({
                               : "rgba(15, 23, 42, 0.36)",
                         }}
                       >
-                        Traduction
+                        {ui.translationLabel(targetLanguageName)}
                       </button>
                       <button
                         type="button"
@@ -9446,7 +11409,7 @@ function AiPartnerAvatarStage({
                 {hasCoach && (
                   <div className="mt-1 flex flex-wrap items-center gap-1.5">
                     <span className="text-[9px] font-semibold uppercase tracking-wide text-slate-300">
-                      Traduction rapide
+                      {quickTranslationLabel}
                     </span>
                     <button
                       type="button"
@@ -9494,14 +11457,14 @@ function AiPartnerAvatarStage({
                       }}
                     >
                       {coachQuickBusyCode === coachQuickTargetCode && coachQuickActive
-                        ? "Traduction..."
-                        : "Traduire"}
+                        ? ui.translating
+                        : translateLabel}
                     </button>
                   </div>
                 )}
-                <div className="mt-2 min-h-0 flex-1 overflow-auto pr-1">
+                <div className="mt-2 pr-1">
                   <p className="whitespace-pre-wrap text-[12px] leading-relaxed text-slate-100">
-                    {hasCoach ? coachDisplayText : "Le coach IA repondra ici."}
+                    {hasCoach ? coachDisplayText : coachReplyPlaceholder}
                   </p>
                 </div>
                 {coachQuickError && (
@@ -9525,37 +11488,14 @@ function AiPartnerAvatarStage({
                     }}
                   >
                     <Volume2 className="h-3.5 w-3.5" />
-                    Lire
+                    {playCoachLabel}
                   </button>
-                  <button
-                    type="button"
-                    onClick={onSaveCoachToNotebook}
-                    disabled={!hasCoach}
-                    className="inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-semibold text-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
-                    style={{
-                      borderColor: coachSavedToNotebook
-                        ? "rgba(74, 222, 128, 0.9)"
-                        : "rgba(148, 163, 184, 0.85)",
-                      backgroundColor: coachSavedToNotebook
-                        ? "rgba(21, 128, 61, 0.32)"
-                        : "rgba(15, 23, 42, 0.4)",
-                    }}
-                  >
-                    <BookOpen className="h-3.5 w-3.5" />
-                    {coachSavedToNotebook ? "Envoye ✓" : "Bloc-notes"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={onOpenNotebook}
-                    className="inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-semibold text-slate-100"
-                    style={{
-                      borderColor: "rgba(148, 163, 184, 0.85)",
-                      backgroundColor: "rgba(30, 41, 59, 0.45)",
-                    }}
-                  >
-                    <BookOpen className="h-3.5 w-3.5" />
-                    Voir notes
-                  </button>
+                  <AiPracticeNotebookSaveButton
+                    payload={coachNotebookPayload}
+                    label={notebookEnrichedLabel}
+                    disabled={!canSaveCoachReply}
+                    className="inline-flex items-center gap-1 rounded-full border border-white/20 bg-white/8 px-3 py-1 text-[10px] font-semibold text-white transition hover:bg-white/12 disabled:opacity-60"
+                  />
                 </div>
                 {(coachPhoneticBusy || coachPhoneticText.trim().length > 0) && (
                   <p
@@ -9567,8 +11507,8 @@ function AiPartnerAvatarStage({
                     }}
                   >
                     {coachPhoneticBusy
-                      ? "Phonetique: generation..."
-                      : `Phonetique: ${coachPhoneticText}`}
+                      ? `${phoneticLabel}: ${isFr ? "generation..." : "generating..."}`
+                      : `${phoneticLabel}: ${coachPhoneticText}`}
                   </p>
                 )}
               </div>
@@ -9585,6 +11525,7 @@ function LiveKitConferenceMobile({
   isHost,
   captionsEnabled,
   guestTtsEnabled,
+  hasRemotePublishedTranslationAudioTrack,
   onToggleGuestTts,
   shareMicToGuests,
   realtimeEnabled,
@@ -9602,6 +11543,8 @@ function LiveKitConferenceMobile({
   videoFit,
   sourceLanguage,
   onChangeSourceLanguage,
+  respondInTrainingLanguage,
+  onChangeRespondInTrainingLanguage,
   onChangeCaptionTarget,
   guestCaptionTarget,
   onChangeGuestCaptionTarget,
@@ -9622,7 +11565,6 @@ function LiveKitConferenceMobile({
   onAiGallerySelect,
   onSaveAiBackground,
   isSettingsOpen,
-  onOpenNotebook,
   aiTrainingAutoStart = false,
   isChatSession = false,
 }: {
@@ -9630,6 +11572,7 @@ function LiveKitConferenceMobile({
   isHost: boolean;
   captionsEnabled: boolean;
   guestTtsEnabled: boolean;
+  hasRemotePublishedTranslationAudioTrack: boolean;
   onToggleGuestTts: () => void;
   shareMicToGuests: boolean;
   realtimeEnabled: boolean;
@@ -9647,6 +11590,8 @@ function LiveKitConferenceMobile({
   videoFit: "cover" | "contain";
   sourceLanguage: SourceLanguageOption["code"];
   onChangeSourceLanguage: (value: SourceLanguageOption["code"]) => void;
+  respondInTrainingLanguage: boolean;
+  onChangeRespondInTrainingLanguage: (next: boolean) => void;
   onChangeCaptionTarget: (target: CaptionTarget) => void;
   guestCaptionTarget: CaptionTarget;
   onChangeGuestCaptionTarget: (target: CaptionTarget) => void;
@@ -9670,19 +11615,21 @@ function LiveKitConferenceMobile({
   onAiGallerySelect: (item: AiGalleryItem) => void;
   onSaveAiBackground: (prompt: string, image: string) => void;
   isSettingsOpen: boolean;
-  onOpenNotebook: () => void;
   aiTrainingAutoStart?: boolean;
   isChatSession?: boolean;
 }) {
+  const { locale } = useUiLocale();
+  const ui = LIVEKIT_UI_COPY[locale];
   const [controlsHidden, setControlsHidden] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [inviteCopied, setInviteCopied] = useState<InviteCopyFeedback | null>(null);
+  const [shareInviteId, setShareInviteId] = useState("");
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [screenShareError, setScreenShareError] = useState("");
   const [moreActionsOpen, setMoreActionsOpen] = useState(false);
   const isVerySmallViewport = useIsMobileViewport(430);
   const isIPhone = useMemo(() => {
-    return isAppleMobilePlatform();
+    return isApplePhonePlatform();
   }, []);
   const backgroundEffectsDisabled = useMemo(() => {
     return isBackgroundEffectsBlockedOnBrowser();
@@ -9697,15 +11644,29 @@ function LiveKitConferenceMobile({
     setInviteOpen(true);
   }, [aiTrainingAutoStart, isHost, roomId]);
   useEffect(() => {
-    if (!isVerySmallViewport) {
+    if (!(isIPhone || isVerySmallViewport)) {
       setMoreActionsOpen(false);
     }
-  }, [isVerySmallViewport]);
-  const [showMobileBadge, setShowMobileBadge] = useState(true);
+  }, [isIPhone, isVerySmallViewport]);
+  const [showMobileBadge, setShowMobileBadge] = useState(false);
   const remoteParticipants = useRemoteParticipants();
   const { localParticipant, isMicrophoneEnabled, isCameraEnabled, lastMicrophoneError, lastCameraError } =
     useLocalParticipant();
   const room = useRoomContext();
+  useHostRoomHeartbeat({
+    room,
+    roomId,
+    isHost,
+    sessionMode: isChatSession ? "chat" : "conference",
+  });
+  const useCompactPhoneControls = isIPhone || isVerySmallViewport;
+  useEffect(() => {
+    if (!useCompactPhoneControls || isChatSession || !widgetState.showChat) return;
+    onWidgetChange({ ...widgetState, showChat: false });
+  }, [isChatSession, onWidgetChange, useCompactPhoneControls, widgetState]);
+  const roomIsRecovering =
+    room.state === ConnectionState.Reconnecting ||
+    room.state === ConnectionState.SignalReconnecting;
   const [audioUnlockRequired, setAudioUnlockRequired] = useState(false);
   const activateRoomAudio = useCallback(async () => {
     try {
@@ -9793,6 +11754,7 @@ function LiveKitConferenceMobile({
     void localParticipant.setMicrophoneEnabled(false);
   }, [isHost, localParticipant, shareMicToGuests]);
   const [mediaError, setMediaError] = useState<string>("");
+  const [isFlippingCamera, setIsFlippingCamera] = useState(false);
   const [isTogglingCamera, setIsTogglingCamera] = useState(false);
   const [sourceText, setSourceText] = useState("");
   const [sourceFromLocal, setSourceFromLocal] = useState(false);
@@ -9808,6 +11770,10 @@ function LiveKitConferenceMobile({
   const [pushToTalkDraft, setPushToTalkDraft] = useState<PushToTalkDraft | null>(null);
   const [pushToTalkDraftText, setPushToTalkDraftText] = useState("");
   const [pushToTalkDraftEditing, setPushToTalkDraftEditing] = useState(false);
+  const [pushToTalkDraftReview, setPushToTalkDraftReview] = useState<PushToTalkDraftReview | null>(
+    null
+  );
+  const [pushToTalkDraftReviewBusy, setPushToTalkDraftReviewBusy] = useState(false);
   const [pushToTalkGestureHint, setPushToTalkGestureHint] = useState("");
   const captionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pushToTalkInterruptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -9828,6 +11794,9 @@ function LiveKitConferenceMobile({
   const pushToTalkPointerStartRef = useRef<{ x: number; y: number } | null>(null);
   const pushToTalkCancelArmedRef = useRef(false);
   const pushToTalkDraftIdRef = useRef(0);
+  const pushToTalkDraftReviewRequestRef = useRef(0);
+  const pushToTalkDraftReviewAbortRef = useRef<AbortController | null>(null);
+  const pushToTalkDraftReviewCacheRef = useRef<Map<string, PushToTalkDraftReview>>(new Map());
   const activeTranslationRequestRef = useRef(0);
   const activeTranslationAbortRef = useRef<AbortController | null>(null);
   const activeAiPartnerRequestRef = useRef(0);
@@ -9840,6 +11809,14 @@ function LiveKitConferenceMobile({
   const { message: captionIncoming, send: sendCaption } = useDataChannel("bfzoom-captions");
   const { message: translationAccessIncoming, send: sendTranslationAccess } =
     useDataChannel(TRANSLATION_ACCESS_TOPIC);
+  const { message: talkieLockIncoming, send: sendTalkieLock } =
+    useDataChannel(TALKIE_LOCK_TOPIC);
+  const [talkieLockHolderIdentity, setTalkieLockHolderIdentity] = useState("");
+  const [talkieLockHolderName, setTalkieLockHolderName] = useState("");
+  const talkieLockHolderRef = useRef("");
+  const talkieLockExpiresAtRef = useRef(0);
+  const talkieLockTimestampRef = useRef(0);
+  const talkieLockExpiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sourceLanguageOption = useMemo(
     () =>
       SOURCE_LANGUAGE_OPTIONS.find((item) => item.code === sourceLanguage) ??
@@ -9851,6 +11828,14 @@ function LiveKitConferenceMobile({
   const [exercisePhoneticEnabled] = useState(true);
   const localReceptionTarget = guestCaptionTarget;
   const localReceptionTargetName = guestCaptionTargetName;
+  const captionDisplayTarget = captionPhoneticTarget || localReceptionTarget;
+  const captionDisplayTargetName = useMemo(
+    () =>
+      CAPTION_TARGETS_CONFIG.find((item) => item.code === captionDisplayTarget)?.name ||
+      resolveLanguageNameFromCode(captionDisplayTarget) ||
+      localReceptionTargetName,
+    [captionDisplayTarget, localReceptionTargetName]
+  );
   const localReceptionHint = guestTtsEnabled
     ? "Communication: choisis la langue dans laquelle tu recois texte + voix sur ton appareil."
     : "Personnel: langue que tu recois (texte + voix) sur ton appareil.";
@@ -9901,6 +11886,65 @@ function LiveKitConferenceMobile({
   const translationControlsDisabled = !effectiveTranslationEnabled;
   const translationUnavailableMessage =
     effectiveTranslationLockMessage || TRANSLATION_UNLOCK_HINT;
+  const resolveGuestTranslationForTarget = useCallback(
+    async (
+      translationInput: string,
+      translationFromCode: string | undefined,
+      translationFromName: string,
+      targetCode: CaptionTargetCode,
+      targetName: string,
+      signal?: AbortSignal
+    ) => {
+      const normalizedInput = translationInput.trim();
+      if (!normalizedInput) return "";
+      if (normalizeCaptionTargetCode(translationFromCode) === targetCode) {
+        return normalizedInput;
+      }
+      const translationCacheKey = buildTranslationCacheKey(
+        normalizedInput,
+        translationFromCode || "",
+        targetCode
+      );
+      const cachedTranslation = guestTranslationCacheRef.current.get(translationCacheKey);
+      if (cachedTranslation) return cachedTranslation;
+
+      let inFlightTranslation = guestTranslationInFlightRef.current.get(translationCacheKey);
+      if (!inFlightTranslation) {
+        inFlightTranslation = translateWithOpenAi(
+          normalizedInput,
+          translationFromName,
+          targetName,
+          {
+            fromCode: translationFromCode,
+            toCode: targetCode,
+            guestToken: guestTtsToken,
+            signal,
+            intent: "translation",
+          }
+        ).then((result) => result.trim());
+        guestTranslationInFlightRef.current.set(translationCacheKey, inFlightTranslation);
+      }
+
+      try {
+        const translated = await inFlightTranslation;
+        if (translated) {
+          upsertLruValue(
+            guestTranslationCacheRef.current,
+            translationCacheKey,
+            translated,
+            GUEST_TRANSLATION_CACHE_LIMIT
+          );
+        }
+        return translated;
+      } finally {
+        const currentInFlight = guestTranslationInFlightRef.current.get(translationCacheKey);
+        if (currentInFlight === inFlightTranslation) {
+          guestTranslationInFlightRef.current.delete(translationCacheKey);
+        }
+      }
+    },
+    [guestTtsToken]
+  );
   const aiPartnerAvailable =
     AI_PARTNER_TRAINING_ENABLED && isHost && (aiTrainingAutoStart || remoteParticipants.length === 0);
   const [aiPartnerEnabled, setAiPartnerEnabled] = useState(false);
@@ -9921,13 +11965,33 @@ function LiveKitConferenceMobile({
     useState<AiPartnerAvatarTheme>("neutral");
   const [aiPartnerCoachPhoneticText, setAiPartnerCoachPhoneticText] = useState("");
   const [aiPartnerCoachPhoneticBusy, setAiPartnerCoachPhoneticBusy] = useState(false);
-  const [aiPartnerCoachSavedToNotebook, setAiPartnerCoachSavedToNotebook] = useState(false);
   const aiPartnerBusyRef = useRef(false);
   const aiPartnerCameraWasAutoDisabledRef = useRef(false);
+  const aiPartnerConversationRef = useRef<AiPartnerConversationMessage[]>([]);
+  const aiPracticeLanguageConfigRef = useRef({
+    sourceLanguage,
+    trainingTarget: localReceptionTarget,
+    respondInTrainingLanguage,
+  });
   const aiPartnerCoachPhoneticCacheRef = useRef<Map<string, string>>(new Map());
   const aiPartnerCoachPhoneticRequestRef = useRef(0);
-  const aiPartnerCoachSavedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const aiPartnerActive = aiPartnerAvailable && aiPartnerEnabled;
+  const pushToTalkDraftReviewMode: PushToTalkDraftReviewMode = aiTrainingAutoStart
+    ? "coach"
+    : "translation";
+  const shouldUsePushToTalkDraftReview = aiTrainingAutoStart
+    ? aiPartnerActive
+    : captionsEnabled && !isChatSession;
+  const activeSpeechLanguageCode =
+    respondInTrainingLanguage && aiPartnerActive ? localReceptionTarget : sourceLanguage;
+  const activeSpeechLanguageName =
+    respondInTrainingLanguage && aiPartnerActive
+      ? resolveLanguageNameFromCode(localReceptionTarget) || localReceptionTargetName
+      : sourceLanguageName;
+  const activeSpeechLanguageLocale =
+    respondInTrainingLanguage && aiPartnerActive
+      ? resolveSpeechLocaleFromLanguage(localReceptionTarget) || sourceLanguageLocale
+      : sourceLanguageLocale;
   const aiPartnerOverlayVisible = aiPartnerActive && Boolean(aiPartnerOverlayText);
   const aiPartnerCanToggleView =
     aiPartnerLastTranslatedReply.trim().length > 0 &&
@@ -9961,10 +12025,10 @@ function LiveKitConferenceMobile({
   const aiPartnerCoachActionText = aiPartnerDisplayText.trim();
   const aiPartnerCoachActionLanguageCode = aiPartnerDisplayUsesTranslation
     ? localReceptionTarget
-    : sourceLanguage;
+    : activeSpeechLanguageCode;
   const aiPartnerCoachActionLanguageName = aiPartnerDisplayUsesTranslation
     ? localReceptionTargetName
-    : sourceLanguageName;
+    : activeSpeechLanguageName;
   const aiPartnerCoachPlaybackTarget = useMemo<CaptionTarget | undefined>(() => {
     return CAPTION_TARGETS_CONFIG.some(
       (target) => target.code === aiPartnerCoachActionLanguageCode
@@ -9985,6 +12049,8 @@ function LiveKitConferenceMobile({
     if (aiPartnerAvailable) return;
     setAiPartnerEnabled(false);
     setAiPartnerBusy(false);
+    aiPartnerConversationRef.current = [];
+    setAiPartnerLastReply("");
     setAiPartnerLastTranslatedReply("");
     setAiPartnerFeedbackSource("");
     setAiPartnerFeedbackTranslated("");
@@ -9995,11 +12061,6 @@ function LiveKitConferenceMobile({
     setAiPartnerView("translation");
     setAiPartnerCoachPhoneticText("");
     setAiPartnerCoachPhoneticBusy(false);
-    setAiPartnerCoachSavedToNotebook(false);
-    if (aiPartnerCoachSavedTimerRef.current) {
-      clearTimeout(aiPartnerCoachSavedTimerRef.current);
-      aiPartnerCoachSavedTimerRef.current = null;
-    }
     if (aiPartnerOverlayTimerRef.current) {
       clearTimeout(aiPartnerOverlayTimerRef.current);
       aiPartnerOverlayTimerRef.current = null;
@@ -10012,12 +12073,12 @@ function LiveKitConferenceMobile({
   }, [aiPartnerAvailable, aiTrainingAutoStart, isChatSession]);
   useEffect(() => {
     setAiPartnerCoachPhoneticText("");
-    setAiPartnerCoachSavedToNotebook(false);
   }, [aiPartnerCoachActionText, aiPartnerCoachActionLanguageCode, aiPartnerView]);
   useEffect(() => {
     if (!localParticipant) return;
     let cancelled = false;
     const syncCameraForAiPartner = async () => {
+      if (roomIsRecovering) return;
       if (aiPartnerActive) {
         if (!isCameraEnabled) return;
         try {
@@ -10054,7 +12115,7 @@ function LiveKitConferenceMobile({
     return () => {
       cancelled = true;
     };
-  }, [aiPartnerActive, isCameraEnabled, localParticipant]);
+  }, [aiPartnerActive, isCameraEnabled, localParticipant, roomIsRecovering]);
   const broadcastRoomTranslationAccess = useCallback(async () => {
     if (!isHost || !sendTranslationAccess) return;
     const payload: TranslationAccessPayload = {
@@ -10092,6 +12153,13 @@ function LiveKitConferenceMobile({
     void broadcastRoomTranslationAccess();
   }, [broadcastRoomTranslationAccess, isHost, remoteParticipants.length]);
   useEffect(() => {
+    if (!isHost || !sendTranslationAccess) return;
+    const syncTimer = setInterval(() => {
+      void broadcastRoomTranslationAccess();
+    }, 1500);
+    return () => clearInterval(syncTimer);
+  }, [broadcastRoomTranslationAccess, isHost, sendTranslationAccess]);
+  useEffect(() => {
     if (isHost) return;
     if (!translationAccessIncoming?.payload) return;
     const decoder = new TextDecoder();
@@ -10116,6 +12184,152 @@ function LiveKitConferenceMobile({
       // Ignore malformed payload.
     }
   }, [isHost, roomId, translationAccessIncoming]);
+  const clearTalkieLock = useCallback(() => {
+    talkieLockHolderRef.current = "";
+    talkieLockExpiresAtRef.current = 0;
+    setTalkieLockHolderIdentity("");
+    setTalkieLockHolderName("");
+    if (talkieLockExpiryTimerRef.current) {
+      clearTimeout(talkieLockExpiryTimerRef.current);
+      talkieLockExpiryTimerRef.current = null;
+    }
+  }, []);
+  const armTalkieLockExpiry = useCallback(
+    (expiresAt: number) => {
+      if (talkieLockExpiryTimerRef.current) {
+        clearTimeout(talkieLockExpiryTimerRef.current);
+        talkieLockExpiryTimerRef.current = null;
+      }
+      const delay = Math.max(0, expiresAt - Date.now());
+      talkieLockExpiryTimerRef.current = setTimeout(() => {
+        if (talkieLockExpiresAtRef.current > Date.now()) return;
+        clearTalkieLock();
+      }, delay + 40);
+    },
+    [clearTalkieLock]
+  );
+  const applyTalkieLockPayload = useCallback(
+    (payload: TalkieLockPayload) => {
+      if (payload.roomId && payload.roomId !== roomId) return;
+      const nextTimestamp =
+        typeof payload.timestamp === "number" ? payload.timestamp : Date.now();
+      if (nextTimestamp < talkieLockTimestampRef.current) return;
+      talkieLockTimestampRef.current = nextTimestamp;
+
+      const holder = String(payload.holder || "").trim();
+      const action = payload.action || "claim";
+      if (action === "release") {
+        if (!holder || holder === talkieLockHolderRef.current) {
+          clearTalkieLock();
+        }
+        return;
+      }
+      if (!holder) return;
+      const expiresAt =
+        typeof payload.expiresAt === "number"
+          ? payload.expiresAt
+          : Date.now() + TALKIE_LOCK_TIMEOUT_MS;
+      talkieLockHolderRef.current = holder;
+      talkieLockExpiresAtRef.current = expiresAt;
+      setTalkieLockHolderIdentity(holder);
+      setTalkieLockHolderName(String(payload.holderName || "").trim());
+      armTalkieLockExpiry(expiresAt);
+    },
+    [armTalkieLockExpiry, clearTalkieLock, roomId]
+  );
+  const publishTalkieLock = useCallback(
+    async (action: "claim" | "release" | "heartbeat") => {
+      if (!localParticipant) return;
+      const expiresAt =
+        action === "release" ? Date.now() : Date.now() + TALKIE_LOCK_TIMEOUT_MS;
+      const payload: TalkieLockPayload = {
+        roomId,
+        holder: localParticipant.identity,
+        holderName: localParticipant.name || localParticipant.identity || "BFZoom",
+        action,
+        expiresAt,
+        timestamp: Date.now(),
+      };
+      applyTalkieLockPayload(payload);
+      const encoded = new TextEncoder().encode(JSON.stringify(payload));
+      try {
+        if (sendTalkieLock) {
+          await sendTalkieLock(encoded, {
+            reliable: true,
+            topic: TALKIE_LOCK_TOPIC,
+          });
+        } else {
+          await localParticipant.publishData(encoded, {
+            reliable: true,
+            topic: TALKIE_LOCK_TOPIC,
+          });
+        }
+      } catch {
+        // Keep local receiver-side suppression even if the data channel is flaky.
+      }
+    },
+    [applyTalkieLockPayload, localParticipant, roomId, sendTalkieLock]
+  );
+  useEffect(() => {
+    if (!talkieLockIncoming?.payload) return;
+    const decoder = new TextDecoder();
+    try {
+      const raw = decoder.decode(talkieLockIncoming.payload);
+      const payload = JSON.parse(raw) as TalkieLockPayload;
+      applyTalkieLockPayload(payload);
+    } catch {
+      // Ignore malformed talkie lock payloads.
+    }
+  }, [applyTalkieLockPayload, talkieLockIncoming]);
+  useEffect(() => {
+    if (!pushToTalkActive && !pushToTalkBusy) return;
+    const heartbeatId = setInterval(() => {
+      void publishTalkieLock("heartbeat");
+    }, TALKIE_LOCK_HEARTBEAT_MS);
+    return () => {
+      clearInterval(heartbeatId);
+    };
+  }, [publishTalkieLock, pushToTalkActive, pushToTalkBusy]);
+  useEffect(() => {
+    if (!room) return;
+    const applyTalkieRemoteAudioSuppression = () => {
+      room.remoteParticipants.forEach((participant) => {
+        const shouldSuppress =
+          Boolean(talkieLockHolderIdentity) &&
+          participant.identity === talkieLockHolderIdentity;
+        participant.setVolume(
+          shouldSuppress ? TALKIE_REMOTE_AUDIO_MUTED_VOLUME : TALKIE_REMOTE_AUDIO_VOLUME_NORMAL,
+          Track.Source.Microphone
+        );
+      });
+    };
+
+    applyTalkieRemoteAudioSuppression();
+    room.on(RoomEvent.ParticipantConnected, applyTalkieRemoteAudioSuppression);
+    room.on(RoomEvent.ParticipantDisconnected, applyTalkieRemoteAudioSuppression);
+    room.on(RoomEvent.TrackSubscribed, applyTalkieRemoteAudioSuppression);
+
+    return () => {
+      room.off(RoomEvent.ParticipantConnected, applyTalkieRemoteAudioSuppression);
+      room.off(RoomEvent.ParticipantDisconnected, applyTalkieRemoteAudioSuppression);
+      room.off(RoomEvent.TrackSubscribed, applyTalkieRemoteAudioSuppression);
+      room.remoteParticipants.forEach((participant) => {
+        participant.setVolume(TALKIE_REMOTE_AUDIO_VOLUME_NORMAL, Track.Source.Microphone);
+      });
+    };
+  }, [room, talkieLockHolderIdentity]);
+  useEffect(() => {
+    return () => {
+      void publishTalkieLock("release");
+    };
+  }, [publishTalkieLock]);
+  const isTalkieLockedByOther = useMemo(() => {
+    if (!talkieLockHolderIdentity) return false;
+    return talkieLockHolderIdentity !== (localParticipant?.identity || "");
+  }, [localParticipant?.identity, talkieLockHolderIdentity]);
+  const talkieLockedMessage = isTalkieLockedByOther
+    ? ui.talkieBusyBy(talkieLockHolderName || talkieLockHolderIdentity)
+    : "";
   const handleLocalReceptionTargetChange = useCallback(
     (target: CaptionTarget) => {
       onChangeGuestCaptionTarget(target);
@@ -10188,6 +12402,12 @@ function LiveKitConferenceMobile({
       Boolean(navigator.mediaDevices?.getUserMedia)
     );
   }, []);
+  const preferRecorderPushToTalk = useMemo(() => {
+    if (typeof window === "undefined") return false;
+    const ua = navigator.userAgent || "";
+    const isMacDesktop = /Macintosh|MacIntel|MacPPC|Mac68K/i.test(ua) && !/iPhone|iPad|iPod/i.test(ua);
+    return isMacDesktop && mediaRecorderSupported;
+  }, [mediaRecorderSupported]);
   const pushToTalkSupported = speechRecognitionSupported || mediaRecorderSupported;
   const schedulePushToTalkWarmStreamRelease = useCallback(() => {
     if (pushToTalkWarmStreamTimerRef.current) {
@@ -10357,8 +12577,8 @@ function LiveKitConferenceMobile({
     const formData = new FormData();
     formData.append("file", blob, `push-to-talk.${fileExt}`);
     formData.append("roomId", roomId);
-    formData.append("language", sourceLanguage);
-    const authHeader = await getAuthHeader();
+    formData.append("language", activeSpeechLanguageCode);
+    const authHeader = await getAuthHeader({ forceRefresh: true });
     const headers: Record<string, string> = { ...authHeader };
     const guestToken = guestTtsToken.trim();
     if (!authHeader.Authorization && guestToken) {
@@ -10376,7 +12596,7 @@ function LiveKitConferenceMobile({
       );
     }
     return String((transcriptPayload as { text?: string })?.text || "").trim();
-  }, [guestTtsToken, roomId, sourceLanguage]);
+  }, [activeSpeechLanguageCode, guestTtsToken, roomId]);
   const stopPushToTalkRecognition = useCallback(() => {
     pushToTalkPressedRef.current = false;
     pushToTalkPointerIdRef.current = null;
@@ -10408,6 +12628,13 @@ function LiveKitConferenceMobile({
       pushToTalkInterruptTimerRef.current = null;
     }, 1800);
   }, []);
+  const resetPushToTalkDraftReview = useCallback(() => {
+    pushToTalkDraftReviewRequestRef.current += 1;
+    pushToTalkDraftReviewAbortRef.current?.abort();
+    pushToTalkDraftReviewAbortRef.current = null;
+    setPushToTalkDraftReview(null);
+    setPushToTalkDraftReviewBusy(false);
+  }, []);
   const interruptCurrentTurn = useCallback(() => {
     pushToTalkSessionRef.current += 1;
     pushToTalkDraftIdRef.current += 1;
@@ -10426,11 +12653,69 @@ function LiveKitConferenceMobile({
     setPushToTalkDraft(null);
     setPushToTalkDraftText("");
     setPushToTalkDraftEditing(false);
+    resetPushToTalkDraftReview();
     setAiPartnerBusy(false);
     setAiPartnerOverlayText("");
     stopPushToTalkRecognition();
+    void publishTalkieLock("release");
     stopGuestCaptionPlayback();
-  }, [stopPushToTalkRecognition, stopGuestCaptionPlayback]);
+  }, [
+    publishTalkieLock,
+    resetPushToTalkDraftReview,
+    stopPushToTalkRecognition,
+    stopGuestCaptionPlayback,
+  ]);
+  const resetAiPartnerConversationState = useCallback(() => {
+    interruptCurrentTurn();
+    aiPartnerConversationRef.current = [];
+    if (captionTimerRef.current) {
+      clearTimeout(captionTimerRef.current);
+      captionTimerRef.current = null;
+    }
+    if (aiPartnerOverlayTimerRef.current) {
+      clearTimeout(aiPartnerOverlayTimerRef.current);
+      aiPartnerOverlayTimerRef.current = null;
+    }
+    setCaptionError("");
+    setSourceText("");
+    setCaptionText("");
+    setCaptionPhoneticText("");
+    setAiPartnerBusy(false);
+    setAiPartnerLastReply("");
+    setAiPartnerLastTranslatedReply("");
+    setAiPartnerFeedbackSource("");
+    setAiPartnerFeedbackTranslated("");
+    setAiPartnerFeedbackFrench("");
+    setAiPartnerFeedbackFrenchBusy(false);
+    setAiPartnerFeedbackView("target");
+    setAiPartnerOverlayText("");
+    setAiPartnerView("translation");
+    setAiPartnerCoachPhoneticText("");
+    setAiPartnerCoachPhoneticBusy(false);
+  }, [interruptCurrentTurn]);
+  useEffect(() => {
+    const nextConfig = {
+      sourceLanguage,
+      trainingTarget: localReceptionTarget,
+      respondInTrainingLanguage,
+    };
+    const previousConfig = aiPracticeLanguageConfigRef.current;
+    aiPracticeLanguageConfigRef.current = nextConfig;
+    if (!aiTrainingAutoStart || isChatSession) return;
+    const changed =
+      previousConfig.sourceLanguage !== nextConfig.sourceLanguage ||
+      previousConfig.trainingTarget !== nextConfig.trainingTarget ||
+      previousConfig.respondInTrainingLanguage !== nextConfig.respondInTrainingLanguage;
+    if (!changed) return;
+    resetAiPartnerConversationState();
+  }, [
+    aiTrainingAutoStart,
+    isChatSession,
+    localReceptionTarget,
+    resetAiPartnerConversationState,
+    respondInTrainingLanguage,
+    sourceLanguage,
+  ]);
   const requestAiPartnerReply = useCallback(
     async (userInput: string) => {
       if (!aiPartnerActive || aiPartnerBusyRef.current) return;
@@ -10449,7 +12734,7 @@ function LiveKitConferenceMobile({
       setAiPartnerFeedbackSource("");
       setAiPartnerFeedbackTranslated("");
       try {
-        const authHeader = await getAuthHeader();
+        const authHeader = await getAuthHeader({ forceRefresh: true });
         if (!authHeader.Authorization) {
           setCaptionError("Partenaire IA: connecte-toi pour activer l'entrainement.");
           return;
@@ -10466,7 +12751,7 @@ function LiveKitConferenceMobile({
             coachMode: "partner",
             coachScenario: aiPartnerScenario,
             coachTone: aiPartnerTone,
-            coachLanguage: sourceLanguageName,
+            coachLanguage: activeSpeechLanguageName,
             roomId,
             timeoutMs: 18_000,
             maxTokens: 300,
@@ -10475,11 +12760,12 @@ function LiveKitConferenceMobile({
               {
                 role: "system",
                 content: buildAiPartnerSystemPrompt(
-                  sourceLanguageName,
+                  activeSpeechLanguageName,
                   aiPartnerScenario,
                   aiPartnerTone
                 ),
               },
+              ...aiPartnerConversationRef.current,
               { role: "user", content: prompt },
             ],
           }),
@@ -10500,6 +12786,12 @@ function LiveKitConferenceMobile({
         const aiReplySource = parsedCoachPayload.reply.replace(/\s+/g, " ").trim();
         if (!aiReplySource) return;
         if (requestId !== activeAiPartnerRequestRef.current) return;
+        const nextConversation: AiPartnerConversationMessage[] = [
+          ...aiPartnerConversationRef.current,
+          { role: "user", content: prompt },
+          { role: "assistant", content: aiReplySource },
+        ];
+        aiPartnerConversationRef.current = nextConversation.slice(-AI_PARTNER_HISTORY_LIMIT);
         setAiPartnerLastReply(aiReplySource);
         let feedbackSource = parsedCoachPayload.feedback.trim();
         const previousFeedbackSnapshot = aiPartnerFeedbackSource.trim();
@@ -10517,7 +12809,7 @@ function LiveKitConferenceMobile({
               body: JSON.stringify({
                 intent: "coach_ai",
                 coachMode: "partner_feedback",
-                coachLanguage: sourceLanguageName,
+                coachLanguage: activeSpeechLanguageName,
                 roomId,
                 timeoutMs: 12_000,
                 maxTokens: 220,
@@ -10525,7 +12817,7 @@ function LiveKitConferenceMobile({
                 messages: [
                   {
                     role: "system",
-                    content: buildAiPartnerFeedbackRecoveryPrompt(sourceLanguageName),
+                    content: buildAiPartnerFeedbackRecoveryPrompt(activeSpeechLanguageName),
                   },
                   {
                     role: "user",
@@ -10563,14 +12855,14 @@ function LiveKitConferenceMobile({
 
         let aiReplyForUser = aiReplySource;
         let feedbackForUser = feedbackSource;
-        if (sourceLanguage !== localReceptionTarget) {
+        if (activeSpeechLanguageCode !== localReceptionTarget) {
           try {
             const translated = await translateWithOpenAi(
               aiReplySource,
-              sourceLanguageName,
+              activeSpeechLanguageName,
               localReceptionTargetName,
               {
-                fromCode: sourceLanguage,
+                fromCode: activeSpeechLanguageCode,
                 toCode: localReceptionTarget,
                 guestToken: guestTtsToken,
                 intent: "translation",
@@ -10587,10 +12879,10 @@ function LiveKitConferenceMobile({
             try {
               const translatedFeedback = await translateWithOpenAi(
                 feedbackSource,
-                sourceLanguageName,
+                activeSpeechLanguageName,
                 localReceptionTargetName,
                 {
-                  fromCode: sourceLanguage,
+                  fromCode: activeSpeechLanguageCode,
                   toCode: localReceptionTarget,
                   guestToken: guestTtsToken,
                   intent: "translation",
@@ -10646,17 +12938,18 @@ function LiveKitConferenceMobile({
       activeAiPartnerAbortRef,
       activeAiPartnerRequestRef,
       aiPartnerActive,
+      aiPartnerConversationRef,
       aiPartnerFeedbackSource,
       guestTtsEnabled,
       guestTtsToken,
       aiPartnerScenario,
       aiPartnerTone,
-      sourceLanguageName,
+      activeSpeechLanguageCode,
+      activeSpeechLanguageName,
       localReceptionTarget,
       localReceptionTargetName,
       roomChat,
       roomId,
-      sourceLanguage,
       speakGuestCaption,
     ]
   );
@@ -10679,8 +12972,8 @@ function LiveKitConferenceMobile({
     if (aiPartnerFeedbackFrench.trim()) return;
     if (aiPartnerFeedbackFrenchBusy) return;
 
-    const fromCode = feedbackTarget ? localReceptionTarget : sourceLanguage;
-    const fromName = feedbackTarget ? localReceptionTargetName : sourceLanguageName;
+    const fromCode = feedbackTarget ? localReceptionTarget : activeSpeechLanguageCode;
+    const fromName = feedbackTarget ? localReceptionTargetName : activeSpeechLanguageName;
     if (fromCode === "fr") {
       setAiPartnerFeedbackFrench(baseText);
       return;
@@ -10709,10 +13002,10 @@ function LiveKitConferenceMobile({
     aiPartnerFeedbackSource,
     aiPartnerFeedbackTranslated,
     guestTtsToken,
+    activeSpeechLanguageCode,
+    activeSpeechLanguageName,
     localReceptionTarget,
     localReceptionTargetName,
-    sourceLanguage,
-    sourceLanguageName,
   ]);
   const requestAiPartnerCoachPhonetic = useCallback(async () => {
     const text = aiPartnerCoachActionText.trim();
@@ -10766,38 +13059,12 @@ function LiveKitConferenceMobile({
     aiPartnerView,
     requestAiPartnerCoachPhonetic,
   ]);
-  const saveAiPartnerCoachToNotebook = useCallback(() => {
-    const sourceTextForNotebook = aiPartnerLastReply.trim() || aiPartnerCoachActionText.trim();
-    const translatedTextForNotebook =
-      aiPartnerLastTranslatedReply.trim() || aiPartnerCoachActionText.trim();
-    if (!sourceTextForNotebook || !translatedTextForNotebook) return;
-    saveTranslationNotebookEntry({
-      sourceText: sourceTextForNotebook,
-      translatedText: translatedTextForNotebook,
-      sourceLanguageCode: sourceLanguage,
-      sourceLanguageName,
-      targetLanguageCode: localReceptionTarget,
-      targetLanguageName: localReceptionTargetName,
-      direction: "incoming",
-    });
-    setAiPartnerCoachSavedToNotebook(true);
-    if (aiPartnerCoachSavedTimerRef.current) {
-      clearTimeout(aiPartnerCoachSavedTimerRef.current);
-    }
-    aiPartnerCoachSavedTimerRef.current = setTimeout(() => {
-      setAiPartnerCoachSavedToNotebook(false);
-    }, 1800);
-  }, [
-    aiPartnerCoachActionText,
-    aiPartnerLastReply,
-    aiPartnerLastTranslatedReply,
-    localReceptionTarget,
-    localReceptionTargetName,
-    sourceLanguage,
-    sourceLanguageName,
-  ]);
   const translateAndBroadcast = useCallback(
-    async (input: string, durationSeconds = 1) => {
+    async (
+      input: string,
+      durationSeconds = 1,
+      deliveryGate?: Promise<boolean>
+    ) => {
       if (!effectiveTranslationEnabled) {
         setCaptionError(translationUnavailableMessage);
         return;
@@ -10815,29 +13082,58 @@ function LiveKitConferenceMobile({
       setSourceText(trimmed);
       setSourceFromLocal(true);
       try {
-        const sameLanguage = sourceLanguage === outgoingTarget;
+        if (aiTrainingAutoStart) {
+          const deliveryAllowed = await (deliveryGate ?? Promise.resolve(true)).catch(
+            () => false
+          );
+          if (requestId !== activeTranslationRequestRef.current) return;
+          if (!deliveryAllowed) {
+            setCaptionError(translationUnavailableMessage);
+            return;
+          }
+        }
+        const sameLanguage = activeSpeechLanguageCode === outgoingTarget;
         let finalText = trimmed;
+        let translationWarning = "";
         if (!sameLanguage) {
-          const translated = await translateWithOpenAi(
-            trimmed,
-            sourceLanguageName,
-            outgoingTargetName,
-              {
-                fromCode: sourceLanguage,
-                toCode: outgoingTarget,
-                guestToken: guestTtsToken,
-                signal: requestController.signal,
-              }
+          try {
+            const translated = await resolveGuestTranslationForTarget(
+              trimmed,
+              activeSpeechLanguageCode,
+              activeSpeechLanguageName,
+              outgoingTarget,
+              outgoingTargetName,
+              requestController.signal
             );
             if (requestId !== activeTranslationRequestRef.current) return;
-            finalText = translated || trimmed;
-          } else {
-            setCaptionError("Info: langue source et reception identiques, texte conserve.");
+            if (translated.trim()) {
+              finalText = translated.trim();
+            }
+          } catch (err) {
+            if (
+              requestController.signal.aborted ||
+              (err instanceof Error && err.name === "AbortError")
+            ) {
+              throw err;
+            }
+            const message = err instanceof Error ? err.message : "Erreur de traduction.";
+            translationWarning = toFriendlyAiError(message);
           }
-          if (!finalText) return;
+        }
+        if (!finalText) return;
+        if (requestId !== activeTranslationRequestRef.current) return;
+        if (!aiTrainingAutoStart) {
+          const deliveryAllowed = await (deliveryGate ?? Promise.resolve(true)).catch(
+            () => false
+          );
           if (requestId !== activeTranslationRequestRef.current) return;
-          setCaptionText(finalText);
-          setCaptionPhoneticTarget(outgoingTarget);
+          if (!deliveryAllowed) {
+            setCaptionError(translationUnavailableMessage);
+            return;
+          }
+        }
+        setCaptionText(finalText);
+        setCaptionPhoneticTarget(outgoingTarget);
         if (captionTimerRef.current) clearTimeout(captionTimerRef.current);
         if (!aiPartnerActive) {
           captionTimerRef.current = setTimeout(() => {
@@ -10846,15 +13142,6 @@ function LiveKitConferenceMobile({
           }, 15000);
         }
         if (guestTtsEnabled) {
-          saveTranslationNotebookEntry({
-            sourceText: trimmed,
-            translatedText: finalText,
-            sourceLanguageCode: sourceLanguage,
-            sourceLanguageName,
-            targetLanguageCode: outgoingTarget,
-            targetLanguageName: outgoingTargetName,
-            direction: "outgoing",
-          });
           void speakGuestCaption(finalText, outgoingTarget);
         }
         const payload: CaptionPayload = {
@@ -10862,8 +13149,8 @@ function LiveKitConferenceMobile({
           text: finalText,
           target: outgoingTarget,
           sourceText: trimmed,
-          sourceLang: sourceLanguage,
-          sourceLangName: sourceLanguageName,
+          sourceLang: activeSpeechLanguageCode,
+          sourceLangName: activeSpeechLanguageName,
           durationSeconds: Math.max(1, Math.floor(durationSeconds || 1)),
           from: localParticipant?.identity || "host",
           timestamp: Date.now(),
@@ -10875,6 +13162,13 @@ function LiveKitConferenceMobile({
           topic: "bfzoom-captions",
         });
         if (requestId !== activeTranslationRequestRef.current) return;
+        if (sameLanguage) {
+          setCaptionError("Info: langue source et reception identiques, texte conserve.");
+        } else if (translationWarning) {
+          setCaptionError(
+            `Traduction indisponible temporairement: affichage source conserve (${translationWarning})`
+          );
+        }
         if (aiPartnerActive) {
           void requestAiPartnerReply(trimmed);
         }
@@ -10899,16 +13193,17 @@ function LiveKitConferenceMobile({
     [
       activeTranslationAbortRef,
       activeTranslationRequestRef,
+      aiTrainingAutoStart,
       localParticipant?.identity,
       localReceptionTarget,
       localReceptionTargetName,
       roomId,
       sendCaption,
-      guestTtsToken,
       guestTtsEnabled,
+      resolveGuestTranslationForTarget,
       speakGuestCaption,
-      sourceLanguage,
-      sourceLanguageName,
+      activeSpeechLanguageCode,
+      activeSpeechLanguageName,
       aiPartnerActive,
       requestAiPartnerReply,
       effectiveTranslationEnabled,
@@ -10921,6 +13216,113 @@ function LiveKitConferenceMobile({
       pushToTalkDraftTimerRef.current = null;
     }
   }, []);
+  const requestPushToTalkDraftReview = useCallback(
+    async (
+      draftId: number,
+      transcript: string,
+      captureSource: PushToTalkDraftCaptureSource = "speech"
+    ) => {
+      if (!shouldUsePushToTalkDraftReview) return;
+      const normalizedTranscript = normalizeComparableText(transcript);
+      if (!normalizedTranscript) return;
+      const cacheKey = `${activeSpeechLanguageCode}:${captureSource}:${normalizedTranscript}`;
+      const cached = pushToTalkDraftReviewCacheRef.current.get(cacheKey);
+      if (cached) {
+        if (pushToTalkDraftIdRef.current !== draftId) return;
+        setPushToTalkDraftReview(cached);
+        setPushToTalkDraftReviewBusy(false);
+        return;
+      }
+
+      pushToTalkDraftReviewAbortRef.current?.abort();
+      const requestController = new AbortController();
+      pushToTalkDraftReviewAbortRef.current = requestController;
+      const requestId = ++pushToTalkDraftReviewRequestRef.current;
+      setPushToTalkDraftReview(null);
+      setPushToTalkDraftReviewBusy(true);
+      try {
+        const review = await reviewPushToTalkDraftWithOpenAi(transcript, activeSpeechLanguageName, {
+          signal: requestController.signal,
+          targetCode: activeSpeechLanguageCode,
+          guestToken: guestTtsToken,
+          mode: pushToTalkDraftReviewMode,
+          captureSource,
+        });
+        if (
+          requestId !== pushToTalkDraftReviewRequestRef.current ||
+          pushToTalkDraftIdRef.current !== draftId
+        ) {
+          return;
+        }
+        pushToTalkDraftReviewCacheRef.current.set(cacheKey, review);
+        setPushToTalkDraftReview(review);
+      } catch (err) {
+        if (
+          requestController.signal.aborted ||
+          (err instanceof Error && err.name === "AbortError")
+        ) {
+          return;
+        }
+        if (
+          requestId !== pushToTalkDraftReviewRequestRef.current ||
+          pushToTalkDraftIdRef.current !== draftId
+        ) {
+          return;
+        }
+        const message =
+          err instanceof Error ? err.message : "Analyse avant envoi indisponible.";
+        setCaptionError(
+          `${pushToTalkDraftReviewMode === "translation" ? "Verification avant traduction" : "Verification avant envoi"}: ${toFriendlyAiError(message)}`
+        );
+        setPushToTalkDraftReview({
+          status: "review",
+          message: "Analyse indisponible. Corrige manuellement ou envoie tel quel.",
+          correctedText: "",
+          naturalText: "",
+          familiarText: "",
+          reviewedText: transcript,
+        });
+      } finally {
+        if (pushToTalkDraftReviewAbortRef.current === requestController) {
+          pushToTalkDraftReviewAbortRef.current = null;
+        }
+        if (
+          requestId === pushToTalkDraftReviewRequestRef.current &&
+          pushToTalkDraftIdRef.current === draftId
+        ) {
+          setPushToTalkDraftReviewBusy(false);
+        }
+      }
+    },
+    [
+      activeSpeechLanguageCode,
+      activeSpeechLanguageName,
+      guestTtsToken,
+      pushToTalkDraftReviewMode,
+      shouldUsePushToTalkDraftReview,
+    ]
+  );
+  const openPushToTalkManualDraft = useCallback(
+    (message: string, elapsedSeconds: number, initialText = "") => {
+      const transcript = initialText.trim();
+      clearPushToTalkDraftTimer();
+      const draftId = pushToTalkDraftIdRef.current + 1;
+      pushToTalkDraftIdRef.current = draftId;
+      setPushToTalkDraft({
+        id: draftId,
+        transcript,
+        elapsedSeconds: Math.max(1, Math.floor(elapsedSeconds || 1)),
+        captureSource: transcript ? "recording" : "manual",
+        requiresExplicitConfirmation: true,
+      });
+      setPushToTalkDraftText(transcript);
+      resetPushToTalkDraftReview();
+      setPushToTalkDraftReview(buildManualPushToTalkDraftReview(message, transcript));
+      setPushToTalkDraftEditing(true);
+      setCaptionError(message);
+    },
+    [clearPushToTalkDraftTimer, resetPushToTalkDraftReview]
+  );
   const submitPushToTalkDraft = useCallback(
     async (overrideText?: string) => {
       const draft = pushToTalkDraft;
@@ -10931,65 +13333,88 @@ function LiveKitConferenceMobile({
         return;
       }
       clearPushToTalkDraftTimer();
+      resetPushToTalkDraftReview();
       pushToTalkDraftIdRef.current += 1;
       setPushToTalkDraft(null);
       setPushToTalkDraftEditing(false);
       setPushToTalkDraftText("");
       setPushToTalkGestureHint("");
-      if (translationController) {
-        const consumed = await onConsumeTranslationSeconds(draft.elapsedSeconds, "local");
-        if (!consumed) {
-          setCaptionError(translationUnavailableMessage);
-          return;
-        }
+      const deliveryGate = translationController
+        ? onConsumeTranslationSeconds(draft.elapsedSeconds, "local")
+        : undefined;
+      try {
+        await publishTalkieLock("claim");
+        await translateAndBroadcast(finalTranscript, draft.elapsedSeconds, deliveryGate);
+      } finally {
+        void publishTalkieLock("release");
       }
-      await translateAndBroadcast(finalTranscript, draft.elapsedSeconds);
     },
     [
       clearPushToTalkDraftTimer,
       onConsumeTranslationSeconds,
+      publishTalkieLock,
       pushToTalkDraft,
       pushToTalkDraftText,
+      resetPushToTalkDraftReview,
       translationController,
-      translationUnavailableMessage,
       translateAndBroadcast,
     ]
   );
   const queuePushToTalkDraft = useCallback(
-    (rawTranscript: string, elapsedSeconds: number) => {
+    (
+      rawTranscript: string,
+      elapsedSeconds: number,
+      options: QueuePushToTalkDraftOptions = {}
+    ) => {
       const transcript = rawTranscript.trim();
-      if (!transcript) {
-        setCaptionError("Aucune voix detectee. Maintiens le bouton puis parle.");
+      if (!transcript && !options.forceEditing) {
+        void publishTalkieLock("release");
+        setCaptionError(ui.noVoiceDetected);
         return;
       }
       clearPushToTalkDraftTimer();
+      void publishTalkieLock("release");
       const draftId = pushToTalkDraftIdRef.current + 1;
       pushToTalkDraftIdRef.current = draftId;
       const draft: PushToTalkDraft = {
         id: draftId,
         transcript,
         elapsedSeconds: Math.max(1, Math.floor(elapsedSeconds || 1)),
+        captureSource: options.captureSource || "speech",
+        requiresExplicitConfirmation: Boolean(options.requiresExplicitConfirmation),
       };
       setPushToTalkDraft(draft);
       setPushToTalkDraftText(transcript);
-      const requireCorrection = shouldForcePushToTalkCorrection(transcript);
-      setPushToTalkDraftEditing(requireCorrection);
-      if (requireCorrection) {
-        setCaptionError(
-          "Vérifie la phrase captée puis clique Envoyer. La détection semble incomplète."
-        );
+      resetPushToTalkDraftReview();
+      if (options.reviewOverride) {
+        setPushToTalkDraftReview(options.reviewOverride);
+      }
+      const requireCorrection = transcript ? shouldForcePushToTalkCorrection(transcript) : true;
+      const shouldStartEditing = Boolean(options.forceEditing) || requireCorrection;
+      setPushToTalkDraftEditing(shouldStartEditing);
+      if (shouldStartEditing) {
+        setCaptionError(options.reviewOverride?.message || ui.incompleteDetection);
         return;
       }
-      pushToTalkDraftTimerRef.current = setTimeout(() => {
-        if (pushToTalkDraftIdRef.current !== draftId) return;
-        void submitPushToTalkDraft(transcript);
-      }, PUSH_TO_TALK_AUTO_SEND_MS);
+      if (shouldUsePushToTalkDraftReview) {
+        void requestPushToTalkDraftReview(draftId, transcript, draft.captureSource);
+      }
     },
-    [clearPushToTalkDraftTimer, submitPushToTalkDraft]
+    [
+      clearPushToTalkDraftTimer,
+      publishTalkieLock,
+      requestPushToTalkDraftReview,
+      resetPushToTalkDraftReview,
+      shouldUsePushToTalkDraftReview,
+      ui.incompleteDetection,
+      ui.noVoiceDetected,
+    ]
   );
   const cancelPushToTalkDraft = useCallback(
     (message = "Capture annulee.") => {
       clearPushToTalkDraftTimer();
+      resetPushToTalkDraftReview();
+      void publishTalkieLock("release");
       pushToTalkDraftIdRef.current += 1;
       setPushToTalkDraft(null);
       setPushToTalkDraftText("");
@@ -10997,7 +13422,7 @@ function LiveKitConferenceMobile({
       setPushToTalkGestureHint("");
       setCaptionError(message);
     },
-    [clearPushToTalkDraftTimer]
+    [clearPushToTalkDraftTimer, publishTalkieLock, resetPushToTalkDraftReview]
   );
   const cancelPushToTalkCapture = useCallback(
     (message = "Capture annulee.") => {
@@ -11023,6 +13448,7 @@ function LiveKitConferenceMobile({
       pushToTalkRecorderRef.current = null;
       pushToTalkChunksRef.current = [];
       releasePushToTalkStream();
+      void publishTalkieLock("release");
       setPushToTalkActive(false);
       setPushToTalkBusy(false);
       cancelPushToTalkDraft(message);
@@ -11036,18 +13462,68 @@ function LiveKitConferenceMobile({
       }, 1800);
       stopGuestCaptionPlayback();
     },
-    [cancelPushToTalkDraft, releasePushToTalkStream, stopGuestCaptionPlayback]
+    [cancelPushToTalkDraft, publishTalkieLock, releasePushToTalkStream, stopGuestCaptionPlayback]
   );
   const setPushToTalkDraftEditMode = useCallback(() => {
     clearPushToTalkDraftTimer();
     setPushToTalkDraftEditing(true);
   }, [clearPushToTalkDraftTimer]);
+  const handlePushToTalkDraftTextChange = useCallback(
+    (nextValue: string) => {
+      clearPushToTalkDraftTimer();
+      resetPushToTalkDraftReview();
+      setPushToTalkDraftEditing(true);
+      setPushToTalkDraftText(nextValue);
+    },
+    [clearPushToTalkDraftTimer, resetPushToTalkDraftReview]
+  );
+  const applyPushToTalkDraftSuggestion = useCallback(
+    (nextValue: string) => {
+      clearPushToTalkDraftTimer();
+      resetPushToTalkDraftReview();
+      setPushToTalkDraftText(nextValue);
+      setPushToTalkDraftEditing(true);
+    },
+    [clearPushToTalkDraftTimer, resetPushToTalkDraftReview]
+  );
+  const pushToTalkDraftReviewCurrent = isPushToTalkDraftReviewCurrent(
+    pushToTalkDraftReview,
+    pushToTalkDraftText
+  );
+  const pushToTalkDraftAutoSendEnabled =
+    Boolean(pushToTalkDraft) &&
+    !pushToTalkDraftEditing &&
+    !pushToTalkDraft?.requiresExplicitConfirmation &&
+    !shouldForcePushToTalkCorrection(pushToTalkDraftText) &&
+    (!shouldUsePushToTalkDraftReview ||
+      (!pushToTalkDraftReviewBusy &&
+        pushToTalkDraftReviewCurrent &&
+        pushToTalkDraftReview?.status === "ok"));
+  useEffect(() => {
+    clearPushToTalkDraftTimer();
+    if (!pushToTalkDraft || !pushToTalkDraftAutoSendEnabled) return;
+    const draftId = pushToTalkDraft.id;
+    pushToTalkDraftTimerRef.current = setTimeout(() => {
+      if (pushToTalkDraftIdRef.current !== draftId) return;
+      void submitPushToTalkDraft();
+    }, PUSH_TO_TALK_AUTO_SEND_MS);
+    return clearPushToTalkDraftTimer;
+  }, [
+    clearPushToTalkDraftTimer,
+    pushToTalkDraft,
+    pushToTalkDraftAutoSendEnabled,
+    submitPushToTalkDraft,
+  ]);
   const startPushToTalkRecognition = useCallback(() => {
     if (!effectiveTranslationEnabled) {
       setCaptionError(translationUnavailableMessage);
       return;
     }
     if (!captionsEnabled) return;
+    if (isTalkieLockedByOther) {
+      setCaptionError(talkieLockedMessage);
+      return;
+    }
     if (pushToTalkPressedRef.current) return;
     if (pushToTalkBusy || aiPartnerBusyRef.current) {
       interruptCurrentTurn();
@@ -11055,7 +13531,7 @@ function LiveKitConferenceMobile({
     }
     if (pushToTalkActive) return;
     if (realtimeEnabled) {
-      setCaptionError("Desactive Realtime pour utiliser le mode appuyer pour parler.");
+      setCaptionError(ui.disableRealtimeForPushToTalk);
       return;
     }
     if (!pushToTalkSupported || typeof window === "undefined") {
@@ -11071,8 +13547,9 @@ function LiveKitConferenceMobile({
     pushToTalkStartedAtRef.current = Date.now();
     setCaptionError("");
     setPushToTalkActive(true);
+    void publishTalkieLock("claim");
 
-    if (speechRecognitionSupported) {
+    if (speechRecognitionSupported && !preferRecorderPushToTalk) {
       const maybeWindow = window as unknown as {
         SpeechRecognition?: new () => any;
         webkitSpeechRecognition?: new () => any;
@@ -11082,7 +13559,7 @@ function LiveKitConferenceMobile({
         let finalTranscript = "";
         const recognition = new SpeechCtor();
         recognitionRef.current = recognition;
-        recognition.lang = sourceLanguageLocale || "fr-FR";
+        recognition.lang = activeSpeechLanguageLocale || "fr-FR";
         recognition.continuous = true;
         recognition.interimResults = true;
         recognition.maxAlternatives = 1;
@@ -11108,8 +13585,9 @@ function LiveKitConferenceMobile({
           if (sessionId !== pushToTalkSessionRef.current) return;
           const reason = String(event?.error || "Erreur micro");
           if (reason === "aborted") return;
+          void publishTalkieLock("release");
           if (reason === "no-speech") {
-            setCaptionError("Aucune voix detectee. Maintiens le bouton puis parle.");
+            setCaptionError(ui.noVoiceDetected);
             return;
           }
           setCaptionError(`Micro: ${toFriendlyAiError(reason)}`);
@@ -11127,12 +13605,16 @@ function LiveKitConferenceMobile({
           );
           pushToTalkStartedAtRef.current = null;
           if (!transcript) {
+            void publishTalkieLock("release");
             if (!pushToTalkBusy) {
-              setCaptionError("Aucune voix detectee. Maintiens le bouton puis parle.");
+              setCaptionError(ui.noVoiceDetected);
             }
             return;
           }
-          queuePushToTalkDraft(transcript, elapsedSeconds);
+          void publishTalkieLock("release");
+          queuePushToTalkDraft(transcript, elapsedSeconds, {
+            captureSource: "speech",
+          });
         };
         try {
           recognition.start();
@@ -11145,6 +13627,7 @@ function LiveKitConferenceMobile({
 
     if (!mediaRecorderSupported || typeof MediaRecorder === "undefined" || !navigator.mediaDevices?.getUserMedia) {
       setPushToTalkActive(false);
+      void publishTalkieLock("release");
       setCaptionError("Push-to-talk indisponible sur cet iPhone.");
       return;
     }
@@ -11173,6 +13656,7 @@ function LiveKitConferenceMobile({
         };
         recorder.onerror = () => {
           if (sessionId !== pushToTalkSessionRef.current) return;
+          void publishTalkieLock("release");
           setCaptionError("Enregistrement audio interrompu.");
           setPushToTalkBusy(false);
           setPushToTalkActive(false);
@@ -11188,6 +13672,7 @@ function LiveKitConferenceMobile({
           releasePushToTalkStream();
           if (chunks.length === 0) {
             pushToTalkStartedAtRef.current = null;
+            void publishTalkieLock("release");
             setPushToTalkBusy(false);
             return;
           }
@@ -11195,31 +13680,52 @@ function LiveKitConferenceMobile({
           const blob = new Blob(chunks, { type: mimeTypeValue });
           if (blob.size < 1400) {
             pushToTalkStartedAtRef.current = null;
+            void publishTalkieLock("release");
             setCaptionError("Audio trop court. Maintiens le bouton un peu plus longtemps.");
             setPushToTalkBusy(false);
             return;
           }
           void (async () => {
+            const elapsedSeconds = Math.max(
+              1,
+              Math.round(
+                ((Date.now() - (pushToTalkStartedAtRef.current ?? Date.now())) / 1000) || 1
+              )
+            );
+            pushToTalkStartedAtRef.current = null;
             try {
               if (sessionId !== pushToTalkSessionRef.current) return;
               setPushToTalkBusy(true);
               const transcript = await transcribePushToTalkBlob(blob, mimeTypeValue);
               if (sessionId !== pushToTalkSessionRef.current) return;
               if (!transcript) {
-                setCaptionError("Aucune voix detectee. Maintiens le bouton puis parle.");
+                void publishTalkieLock("release");
+                if (aiTrainingAutoStart) {
+                  openPushToTalkManualDraft(
+                    ui.mobileTranscriptionUnclear,
+                    elapsedSeconds
+                  );
+                  return;
+                }
+                setCaptionError(ui.noVoiceDetected);
                 return;
               }
-              const elapsedSeconds = Math.max(
-                1,
-                Math.round(
-                  ((Date.now() - (pushToTalkStartedAtRef.current ?? Date.now())) / 1000) || 1
-                )
-              );
-              pushToTalkStartedAtRef.current = null;
-              queuePushToTalkDraft(transcript, elapsedSeconds);
+              void publishTalkieLock("release");
+              queuePushToTalkDraft(transcript, elapsedSeconds, {
+                captureSource: "recording",
+                requiresExplicitConfirmation: aiTrainingAutoStart,
+              });
             } catch (err) {
               if (sessionId !== pushToTalkSessionRef.current) return;
+              void publishTalkieLock("release");
               const message = err instanceof Error ? err.message : "Transcription impossible.";
+              if (aiTrainingAutoStart) {
+                openPushToTalkManualDraft(
+                  `${ui.mobileTranscriptionFailed} (${toFriendlyAiError(message)})`,
+                  elapsedSeconds
+                );
+                return;
+              }
               setCaptionError(`Traduction: ${toFriendlyAiError(message)}`);
             } finally {
               if (sessionId !== pushToTalkSessionRef.current) return;
@@ -11236,6 +13742,7 @@ function LiveKitConferenceMobile({
         pushToTalkStartedAtRef.current = null;
         setPushToTalkActive(false);
         setPushToTalkBusy(false);
+        void publishTalkieLock("release");
         const message = err instanceof Error ? err.message : "Acces micro refuse.";
         setCaptionError(`Micro: ${toFriendlyAiError(message)}`);
         pushToTalkRecorderRef.current = null;
@@ -11247,20 +13754,30 @@ function LiveKitConferenceMobile({
     captionsEnabled,
     getRecorderMimeType,
     mediaRecorderSupported,
+    preferRecorderPushToTalk,
     pushToTalkActive,
     pushToTalkBusy,
     pushToTalkSupported,
     realtimeEnabled,
     releasePushToTalkStream,
-    sourceLanguageLocale,
+    activeSpeechLanguageLocale,
     speechRecognitionSupported,
     interruptCurrentTurn,
+    publishTalkieLock,
     showPushToTalkInterruptHint,
     stopGuestCaptionPlayback,
+    aiTrainingAutoStart,
+    openPushToTalkManualDraft,
     effectiveTranslationEnabled,
+    isTalkieLockedByOther,
     translationUnavailableMessage,
+    talkieLockedMessage,
     transcribePushToTalkBlob,
     queuePushToTalkDraft,
+    ui.disableRealtimeForPushToTalk,
+    ui.mobileTranscriptionFailed,
+    ui.mobileTranscriptionUnclear,
+    ui.noVoiceDetected,
   ]);
   const handlePushToTalkPointerDown = useCallback(
     (event: any) => {
@@ -11353,6 +13870,7 @@ function LiveKitConferenceMobile({
   const toggleCamera = useCallback(async () => {
     if (!localParticipant) return;
     if (isTogglingCamera) return;
+    if (roomIsRecovering) return;
     setIsTogglingCamera(true);
     setMediaError("");
 
@@ -11385,7 +13903,35 @@ function LiveKitConferenceMobile({
     } finally {
       setIsTogglingCamera(false);
     }
-  }, [isCameraEnabled, isTogglingCamera, localParticipant]);
+  }, [isCameraEnabled, isTogglingCamera, localParticipant, roomIsRecovering]);
+  const flipCamera = useCallback(async () => {
+    if (!localParticipant || isFlippingCamera) return;
+    setIsFlippingCamera(true);
+    try {
+      const publication = localParticipant.getTrackPublication(Track.Source.Camera);
+      const track = publication?.track as
+        | {
+            getDeviceId: (normalize?: boolean) => Promise<string | undefined>;
+            setDeviceId: (id: string) => Promise<boolean>;
+          }
+        | undefined;
+      if (!track) {
+        setMediaError("Camera non active.");
+        return;
+      }
+      const devices = await Room.getLocalDevices("videoinput");
+      if (devices.length < 2) return;
+      const currentId = await track.getDeviceId();
+      let currentIndex = devices.findIndex((device) => device.deviceId === currentId);
+      if (currentIndex < 0) currentIndex = 0;
+      const nextDevice = devices[(currentIndex + 1) % devices.length];
+      await track.setDeviceId(nextDevice.deviceId);
+    } catch (err) {
+      setMediaError(err instanceof Error ? err.message : "Impossible de changer de camera.");
+    } finally {
+      setIsFlippingCamera(false);
+    }
+  }, [isFlippingCamera, localParticipant]);
 
   useEffect(() => {
     const pub = localParticipant?.getTrackPublication(Track.Source.ScreenShare);
@@ -11446,7 +13992,8 @@ function LiveKitConferenceMobile({
         setSourceFromLocal(false);
 
         let localText = payload.text;
-        let localTarget = payload.target;
+        let localTarget = normalizeCaptionTargetCode(payload.target);
+        let fallbackMessage = "";
         if (
           localReceptionTarget &&
           localReceptionTargetName &&
@@ -11465,86 +14012,53 @@ function LiveKitConferenceMobile({
                 resolveLanguageNameFromCode(payload.sourceLang) ||
                 "Source";
           if (translationInput) {
-            const translationCacheKey = buildTranslationCacheKey(
-              translationInput,
-              translationFromCode || "",
-              localReceptionTarget
-            );
-            const cachedTranslation =
-              guestTranslationCacheRef.current.get(translationCacheKey);
-            if (cachedTranslation) {
-              localText = cachedTranslation;
-              localTarget = localReceptionTarget;
-            } else {
-              let inFlightTranslation =
-                guestTranslationInFlightRef.current.get(translationCacheKey);
-              if (!inFlightTranslation) {
-                inFlightTranslation = translateWithOpenAi(
-                  translationInput,
-                  translationFromName,
+            try {
+              const guestTranslation = await resolveGuestTranslationForTarget(
+                translationInput,
+                translationFromCode,
+                translationFromName,
+                localReceptionTarget,
+                localReceptionTargetName
+              );
+              if (guestTranslation.trim()) {
+                localText = guestTranslation.trim();
+                localTarget = localReceptionTarget;
+              } else {
+                fallbackMessage = buildCaptionFallbackMessage(
                   localReceptionTargetName,
-                  {
-                    fromCode: translationFromCode,
-                    toCode: localReceptionTarget,
-                    guestToken: guestTtsToken,
-                    intent: "translation",
-                  }
-                ).then((result) => result.trim());
-                guestTranslationInFlightRef.current.set(
-                  translationCacheKey,
-                  inFlightTranslation
+                  localTarget ?? payload.target
                 );
               }
-              try {
-                const guestTranslation = await inFlightTranslation;
-                if (guestTranslation) {
-                  localText = guestTranslation;
-                  localTarget = localReceptionTarget;
-                  upsertLruValue(
-                    guestTranslationCacheRef.current,
-                    translationCacheKey,
-                    guestTranslation,
-                    GUEST_TRANSLATION_CACHE_LIMIT
-                  );
-                }
-              } catch (err) {
-                console.warn("Guest translation failed", err);
-              } finally {
-                const currentInFlight =
-                  guestTranslationInFlightRef.current.get(translationCacheKey);
-                if (currentInFlight === inFlightTranslation) {
-                  guestTranslationInFlightRef.current.delete(translationCacheKey);
-                }
-              }
+            } catch (err) {
+              console.warn("Guest translation failed", err);
+              fallbackMessage = buildCaptionFallbackMessage(
+                localReceptionTargetName,
+                localTarget ?? payload.target
+              );
             }
           }
         }
+        const resolvedCaptionTarget = resolveCaptionDisplayTarget(
+          localTarget ?? payload.target,
+          localReceptionTarget
+        );
+        const captionMatchesReception =
+          !localReceptionTarget || resolvedCaptionTarget === localReceptionTarget;
+        const captionErrorMessage = captionMatchesReception
+          ? ""
+          : fallbackMessage ||
+            buildCaptionFallbackMessage(localReceptionTargetName, resolvedCaptionTarget);
         if (cancelled) return;
         setCaptionText(localText);
-        setCaptionPhoneticTarget((localTarget ?? localReceptionTarget) as CaptionTarget);
-        if (guestTtsEnabled) {
-          const notebookSourceText = (payload.sourceText || payload.text || "").trim();
-          const notebookTargetCode = ((localTarget ?? localReceptionTarget) || "").trim();
-          const notebookTargetName =
-            resolveLanguageNameFromCode(notebookTargetCode) || localReceptionTargetName;
-          if (notebookSourceText && localText?.trim()) {
-            saveTranslationNotebookEntry({
-              sourceText: notebookSourceText,
-              translatedText: localText.trim(),
-              sourceLanguageCode: payload.sourceLang || payload.target || "",
-              sourceLanguageName:
-                payload.sourceLangName ||
-                resolveLanguageNameFromCode(payload.sourceLang) ||
-                resolveLanguageNameFromCode(payload.target) ||
-                "Source",
-              targetLanguageCode: notebookTargetCode,
-              targetLanguageName: notebookTargetName,
-              direction: "incoming",
-            });
-          }
-        }
-        if (guestTtsEnabled) {
-          void speakGuestCaption(localText ?? payload.text, localTarget ?? payload.target);
+        setCaptionPhoneticTarget(resolvedCaptionTarget);
+        setCaptionError(captionErrorMessage);
+        const remotePublishedAudioHandlesPlayback = Boolean(
+          payload.audioTrackPublished &&
+            hasRemotePublishedTranslationAudioTrack &&
+            captionMatchesReception
+        );
+        if (guestTtsEnabled && !remotePublishedAudioHandlesPlayback && captionMatchesReception) {
+          void speakGuestCaption(localText ?? payload.text, resolvedCaptionTarget);
         }
         if (captionTimerRef.current) clearTimeout(captionTimerRef.current);
         if (!aiPartnerActive) {
@@ -11566,11 +14080,13 @@ function LiveKitConferenceMobile({
     captionIncoming,
     guestTtsToken,
     guestTtsEnabled,
+    hasRemotePublishedTranslationAudioTrack,
     isHost,
     localParticipant?.identity,
     localReceptionTarget,
     localReceptionTargetName,
     onConsumeTranslationSeconds,
+    resolveGuestTranslationForTarget,
     roomId,
     speakGuestCaption,
     translationUnavailableMessage,
@@ -11588,10 +14104,6 @@ function LiveKitConferenceMobile({
         pushToTalkDraftTimerRef.current = null;
       }
       if (aiPartnerOverlayTimerRef.current) clearTimeout(aiPartnerOverlayTimerRef.current);
-      if (aiPartnerCoachSavedTimerRef.current) {
-        clearTimeout(aiPartnerCoachSavedTimerRef.current);
-        aiPartnerCoachSavedTimerRef.current = null;
-      }
       stopPushToTalkRecognition();
       const recorder = pushToTalkRecorderRef.current;
       if (recorder && recorder.state !== "inactive") {
@@ -11606,6 +14118,9 @@ function LiveKitConferenceMobile({
       activeTranslationAbortRef.current = null;
       activeAiPartnerAbortRef.current?.abort();
       activeAiPartnerAbortRef.current = null;
+      pushToTalkDraftReviewRequestRef.current += 1;
+      pushToTalkDraftReviewAbortRef.current?.abort();
+      pushToTalkDraftReviewAbortRef.current = null;
       stopGuestCaptionPlayback();
     };
   }, [
@@ -11617,20 +14132,24 @@ function LiveKitConferenceMobile({
   useEffect(() => {
     if (!captionsEnabled || realtimeEnabled || !effectiveTranslationEnabled) {
       stopPushToTalkRecognition();
+      void publishTalkieLock("release");
       setPushToTalkActive(false);
       setPushToTalkBusy(false);
       clearPushToTalkDraftTimer();
       setPushToTalkDraft(null);
       setPushToTalkDraftText("");
       setPushToTalkDraftEditing(false);
+      resetPushToTalkDraftReview();
       setPushToTalkGestureHint("");
     }
   }, [
     captionsEnabled,
     realtimeEnabled,
+    publishTalkieLock,
     stopPushToTalkRecognition,
     effectiveTranslationEnabled,
     clearPushToTalkDraftTimer,
+    resetPushToTalkDraftReview,
   ]);
 
   useEffect(() => {
@@ -11689,10 +14208,26 @@ function LiveKitConferenceMobile({
     }
   }, [canMosaic, focusTrackId]);
 
-  const inviteLinks = buildInviteLinks(roomId);
+  const ensureShareInviteId = useCallback(async () => {
+    if (!isHost || !roomId) return "";
+    if (shareInviteId) return shareInviteId;
+    const inviteId = await createLivekitRoomInviteId(roomId);
+    setShareInviteId((current) => current || inviteId);
+    return inviteId;
+  }, [isHost, roomId, shareInviteId]);
+  useEffect(() => {
+    setShareInviteId("");
+  }, [roomId]);
+  useEffect(() => {
+    if (!isHost || !roomId) return;
+    void ensureShareInviteId().catch(() => {});
+  }, [ensureShareInviteId, isHost, roomId]);
+
+  const inviteLinks = shareInviteId ? buildInviteLinks(shareInviteId) : { smart: "" };
 
   const copyInvite = async (kind: InviteLinkKind) => {
-    const link = inviteLinks[kind];
+    const activeInviteId = await ensureShareInviteId().catch(() => "");
+    const link = activeInviteId ? buildInviteLinks(activeInviteId)[kind] : inviteLinks[kind];
     if (!link) return;
     try {
       await navigator.clipboard.writeText(link);
@@ -11703,27 +14238,393 @@ function LiveKitConferenceMobile({
     }
   };
   const shareInvite = async () => {
-    const link = inviteLinks.smart;
+    const activeInviteId = await ensureShareInviteId().catch(() => "");
+    const link = activeInviteId ? buildInviteLinks(activeInviteId).smart : inviteLinks.smart;
     if (!link) return;
-    const shareTitle = "Invitation BFZoom";
-    const shareText = "Rejoins ma visioconference BFZoom avec ce lien.";
-    try {
-      if (typeof navigator !== "undefined" && typeof navigator.share === "function") {
-        await navigator.share({
-          title: shareTitle,
-          text: shareText,
-          url: link,
-        });
-        setInviteCopied("shared");
-      } else {
-        await navigator.clipboard.writeText(link);
-        setInviteCopied("smart");
-      }
-      setTimeout(() => setInviteCopied(null), 1500);
-    } catch {
+    if (typeof navigator === "undefined" || typeof navigator.share !== "function") {
       setInviteCopied(null);
+      return;
     }
+    const shareTitle = ui.inviteEmailSubject;
+    const shareText = ui.inviteEmailBody;
+    void navigator
+      .share({
+        title: shareTitle,
+        text: shareText,
+        url: link,
+      })
+      .then(() => {
+        setInviteCopied("shared");
+        setTimeout(() => setInviteCopied(null), 1500);
+      })
+      .catch(() => {
+        setInviteCopied(null);
+      });
   };
+  const pushToTalkDisabled =
+    translationControlsDisabled ||
+    !pushToTalkSupported ||
+    realtimeEnabled ||
+    isTalkieLockedByOther;
+  const pushToTalkTitle = translationControlsDisabled
+    ? translationUnavailableMessage
+    : isTalkieLockedByOther
+    ? talkieLockedMessage
+    : realtimeEnabled
+    ? "Desactive Realtime pour utiliser ce mode."
+    : "Maintiens le bouton pendant que tu parles.";
+  const pushToTalkBottomOffset =
+    useCompactPhoneControls && !aiTrainingAutoStart
+      ? moreActionsOpen
+        ? "calc(env(safe-area-inset-bottom, 0px) + 13rem)"
+        : "calc(env(safe-area-inset-bottom, 0px) + 9.25rem)"
+      : "1.5rem";
+  const pushToTalkOverlay =
+    captionsEnabled && !aiPartnerActive && !(useCompactPhoneControls && moreActionsOpen) ? (
+      <div
+        className="pointer-events-none absolute inset-x-0 z-30 flex justify-center px-4"
+        style={{ bottom: pushToTalkBottomOffset }}
+      >
+        <button
+          type="button"
+          onClick={(event) => event.stopPropagation()}
+          onPointerDown={handlePushToTalkPointerDown}
+          onPointerMove={handlePushToTalkPointerMove}
+          onPointerUp={handlePushToTalkPointerEnd}
+          onPointerCancel={(event) => handlePushToTalkPointerEnd(event, true)}
+          onTouchStart={(event) => {
+            event.preventDefault();
+            startPushToTalkRecognition();
+          }}
+          onTouchEnd={(event) => {
+            event.preventDefault();
+            handlePushToTalkPointerEnd();
+          }}
+          onTouchCancel={(event) => {
+            event.preventDefault();
+            handlePushToTalkPointerEnd(undefined, true);
+          }}
+          onMouseDown={startPushToTalkRecognition}
+          onMouseUp={() => handlePushToTalkPointerEnd()}
+          onMouseLeave={() => {
+            if (!pushToTalkPressedRef.current) return;
+            handlePushToTalkPointerEnd(undefined, true);
+          }}
+          disabled={pushToTalkDisabled}
+          className={`pointer-events-auto inline-flex min-h-11 w-full max-w-88 items-center justify-center gap-2 rounded-full border px-5 py-3 text-[13px] font-semibold shadow-2xl ring-1 ring-black/40 ${
+            pushToTalkActive
+              ? "border-rose-200! bg-rose-600! text-white!"
+              : pushToTalkBusy
+              ? "border-sky-200! bg-sky-600! text-white!"
+              : "border-emerald-200! bg-emerald-700! text-white! hover:bg-emerald-600!"
+          } disabled:cursor-not-allowed disabled:opacity-50`}
+          title={pushToTalkTitle}
+          aria-label={ui.holdToTalk}
+          style={{
+            backgroundColor: pushToTalkActive
+              ? "rgba(225, 29, 72, 0.95)"
+              : pushToTalkBusy
+              ? "rgba(2, 132, 199, 0.95)"
+              : "rgba(4, 120, 87, 0.95)",
+            color: "#ffffff",
+            borderColor: "rgba(226, 232, 240, 0.95)",
+            touchAction: "none",
+            WebkitUserSelect: "none",
+            userSelect: "none",
+          }}
+        >
+          <Mic className="h-4 w-4" />
+          <span>
+            {pushToTalkActive
+              ? ui.releaseToTranslate
+              : pushToTalkBusy
+              ? ui.translating
+              : ui.holdToTalk}
+          </span>
+        </button>
+      </div>
+    ) : null;
+  const translationLanguageControls = (
+    <div className="space-y-3">
+      <label className="flex flex-col gap-1">
+        <span className="font-semibold text-slate-100">{ui.spokenLanguage}</span>
+        <select
+          value={sourceLanguage}
+          onChange={(event) =>
+            onChangeSourceLanguage(event.target.value as SourceLanguageOption["code"])
+          }
+          disabled={translationControlsDisabled}
+          className="rounded-md border border-slate-500 bg-slate-900 px-2 py-2 text-[11px] text-slate-100"
+          style={{
+            backgroundColor: "rgba(15, 23, 42, 0.95)",
+            color: "#f8fafc",
+            borderColor: "rgba(100, 116, 139, 0.85)",
+          }}
+        >
+          {SOURCE_LANGUAGE_OPTIONS.map((option) => (
+            <option key={option.code} value={option.code}>
+              {`${option.name} (${option.label})`}
+            </option>
+          ))}
+        </select>
+      </label>
+      {!isChatSession && !aiTrainingAutoStart && (
+        <button
+          type="button"
+          onClick={onToggleGuestTts}
+          disabled={translationControlsDisabled}
+          className={`inline-flex w-full min-h-10 items-center justify-center gap-2 rounded-full border px-3 py-2 text-[12px] font-semibold shadow-sm disabled:cursor-not-allowed disabled:opacity-55 ${
+            guestTtsEnabled
+              ? "border-sky-300/80 bg-sky-600/90 text-white"
+              : "border-slate-500/70 bg-slate-800/80 text-slate-100"
+          }`}
+          title="Active la voix traduite locale pour s'exercer."
+          style={{
+            backgroundColor: guestTtsEnabled
+              ? "rgba(2, 132, 199, 0.95)"
+              : "rgba(15, 23, 42, 0.95)",
+            color: "#ffffff",
+            borderColor: guestTtsEnabled
+              ? "rgba(125, 211, 252, 0.95)"
+              : "rgba(148, 163, 184, 0.85)",
+          }}
+        >
+          <Volume2 className="h-4 w-4" />
+          <span>
+            {ui.localPlayback}:{" "}
+            {translationControlsDisabled ? ui.blocked : guestTtsEnabled ? "ON" : "OFF"}
+          </span>
+        </button>
+      )}
+      <label className="flex flex-col gap-1">
+        <span className="font-semibold text-slate-100">
+          {guestTtsEnabled ? ui.communicationLanguage : ui.personalReceptionLanguage}
+        </span>
+        <select
+          value={localReceptionTarget}
+          onChange={(event) =>
+            handleLocalReceptionTargetChange(event.target.value as CaptionTarget)
+          }
+          disabled={translationControlsDisabled}
+          className="rounded-md border border-slate-500 bg-slate-900 px-2 py-2 text-[11px] text-slate-100"
+          style={{
+            backgroundColor: "rgba(15, 23, 42, 0.95)",
+            color: "#f8fafc",
+            borderColor: "rgba(100, 116, 139, 0.85)",
+          }}
+        >
+          {CAPTION_TARGETS_CONFIG.map((target) => (
+            <option key={target.code} value={target.code}>
+              {`${target.name} (${target.label})`}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="inline-flex items-center gap-1">
+        <span className="text-[10px] text-slate-300">{ui.info}</span>
+        <InfoBubble text={localReceptionHint} label={ui.receptionInfoLabel} align="right" />
+      </div>
+    </div>
+  );
+  const compactFooterRoleLabel = isHost ? ui.hostSection : locale === "fr" ? "Invite" : "Guest";
+  const compactFooterName = (
+    localParticipant?.name ||
+    localParticipant?.identity ||
+    compactFooterRoleLabel
+  ).trim();
+  const compactConnectionQuality =
+    localParticipant?.connectionQuality || ConnectionQuality.Unknown;
+  const compactConnectionActiveBars =
+    compactConnectionQuality === ConnectionQuality.Excellent
+      ? 3
+      : compactConnectionQuality === ConnectionQuality.Good
+      ? 2
+      : compactConnectionQuality === ConnectionQuality.Poor
+      ? 1
+      : 0;
+  const compactConnectionLabel = locale === "fr" ? "Connexion" : "Connection";
+  const languageOverlay =
+    !aiPartnerActive && !useCompactPhoneControls ? (
+      <div className="pointer-events-none absolute left-3 top-3 z-30 w-[min(18rem,calc(100%-1.5rem))]">
+        <details
+          onClick={(event) => event.stopPropagation()}
+          className="pointer-events-auto rounded-2xl border px-3 py-2 text-[11px] text-slate-100 shadow-xl backdrop-blur"
+          style={{
+            backgroundColor: "rgba(2, 6, 23, 0.9)",
+            color: "#f8fafc",
+            borderColor: "rgba(100, 116, 139, 0.8)",
+          }}
+        >
+          <summary className="cursor-pointer select-none font-semibold text-slate-100">
+            {ui.translationLanguages}
+          </summary>
+          <div className="mt-3">{translationLanguageControls}</div>
+        </details>
+      </div>
+    ) : null;
+  const compactPhoneActionMenu =
+    useCompactPhoneControls && !aiPartnerActive && !aiTrainingAutoStart ? (
+      <div className="pointer-events-none absolute left-3 top-[calc(env(safe-area-inset-top)+0.75rem)] z-40 flex w-[min(20rem,calc(100vw-1.5rem))] flex-col items-start gap-2">
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            setMoreActionsOpen((value) => !value);
+          }}
+          className="pointer-events-auto inline-flex min-h-11 items-center justify-center rounded-full border border-slate-600/80 bg-slate-950/90 px-3 py-2 text-slate-100 shadow-xl backdrop-blur"
+          aria-label={ui.moreActionsAria}
+        >
+          <Menu className="h-5 w-5" />
+        </button>
+        {moreActionsOpen && (
+          <div
+            className="pointer-events-auto w-full rounded-2xl border border-slate-700/80 bg-slate-950/95 p-3 text-slate-100 shadow-2xl backdrop-blur"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-300">
+                {ui.more}
+              </p>
+              <button
+                type="button"
+                onClick={() => setMoreActionsOpen(false)}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-slate-700 bg-slate-900/80 text-slate-100"
+                aria-label={ui.close}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="rounded-2xl border border-sky-500/35 bg-slate-900/80 px-3 py-2 text-[11px] text-slate-50 shadow-sm">
+              <div className="font-semibold text-sky-100">
+                {isChatSession ? ui.translationRemaining : ui.translationRemainingHost}
+                {translationRemainingLabel}
+              </div>
+              {!effectiveTranslationEnabled && (
+                <div className="mt-2">
+                  {translationController ? (
+                    <button
+                      type="button"
+                      onClick={openCreditsTopUpFromCall}
+                      className="inline-flex items-center rounded-full border border-amber-200/70 bg-amber-100/12 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-amber-50 transition hover:bg-amber-100/20"
+                    >
+                      {ui.topUpNow}
+                    </button>
+                  ) : (
+                    <div className="text-[10px] font-semibold text-amber-100/90">
+                      {ui.askHostToTopUp}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+            <details className="rounded-xl border border-slate-700/80 bg-slate-900/70 px-3 py-2">
+              <summary className="cursor-pointer list-none text-[12px] font-semibold text-slate-100">
+                {ui.translationLanguages}
+              </summary>
+              <div className="mt-3">{translationLanguageControls}</div>
+            </details>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <TrackToggle
+                source={Track.Source.Microphone}
+                showIcon={false}
+                disabled={isHost && !shareMicToGuests}
+              >
+                {isMicrophoneEnabled ? (
+                  <Mic className="h-4 w-4 text-slate-100" />
+                ) : (
+                  <MicOff className="h-4 w-4 text-red-300" />
+                )}
+                <span className="text-slate-100">{ui.microphone}</span>
+              </TrackToggle>
+              <button
+                type="button"
+                onClick={toggleCamera}
+                disabled={isTogglingCamera}
+                className="lk-button"
+                aria-label={isCameraEnabled ? ui.disableCameraAria : ui.enableCameraAria}
+              >
+                {isCameraEnabled ? (
+                  <Camera className="h-4 w-4 text-slate-100" />
+                ) : (
+                  <CameraOff className="h-4 w-4 text-red-300" />
+                )}
+                <span className="text-slate-100">
+                  {isTogglingCamera ? ui.cameraBusy : ui.camera}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={handleLeaveRoom}
+                className="lk-disconnect-button bg-rose-600/90! text-white! hover:bg-rose-600!"
+              >
+                <LogOut className="h-4 w-4" />
+                <span>{ui.leave}</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleToggleScreenShare}
+                className={`lk-button ${isScreenSharing ? "bg-sky-600" : ""}`}
+              >
+                <ScreenShare className="h-4 w-4 text-slate-100" />
+                <span className="text-slate-100">{ui.screen}</span>
+              </button>
+              <button
+                type="button"
+                onClick={flipCamera}
+                disabled={!isCameraEnabled || isFlippingCamera}
+                className="lk-button"
+              >
+                <SwitchCamera className="h-4 w-4 text-slate-100" />
+                <span className="text-slate-100">{ui.flip}</span>
+              </button>
+              {isHost ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setInviteOpen(true);
+                    setMoreActionsOpen(false);
+                  }}
+                  className="lk-button"
+                >
+                  <Share2 className="h-4 w-4" />
+                  <span>{ui.share}</span>
+                </button>
+              ) : (
+                <div />
+              )}
+              {isHost && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleEndRoomForAll();
+                    setMoreActionsOpen(false);
+                  }}
+                  disabled={endingRoomForAll}
+                  className="lk-button"
+                >
+                  <Power className="h-4 w-4" />
+                  <span>{endingRoomForAll ? ui.ending : ui.endShort}</span>
+                </button>
+              )}
+            </div>
+            {(inviteCopied || endRoomError) && (
+              <div className="mt-3 space-y-2">
+                {inviteCopied ? (
+                  <div className="rounded-full bg-emerald-500/20 px-3 py-1 text-[10px] font-semibold text-emerald-100">
+                    {getInviteCopiedLabel(inviteCopied, locale)}
+                  </div>
+                ) : null}
+                {endRoomError ? (
+                  <div className="rounded-xl bg-rose-500/15 px-3 py-2 text-[11px] font-semibold text-rose-100">
+                    {endRoomError}
+                  </div>
+                ) : null}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    ) : null;
 
   return (
     <div
@@ -11773,6 +14674,7 @@ function LiveKitConferenceMobile({
             </button>
           </div>
         )}
+        {compactPhoneActionMenu}
         {showMobileBadge && (
           <div className="absolute top-3 left-1/2 z-30 -translate-x-1/2 rounded-full border border-sky-400/60 bg-sky-500/20 px-3 py-1 text-[11px] text-sky-100">
             Mobile layout ON
@@ -11784,7 +14686,7 @@ function LiveKitConferenceMobile({
           </div>
         )}
         {showCaptionStack && (
-          <div className="absolute inset-x-0 bottom-[calc(var(--lk-control-bar-height)+16px)] z-20 flex justify-center px-4">
+          <div className="pointer-events-none absolute inset-x-0 top-[calc(env(safe-area-inset-top)+4.5rem)] z-20 flex justify-center px-4">
             <div
               className={`max-w-3xl rounded-xl border border-sky-300/70 bg-slate-950/90 px-4 py-2 text-center text-slate-50 shadow-lg backdrop-blur ${
                 captionSize === "lg"
@@ -11805,14 +14707,20 @@ function LiveKitConferenceMobile({
         )}
         {aiPartnerActive ? (
           <AiPartnerAvatarStage
+            roomId={roomId}
             sourceLanguageCode={sourceLanguage}
             sourceLanguageName={sourceLanguageName}
-            targetLanguageName={localReceptionTargetName}
+            spokenLanguageCode={activeSpeechLanguageCode}
+            spokenLanguageName={activeSpeechLanguageName}
+            targetLanguageName={captionDisplayTargetName}
             sourceText={sourceText}
             userTranslatedText={captionText}
             userPhoneticText={captionPhoneticText}
             coachText={aiPartnerDisplayText}
             coachSourceText={aiPartnerLastReply}
+            coachTranslatedText={aiPartnerLastTranslatedReply}
+            coachFeedbackSourceText={aiPartnerFeedbackSource}
+            coachFeedbackFrenchText={aiPartnerFeedbackFrench}
             coachFeedback={aiPartnerFeedbackDisplay}
             coachHelpView={aiPartnerFeedbackView}
             coachHelpFrenchBusy={aiPartnerFeedbackFrenchBusy}
@@ -11824,10 +14732,13 @@ function LiveKitConferenceMobile({
             avatarTheme={aiPartnerAvatarTheme}
             coachPhoneticText={aiPartnerCoachPhoneticText}
             coachPhoneticBusy={aiPartnerCoachPhoneticBusy}
-            coachSavedToNotebook={aiPartnerCoachSavedToNotebook}
+            realtimeVoice={realtimeVoice}
             pushToTalkActive={pushToTalkActive}
             pushToTalkBusy={pushToTalkBusy}
-            pushToTalkDisabled={translationControlsDisabled || !pushToTalkSupported || realtimeEnabled}
+            pushToTalkDisabled={
+              translationControlsDisabled || !pushToTalkSupported || realtimeEnabled || isTalkieLockedByOther
+            }
+            pushToTalkDraftVisible={Boolean(pushToTalkDraft)}
             onReplayUserTranslation={replayAiPartnerUserTranslation}
             onReplayCoach={replayAiPartnerCoach}
             onPushToTalkPointerDown={handlePushToTalkPointerDown}
@@ -11835,18 +14746,19 @@ function LiveKitConferenceMobile({
             onPushToTalkPointerEnd={handlePushToTalkPointerEnd}
             onPushToTalkStart={startPushToTalkRecognition}
             onChangeSourceLanguage={onChangeSourceLanguage}
+            respondInTrainingLanguage={respondInTrainingLanguage}
+            onChangeRespondInTrainingLanguage={onChangeRespondInTrainingLanguage}
             trainingTarget={localReceptionTarget}
             onChangeTrainingTarget={handleLocalReceptionTargetChange}
             onSetCoachHelpView={setAiPartnerFeedbackView}
             onEnsureCoachHelpFrench={ensureAiPartnerFeedbackFrench}
-            onSaveCoachToNotebook={saveAiPartnerCoachToNotebook}
-            onOpenNotebook={onOpenNotebook}
             onToggleView={setAiPartnerView}
           />
         ) : (
           <div className="lk-focus-layout-wrapper">
             {mobileView === "mosaic" ? (
-              <div className="bf-iphone-mosaic" onClick={(event) => event.stopPropagation()}>
+              <div className="bf-iphone-mosaic relative" onClick={(event) => event.stopPropagation()}>
+                {languageOverlay}
                 {cameraTracks.map((track) => (
                   <button
                     key={trackKey(track)}
@@ -11862,9 +14774,11 @@ function LiveKitConferenceMobile({
                     <ParticipantTile trackRef={track} />
                   </button>
                 ))}
+                {pushToTalkOverlay}
               </div>
             ) : (
-              <div className="bf-iphone-layout" onClick={(event) => event.stopPropagation()}>
+              <div className="bf-iphone-layout relative" onClick={(event) => event.stopPropagation()}>
+                {languageOverlay}
                 <div
                   className="bf-iphone-focus"
                   onClick={() => {
@@ -11897,306 +14811,166 @@ function LiveKitConferenceMobile({
                       </button>
                     ))}
                 </div>
+                {pushToTalkOverlay}
               </div>
             )}
           </div>
         )}
         <div
-          className={controlsHidden ? "hidden" : "relative z-20 px-2 pb-[env(safe-area-inset-bottom)]"}
+          className={
+            controlsHidden
+              ? "hidden"
+              : useCompactPhoneControls
+              ? "relative z-20 px-3 pb-[calc(env(safe-area-inset-bottom)+1.25rem)]"
+              : "relative z-20 px-2 pb-[calc(env(safe-area-inset-bottom)+0.75rem)]"
+          }
           onClick={(event) => event.stopPropagation()}
         >
-          <div className="bf-mobile-controls-shell max-h-[44dvh] overflow-y-auto rounded-xl border border-slate-700/80 bg-slate-950/90 p-2 shadow-xl backdrop-blur">
+          <div
+            className={`bf-mobile-controls-shell overflow-y-auto border border-slate-700/80 bg-slate-950/90 shadow-xl backdrop-blur ${
+              useCompactPhoneControls
+                ? "max-h-[28dvh] rounded-[1.35rem] p-2"
+                : "max-h-[52dvh] rounded-2xl p-2.5"
+            }`}
+          >
             <div className="bf-mobile-controls flex border-0! bg-transparent! p-0! flex-col gap-2">
-              {!aiTrainingAutoStart && (
-              <div className="flex w-full items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  {isHost && !isVerySmallViewport && !aiTrainingAutoStart && (
-                    <button
-                      onClick={() => setInviteOpen(true)}
-                      className="lk-button"
-                      aria-label="Partager le lien"
-                    >
-                      <Share2 className="h-4 w-4" />
-                      <span className="hidden sm:inline">Partager</span>
-                    </button>
-                  )}
-                  {isHost && !isVerySmallViewport && !aiTrainingAutoStart && inviteCopied && (
-                    <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-100">
-                      {getInviteCopiedLabel(inviteCopied)}
-                    </span>
-                  )}
-                  {isHost && isVerySmallViewport && !aiTrainingAutoStart && inviteCopied && (
-                    <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-100">
-                      Copie
-                    </span>
-                  )}
+              {useCompactPhoneControls && (
+                <div className="flex items-center justify-between gap-3 rounded-[1.05rem] border border-slate-700/80 bg-slate-900/75 px-3 py-2.5">
+                  <div className="min-w-0">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-slate-400">
+                      {compactFooterRoleLabel}
+                    </p>
+                    <p className="truncate text-[12px] font-semibold text-slate-100">
+                      {compactFooterName}
+                    </p>
+                  </div>
+                  <div
+                    className="flex items-end gap-1"
+                    aria-label={`${compactConnectionLabel}: ${compactConnectionQuality}`}
+                  >
+                    {[0, 1, 2].map((barIndex) => (
+                      <span
+                        key={barIndex}
+                        className={`w-1.5 rounded-full ${
+                          barIndex < compactConnectionActiveBars
+                            ? compactConnectionQuality === ConnectionQuality.Excellent
+                              ? "bg-emerald-400"
+                              : compactConnectionQuality === ConnectionQuality.Good
+                              ? "bg-amber-400"
+                              : "bg-rose-400"
+                            : "bg-slate-700"
+                        }`}
+                        style={{ height: `${0.55 + barIndex * 0.28}rem` }}
+                      />
+                    ))}
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  {isHost && !aiTrainingAutoStart && (
+              )}
+              {!aiTrainingAutoStart && !useCompactPhoneControls && (
+                <>
+                  <div className="flex w-full items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      {isHost && (
+                        <button
+                          onClick={() => setInviteOpen(true)}
+                          className="lk-button"
+                          aria-label={ui.shareAria}
+                        >
+                          <Share2 className="h-4 w-4" />
+                          <span className="hidden sm:inline">{ui.share}</span>
+                        </button>
+                      )}
+                      {isHost && inviteCopied && (
+                        <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-100">
+                          {getInviteCopiedLabel(inviteCopied, locale)}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {isHost && (
+                        <button
+                          type="button"
+                          onClick={handleEndRoomForAll}
+                          disabled={endingRoomForAll}
+                          className="inline-flex min-h-10 items-center justify-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold shadow-md transition disabled:cursor-not-allowed disabled:opacity-60"
+                          style={{
+                            backgroundColor: "rgba(190, 24, 93, 0.95)",
+                            color: "#ffffff",
+                            borderColor: "rgba(253, 164, 175, 0.95)",
+                          }}
+                        >
+                          <Power className="h-4 w-4" />
+                          <span className="text-[10px] sm:text-xs">
+                            {endingRoomForAll ? ui.ending : ui.endShort}
+                          </span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={handleLeaveRoom}
+                        className="lk-disconnect-button bg-rose-600/90! text-white! hover:bg-rose-600!"
+                      >
+                        <LogOut className="h-4 w-4" />
+                        <span className="hidden sm:inline">{ui.leave}</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex w-full flex-wrap items-center justify-center gap-1 sm:gap-2">
+                    <TrackToggle
+                      source={Track.Source.Microphone}
+                      showIcon={false}
+                      disabled={isHost && !shareMicToGuests}
+                    >
+                      {isMicrophoneEnabled ? (
+                        <Mic className="h-4 w-4 text-slate-100" />
+                      ) : (
+                        <MicOff className="h-4 w-4 text-red-300" />
+                      )}
+                      <span className="hidden text-slate-100 sm:inline">{ui.microphone}</span>
+                    </TrackToggle>
                     <button
                       type="button"
-                      onClick={handleEndRoomForAll}
-                      disabled={endingRoomForAll}
-                      className="inline-flex min-h-10 items-center justify-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold shadow-md transition disabled:cursor-not-allowed disabled:opacity-60"
-                      style={{
-                        backgroundColor: "rgba(190, 24, 93, 0.95)",
-                        color: "#ffffff",
-                        borderColor: "rgba(253, 164, 175, 0.95)",
-                      }}
+                      onClick={toggleCamera}
+                      disabled={isTogglingCamera}
+                      className="lk-button"
+                      aria-label={isCameraEnabled ? ui.disableCameraAria : ui.enableCameraAria}
                     >
-                      <Power className="h-4 w-4" />
-                      <span className="text-[10px] sm:text-xs">
-                        {endingRoomForAll ? "Fermeture..." : "Terminer"}
+                      {isCameraEnabled ? (
+                        <Camera className="h-4 w-4 text-slate-100" />
+                      ) : (
+                        <CameraOff className="h-4 w-4 text-red-300" />
+                      )}
+                      <span className="hidden text-slate-100 sm:inline">
+                        {isTogglingCamera ? ui.cameraBusy : ui.camera}
                       </span>
                     </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={handleLeaveRoom}
-                    className="lk-disconnect-button bg-rose-600/90! text-white! hover:bg-rose-600!"
-                  >
-                    <LogOut className="h-4 w-4" />
-                    <span className="hidden sm:inline">Quitter</span>
-                  </button>
-                </div>
-              </div>
-              )}
-
-              {!aiTrainingAutoStart && (
-              <div className="flex w-full flex-wrap items-center justify-center gap-1 sm:gap-2">
-                <TrackToggle
-                  source={Track.Source.Microphone}
-                  showIcon={false}
-                  disabled={isHost && !shareMicToGuests}
-                >
-                  {isMicrophoneEnabled ? (
-                    <Mic className="h-4 w-4 text-slate-100" />
-                  ) : (
-                    <MicOff className="h-4 w-4 text-red-300" />
-                  )}
-                  <span className="hidden text-slate-100 sm:inline">Micro</span>
-                </TrackToggle>
-                <button
-                  type="button"
-                  onClick={toggleCamera}
-                  disabled={isTogglingCamera}
-                  className="lk-button"
-                  aria-label={isCameraEnabled ? "Couper la camera" : "Activer la camera"}
-                >
-                  {isCameraEnabled ? (
-                    <Camera className="h-4 w-4 text-slate-100" />
-                  ) : (
-                    <CameraOff className="h-4 w-4 text-red-300" />
-                  )}
-                  <span className="hidden text-slate-100 sm:inline">
-                    {isTogglingCamera ? "Camera..." : "Camera"}
-                  </span>
-                </button>
-                {!isVerySmallViewport && (
-                  <button
-                    onClick={handleToggleScreenShare}
-                    className={`lk-button ${isScreenSharing ? "bg-sky-600" : ""}`}
-                  >
-                    <ScreenShare className="h-4 w-4 text-slate-100" />
-                    <span className="hidden text-slate-100 sm:inline">Ecran</span>
-                  </button>
-                )}
-                <button
-                  onClick={() =>
-                    onWidgetChange({ ...widgetState, showChat: !widgetState.showChat })
-                  }
-                  className="lk-button"
-                >
-                  <MessageCircle className="h-4 w-4 text-slate-100" />
-                  <span className="hidden text-slate-100 sm:inline">Chat</span>
-                </button>
-                {!isVerySmallViewport ? (
-                  <button onClick={onOpenSettings} className="lk-button">
-                    <Settings className="h-4 w-4 text-slate-100" />
-                    <span className="hidden text-slate-100 sm:inline">Reglages</span>
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => setMoreActionsOpen((value) => !value)}
-                    className="lk-button"
-                    aria-label="Plus d'actions"
-                  >
-                    <MoreHorizontal className="h-4 w-4 text-slate-100" />
-                    <span className="hidden text-slate-100 sm:inline">Plus</span>
-                  </button>
-                )}
-              </div>
-              )}
-              {!aiTrainingAutoStart && isVerySmallViewport && moreActionsOpen && (
-                <div className="flex w-full flex-wrap items-center justify-center gap-2 rounded-lg border border-slate-700/70 bg-slate-900/70 p-2">
-                  {isHost && !aiTrainingAutoStart && (
                     <button
-                      type="button"
-                      onClick={() => {
-                        setInviteOpen(true);
-                        setMoreActionsOpen(false);
-                      }}
+                      onClick={handleToggleScreenShare}
+                      className={`lk-button ${isScreenSharing ? "bg-sky-600" : ""}`}
+                    >
+                      <ScreenShare className="h-4 w-4 text-slate-100" />
+                      <span className="hidden text-slate-100 sm:inline">{ui.screen}</span>
+                    </button>
+                    <button
+                      onClick={() =>
+                        onWidgetChange({ ...widgetState, showChat: !widgetState.showChat })
+                      }
                       className="lk-button"
                     >
-                      <Share2 className="h-4 w-4" />
-                      <span className="hidden sm:inline">Partager</span>
+                      <MessageCircle className="h-4 w-4 text-slate-100" />
+                      <span className="hidden text-slate-100 sm:inline">{ui.chat}</span>
                     </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={handleToggleScreenShare}
-                    className={`lk-button ${isScreenSharing ? "bg-sky-600" : ""}`}
-                  >
-                    <ScreenShare className="h-4 w-4 text-slate-100" />
-                    <span className="hidden text-slate-100 sm:inline">Ecran</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onOpenSettings();
-                      setMoreActionsOpen(false);
-                    }}
-                    className="lk-button"
-                  >
-                    <Settings className="h-4 w-4 text-slate-100" />
-                    <span className="hidden text-slate-100 sm:inline">Reglages</span>
-                  </button>
-                </div>
+                    <button onClick={onOpenSettings} className="lk-button">
+                      <Settings className="h-4 w-4 text-slate-100" />
+                      <span className="hidden text-slate-100 sm:inline">{ui.settings}</span>
+                    </button>
+                  </div>
+                </>
               )}
 
               {captionsEnabled && (
                 <>
-                  {!isChatSession && !aiTrainingAutoStart && (
-                    <button
-                      type="button"
-                      onClick={onToggleGuestTts}
-                      disabled={translationControlsDisabled}
-                      className={`inline-flex w-full min-h-10 items-center justify-center gap-2 rounded-full border px-3 py-2 text-[12px] font-semibold shadow-sm disabled:cursor-not-allowed disabled:opacity-55 ${
-                        guestTtsEnabled
-                          ? "border-sky-300/80 bg-sky-600/90 text-white"
-                          : "border-slate-500/70 bg-slate-800/80 text-slate-100"
-                      }`}
-                      title="Active la voix traduite locale pour s'exercer."
-                      style={{
-                        backgroundColor: guestTtsEnabled
-                          ? "rgba(2, 132, 199, 0.95)"
-                          : "rgba(15, 23, 42, 0.95)",
-                        color: "#ffffff",
-                        borderColor: guestTtsEnabled
-                          ? "rgba(125, 211, 252, 0.95)"
-                          : "rgba(148, 163, 184, 0.85)",
-                      }}
-                    >
-                      <Volume2 className="h-4 w-4" />
-                      <span>
-                        Lecture locale:{" "}
-                        {translationControlsDisabled ? "BLOQUE" : guestTtsEnabled ? "ON" : "OFF"}
-                      </span>
-                    </button>
-                  )}
-                  {!isChatSession && AI_PARTNER_TRAINING_ENABLED && !aiTrainingAutoStart && (
-                    <button
-                      type="button"
-                      onClick={() => setAiPartnerEnabled((value) => !value)}
-                      disabled={translationControlsDisabled || !aiPartnerAvailable || aiPartnerBusy}
-                      className={`inline-flex w-full min-h-10 items-center justify-center gap-2 rounded-full border px-3 py-2 text-[12px] font-semibold shadow-sm disabled:cursor-not-allowed disabled:opacity-60 ${
-                        aiPartnerActive
-                          ? "border-amber-300/80 bg-amber-600/90 text-white"
-                          : "border-slate-500/70 bg-slate-800/80 text-slate-100"
-                      }`}
-                      style={{
-                        backgroundColor: aiPartnerActive
-                          ? "rgba(217, 119, 6, 0.95)"
-                          : "rgba(15, 23, 42, 0.95)",
-                        color: "#ffffff",
-                        borderColor: aiPartnerActive
-                          ? "rgba(252, 211, 77, 0.95)"
-                          : "rgba(148, 163, 184, 0.85)",
-                      }}
-                      title={
-                        !aiPartnerAvailable
-                          ? "Mode entrainement IA disponible uniquement en solo (sans invite)."
-                          : "Simule un interlocuteur IA dans la room."
-                      }
-                    >
-                      <Bot className="h-4 w-4" />
-                      <span>{AI_PARTNER_TOGGLE_LABEL}: {aiPartnerActive ? "ON" : "OFF"}</span>
-                    </button>
-                  )}
-                  {!isChatSession && AI_PARTNER_TRAINING_ENABLED && !aiTrainingAutoStart && (
-                    <div className="inline-flex items-center">
-                      <InfoBubble
-                        text={AI_PARTNER_TOGGLE_INFO}
-                        label="Info coach conversation IA mobile"
-                        align="left"
-                      />
-                    </div>
-                  )}
-                  {!aiPartnerActive && (
-                    <button
-                      type="button"
-                      onPointerDown={handlePushToTalkPointerDown}
-                      onPointerMove={handlePushToTalkPointerMove}
-                      onPointerUp={handlePushToTalkPointerEnd}
-                      onPointerCancel={(event) => handlePushToTalkPointerEnd(event, true)}
-                      onTouchStart={(event) => {
-                        event.preventDefault();
-                        startPushToTalkRecognition();
-                      }}
-                      onTouchEnd={(event) => {
-                        event.preventDefault();
-                        handlePushToTalkPointerEnd();
-                      }}
-                      onTouchCancel={(event) => {
-                        event.preventDefault();
-                        handlePushToTalkPointerEnd(undefined, true);
-                      }}
-                      onMouseDown={startPushToTalkRecognition}
-                      onMouseUp={() => handlePushToTalkPointerEnd()}
-                      onMouseLeave={() => {
-                        if (!pushToTalkPressedRef.current) return;
-                        handlePushToTalkPointerEnd(undefined, true);
-                      }}
-                      disabled={translationControlsDisabled || !pushToTalkSupported || realtimeEnabled}
-                      className={`mt-1 inline-flex w-full min-h-11 items-center justify-center gap-2 rounded-full border px-4 py-2 text-[13px] font-semibold shadow-lg ring-1 ring-black/30 ${
-                        pushToTalkActive
-                          ? "border-rose-200! bg-rose-600! text-white!"
-                          : pushToTalkBusy
-                          ? "border-sky-200! bg-sky-600! text-white!"
-                          : "border-emerald-200! bg-emerald-700! text-white! hover:bg-emerald-600!"
-                      } disabled:cursor-not-allowed disabled:opacity-50`}
-                      title={
-                        translationControlsDisabled
-                          ? translationUnavailableMessage
-                          : realtimeEnabled
-                          ? "Desactive Realtime pour utiliser ce mode."
-                          : "Maintiens le bouton pendant que tu parles."
-                      }
-                      aria-label="Maintenir pour parler"
-                      style={{
-                        backgroundColor: pushToTalkActive
-                          ? "rgba(225, 29, 72, 0.95)"
-                          : pushToTalkBusy
-                          ? "rgba(2, 132, 199, 0.95)"
-                          : "rgba(4, 120, 87, 0.95)",
-                        color: "#ffffff",
-                        borderColor: "rgba(226, 232, 240, 0.95)",
-                        touchAction: "none",
-                        WebkitUserSelect: "none",
-                        userSelect: "none",
-                      }}
-                    >
-                      <Mic className="h-4 w-4" />
-                      <span>
-                        {pushToTalkActive
-                          ? "Relache pour traduire"
-                          : pushToTalkBusy
-                          ? "Traduction..."
-                          : "Maintenir pour parler"}
-                      </span>
-                    </button>
-                  )}
                   {pushToTalkGestureHint && pushToTalkActive && (
                     <div
                       className="w-full rounded-lg border px-3 py-2 text-[11px] font-semibold shadow-sm"
@@ -12207,6 +14981,18 @@ function LiveKitConferenceMobile({
                       }}
                     >
                       {pushToTalkGestureHint}
+                    </div>
+                  )}
+                  {isTalkieLockedByOther && !pushToTalkActive && !pushToTalkBusy && captionsEnabled && (
+                    <div
+                      className="w-full rounded-lg border px-3 py-2 text-[11px] font-semibold shadow-sm"
+                      style={{
+                        backgroundColor: "rgba(51, 65, 85, 0.96)",
+                        color: "#e2e8f0",
+                        borderColor: "rgba(148, 163, 184, 0.85)",
+                      }}
+                    >
+                      {talkieLockedMessage}
                     </div>
                   )}
                   {pushToTalkInterruptHint && captionsEnabled && (
@@ -12222,60 +15008,25 @@ function LiveKitConferenceMobile({
                     </div>
                   )}
                   {pushToTalkDraft && (
-                    <div
-                      className="w-full rounded-lg border px-3 py-2 text-[11px] shadow-sm"
-                      style={{
-                        backgroundColor: "rgba(15, 23, 42, 0.96)",
-                        color: "#f8fafc",
-                        borderColor: "rgba(148, 163, 184, 0.85)",
-                      }}
-                    >
-                      <p className="text-[10px] font-semibold uppercase tracking-wide text-sky-100">
-                        Verification avant envoi
-                      </p>
-                      {pushToTalkDraftEditing ? (
-                        <textarea
-                          value={pushToTalkDraftText}
-                          onChange={(event) => setPushToTalkDraftText(event.target.value)}
-                          rows={3}
-                          className="mt-2 w-full rounded-md border border-slate-500/80 bg-slate-900/80 px-2 py-1.5 text-[12px] text-slate-50 outline-none ring-sky-400/60 focus:ring-1"
-                        />
-                      ) : (
-                        <p className="mt-1 whitespace-pre-wrap text-[12px] text-slate-100">
-                          {pushToTalkDraftText}
-                        </p>
-                      )}
-                      <div className="mt-2 flex flex-wrap items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => void submitPushToTalkDraft()}
-                          className="inline-flex items-center rounded-full border border-emerald-300/80 bg-emerald-600/85 px-3 py-1 text-[11px] font-semibold text-white"
-                        >
-                          Envoyer
-                        </button>
-                        {!pushToTalkDraftEditing && (
-                          <button
-                            type="button"
-                            onClick={setPushToTalkDraftEditMode}
-                            className="inline-flex items-center rounded-full border border-sky-300/80 bg-sky-700/70 px-3 py-1 text-[11px] font-semibold text-white"
-                          >
-                            Corriger
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => cancelPushToTalkDraft("Capture annulee.")}
-                          className="inline-flex items-center rounded-full border border-slate-300/70 bg-slate-700/70 px-3 py-1 text-[11px] font-semibold text-slate-100"
-                        >
-                          Annuler
-                        </button>
-                        {!pushToTalkDraftEditing && (
-                          <span className="text-[10px] text-slate-300">
-                            Envoi auto dans {Math.round(PUSH_TO_TALK_AUTO_SEND_MS / 1000)}s
-                          </span>
-                        )}
-                      </div>
-                    </div>
+                    <PushToTalkDraftModal
+                      draftText={pushToTalkDraftText}
+                      editing={pushToTalkDraftEditing}
+                      review={pushToTalkDraftReview}
+                      reviewBusy={pushToTalkDraftReviewBusy}
+                      reviewMode={pushToTalkDraftReviewMode}
+                      showAutoSendHint={pushToTalkDraftAutoSendEnabled}
+                      notebookEnabled={aiPartnerActive && activeSpeechLanguageCode === localReceptionTarget}
+                  notebookBaseText={pushToTalkDraftReview?.reviewedText || pushToTalkDraftText}
+                  notebookRoomId={roomId}
+                  notebookTargetLanguageCode={activeSpeechLanguageCode}
+                  notebookTargetLanguageName={activeSpeechLanguageName}
+                  notebookVoice={realtimeVoice}
+                  onChangeText={handlePushToTalkDraftTextChange}
+                  onSubmit={() => void submitPushToTalkDraft()}
+                  onEdit={setPushToTalkDraftEditMode}
+                      onCancel={() => cancelPushToTalkDraft("Capture annulee.")}
+                      onApplySuggestion={applyPushToTalkDraftSuggestion}
+                    />
                   )}
                   {sourceFromLocal && sourceText.trim() && (
                     <div
@@ -12287,41 +15038,24 @@ function LiveKitConferenceMobile({
                       }}
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <span className="font-semibold text-slate-100">Source captee</span>
+                        <span className="font-semibold text-slate-100">{ui.sourceCaptured}</span>
                         <span className="rounded-full border border-emerald-300/70 bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-100">
-                          Oral direct
+                          {ui.directSpeech}
                         </span>
                       </div>
                       <p className="mt-1 line-clamp-2 text-[11px] text-slate-300">{sourceText}</p>
                     </div>
                   )}
-                  {!aiTrainingAutoStart && (
-                    <button
-                      type="button"
-                      onClick={onOpenNotebook}
-                      disabled={translationControlsDisabled}
-                      className="inline-flex w-full min-h-10 items-center justify-center gap-2 rounded-full border px-3 py-2 text-[12px] font-semibold shadow-sm disabled:cursor-not-allowed disabled:opacity-55"
-                      title="Ouvrir les 10 dernieres traductions d'exercice."
-                      style={{
-                        backgroundColor: "rgba(30, 41, 59, 0.95)",
-                        color: "#f8fafc",
-                        borderColor: "rgba(148, 163, 184, 0.85)",
-                      }}
-                    >
-                      <BookOpen className="h-4 w-4" />
-                      <span>Bloc-notes traduction</span>
-                    </button>
-                  )}
-                  {!aiTrainingAutoStart && (
+                  {!aiTrainingAutoStart && !useCompactPhoneControls && (
                     <div className="mt-2 inline-flex items-center">
                       <InfoBubble
-                        text='Maintiens le bouton "Maintenir pour parler", parle, puis relache.'
+                        text={ui.talkieInfo}
                         label="Info talkie mobile"
                         align="left"
                       />
                     </div>
                   )}
-                  {!aiTrainingAutoStart && (
+                  {!aiTrainingAutoStart && !useCompactPhoneControls && (
                     <div
                       className="w-full rounded-lg border px-3 py-2 text-[11px] font-semibold shadow-sm"
                       style={{
@@ -12331,21 +15065,9 @@ function LiveKitConferenceMobile({
                       }}
                     >
                       {isChatSession
-                        ? "Temps traduction restant: "
-                        : "Temps traduction restant (hote): "}
+                        ? ui.translationRemaining
+                        : ui.translationRemainingHost}
                       {translationRemainingLabel}
-                    </div>
-                  )}
-                  {AI_PARTNER_TRAINING_ENABLED && !isChatSession && !aiPartnerAvailable && (
-                    <div
-                      className="w-full rounded-lg border px-3 py-2 text-[11px] font-semibold shadow-sm"
-                      style={{
-                        backgroundColor: "rgba(30, 41, 59, 0.96)",
-                        color: "#e2e8f0",
-                        borderColor: "rgba(148, 163, 184, 0.85)",
-                      }}
-                    >
-                      {AI_PARTNER_TOGGLE_LABEL}: mode solo uniquement. Invite un participant pour la visio classique.
                     </div>
                   )}
                 </>
@@ -12359,108 +15081,24 @@ function LiveKitConferenceMobile({
                     borderColor: "rgba(251, 191, 36, 0.9)",
                   }}
                 >
-                  {translationUnavailableMessage}
+                  <div>{translationUnavailableMessage}</div>
+                  {translationController ? (
+                    <button
+                      type="button"
+                      onClick={openCreditsTopUpFromCall}
+                      className="mt-2 inline-flex items-center rounded-full border border-amber-200/70 bg-amber-100/12 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-amber-50 transition hover:bg-amber-100/20"
+                    >
+                      {ui.topUpNow}
+                    </button>
+                  ) : (
+                    <div className="mt-2 text-[10px] font-semibold text-amber-100/90">
+                      {ui.askHostToTopUp}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
 
-            {!aiPartnerActive && (
-              <details
-                className="mt-2 rounded-lg border border-slate-500/60 bg-slate-950/85 px-3 py-2 text-[11px] text-slate-100 shadow-sm"
-                style={{
-                  backgroundColor: "rgba(2, 6, 23, 0.96)",
-                  color: "#f8fafc",
-                  borderColor: "rgba(100, 116, 139, 0.8)",
-                }}
-              >
-              <summary className="cursor-pointer select-none font-semibold text-slate-100">
-                Langues de traduction
-              </summary>
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                <span className="font-semibold" style={{ color: "#f8fafc" }}>Langue que tu parles</span>
-                <select
-                  value={sourceLanguage}
-                  onChange={(event) =>
-                    onChangeSourceLanguage(event.target.value as SourceLanguageOption["code"])
-                  }
-                  disabled={translationControlsDisabled}
-                  className="rounded-md border border-slate-500 bg-slate-900 px-2 py-1 text-[11px] text-slate-100"
-                  style={{
-                    backgroundColor: "rgba(15, 23, 42, 0.95)",
-                    color: "#f8fafc",
-                    borderColor: "rgba(100, 116, 139, 0.85)",
-                  }}
-                >
-                  {SOURCE_LANGUAGE_OPTIONS.map((option) => (
-                    <option key={option.code} value={option.code}>
-                      {`${option.name} (${option.label})`}
-                    </option>
-                  ))}
-                </select>
-                {guestTtsEnabled ? (
-                  <>
-                    <span className="font-semibold" style={{ color: "#f8fafc" }}>
-                      Langue de communication (texte + voix)
-                    </span>
-                    <select
-                      value={localReceptionTarget}
-                      onChange={(event) =>
-                        handleLocalReceptionTargetChange(event.target.value as CaptionTarget)
-                      }
-                      disabled={translationControlsDisabled}
-                      className="rounded-md border border-slate-500 bg-slate-900 px-2 py-1 text-[11px] text-slate-100"
-                      style={{
-                        backgroundColor: "rgba(15, 23, 42, 0.95)",
-                        color: "#f8fafc",
-                        borderColor: "rgba(100, 116, 139, 0.85)",
-                      }}
-                    >
-                      {CAPTION_TARGETS_CONFIG.map((target) => (
-                        <option key={target.code} value={target.code}>
-                          {`${target.name} (${target.label})`}
-                        </option>
-                      ))}
-                    </select>
-                  </>
-                ) : (
-                  <>
-                    <span className="font-semibold" style={{ color: "#f8fafc" }}>
-                      Langue de réception (personnelle)
-                    </span>
-                    <select
-                      value={localReceptionTarget}
-                      onChange={(event) =>
-                        handleLocalReceptionTargetChange(event.target.value as CaptionTarget)
-                      }
-                      disabled={translationControlsDisabled}
-                      className="rounded-md border border-slate-500 bg-slate-900 px-2 py-1 text-[11px] text-slate-100"
-                      style={{
-                        backgroundColor: "rgba(15, 23, 42, 0.95)",
-                        color: "#f8fafc",
-                        borderColor: "rgba(100, 116, 139, 0.85)",
-                      }}
-                    >
-                      {CAPTION_TARGETS_CONFIG.map((target) => (
-                        <option key={target.code} value={target.code}>
-                          {`${target.name} (${target.label})`}
-                        </option>
-                      ))}
-                    </select>
-                  </>
-                )}
-                <div className="inline-flex items-center gap-1">
-                  <span className="text-[10px] text-slate-300" style={{ color: "#cbd5e1" }}>
-                    Info
-                  </span>
-                  <InfoBubble
-                    text={localReceptionHint}
-                    label="Info langue de reception mobile"
-                    align="right"
-                  />
-                </div>
-              </div>
-              </details>
-            )}
           </div>
           {endRoomError && (
             <div className="mt-2 rounded-lg border border-rose-400/70 bg-rose-950/80 px-3 py-2 text-[11px] font-medium text-rose-100 shadow-sm">
@@ -12597,6 +15235,8 @@ function ChatDrawer({
     origin: "local" | "remote"
   ) => Promise<boolean>;
 }) {
+  const { locale } = useUiLocale();
+  const ui = LIVEKIT_UI_COPY[locale];
   const { localParticipant } = useLocalParticipant();
   const [draft, setDraft] = useState("");
   const [sourceLang, setSourceLang] = useState("Français");
@@ -12862,7 +15502,7 @@ function ChatDrawer({
       >
         <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-800 bg-slate-950 px-4 py-3">
           <div className="flex items-center gap-2">
-            <p className="text-sm font-semibold">Chat</p>
+            <p className="text-sm font-semibold">{ui.chat}</p>
             {unreadCount > 0 && (
               <span className="rounded-full bg-sky-500 px-2 py-0.5 text-[10px] text-white">
                 {unreadCount}
@@ -12873,16 +15513,16 @@ function ChatDrawer({
             onClick={onClose}
             className="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-200 hover:bg-slate-800"
           >
-            {isCompactChat ? "Retour" : "Fermer"}
+            {isCompactChat ? ui.returnLabel : ui.close}
           </button>
         </div>
 
         <div className="px-4 py-3 space-y-2">
           <p className="text-xs text-slate-400">
-            Messages visibles par tous les participants.
+            {ui.messagesVisible}
           </p>
           <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-300">
-            <span>J’écris en</span>
+            <span>{ui.writeIn}</span>
             <select
               value={sourceLang}
               onChange={(event) => setSourceLang(event.target.value)}
@@ -12911,7 +15551,7 @@ function ChatDrawer({
 
         <div className="flex-1 overflow-y-auto px-4 pb-4">
           {visibleMessages.length === 0 ? (
-            <p className="text-xs text-slate-500">Aucun message dans la salle.</p>
+            <p className="text-xs text-slate-500">{ui.noMessages}</p>
           ) : (
             <div className="space-y-3">
               {visibleMessages.map((msg) => {
@@ -12959,7 +15599,7 @@ function ChatDrawer({
                             }`}
                           >
                             <Volume2 className="h-3 w-3" />
-                            {isSpeaking ? "Stop" : "Ecouter"}
+                            {isSpeaking ? ui.stop : ui.listen}
                           </button>
                         </div>
                       )}
@@ -12974,7 +15614,7 @@ function ChatDrawer({
         <div className="border-t border-slate-800 bg-slate-950 p-3">
           {preview && (
             <div className="mb-2 rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-[11px] text-slate-200">
-              <span className="text-slate-400">Traduction envoyée:</span> {preview}
+              <span className="text-slate-400">{ui.sentTranslation}</span> {preview}
             </div>
           )}
           {previewError && (
@@ -12991,7 +15631,7 @@ function ChatDrawer({
             <input
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
-              placeholder="Ecris un message..."
+              placeholder={ui.writeMessagePlaceholder}
               className="flex-1 rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100"
             />
             <button
@@ -12999,274 +15639,15 @@ function ChatDrawer({
               disabled={previewLoading || !draft.trim()}
               className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-100 hover:bg-slate-800 disabled:opacity-50"
             >
-              {previewLoading ? "..." : "Aperçu"}
+              {previewLoading ? "..." : ui.preview}
             </button>
             <button
               onClick={handleSend}
               disabled={isSending || !draft.trim()}
               className="rounded-lg bg-sky-500 px-3 py-2 text-xs text-white disabled:opacity-50"
             >
-              Envoyer
+              {ui.send}
             </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SuggestionsDrawer({
-  isOpen,
-  onClose,
-  listening,
-  onToggleListening,
-  lastHeard,
-  suggestions,
-  suggesting,
-  suggestError,
-  useGuidelines,
-  onToggleGuidelines,
-  mode,
-  onChangeMode,
-  onSendToChat,
-}: {
-  isOpen: boolean;
-  onClose: () => void;
-  listening: boolean;
-  onToggleListening: () => void;
-  lastHeard: string;
-  suggestions: SuggestedResponse[];
-  suggesting: boolean;
-  suggestError: string;
-  useGuidelines: boolean;
-  onToggleGuidelines: () => void;
-  mode: SuggestionMode;
-  onChangeMode: (mode: SuggestionMode) => void;
-  onSendToChat: (text: string, opts?: { fromName?: string }) => Promise<void>;
-}) {
-  const [sendingId, setSendingId] = useState<string | null>(null);
-  const activeMode = SUGGESTION_MODES.find((item) => item.id === mode);
-
-  const handleSend = async (text: string, id: string) => {
-    if (!text.trim()) return;
-    setSendingId(id);
-    await onSendToChat(text.trim(), { fromName: "Coach IA" });
-    setSendingId(null);
-  };
-
-  return (
-    <div
-      className={`fixed inset-0 z-40 ${
-        isOpen ? "pointer-events-auto" : "pointer-events-none"
-      }`}
-    >
-      <div
-        onClick={onClose}
-        className={`absolute inset-0 bg-black/30 transition-opacity ${
-          isOpen ? "opacity-100" : "opacity-0"
-        }`}
-      />
-      <div
-        className={`absolute bottom-0 left-0 right-0 sm:top-0 sm:left-auto sm:right-0 sm:h-full sm:w-96 bg-slate-950 text-slate-100 shadow-2xl border-t border-slate-800 sm:border-l sm:border-t-0 transition-transform ${
-          isOpen
-            ? "translate-y-0 sm:translate-x-0"
-            : "translate-y-full sm:translate-x-full"
-        }`}
-      >
-        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800">
-          <div className="flex items-center gap-2">
-            <p className="text-sm font-semibold">Conseils</p>
-            <span
-              className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                listening
-                  ? "bg-emerald-500/20 text-emerald-100"
-                  : "bg-slate-700/60 text-slate-200"
-              }`}
-            >
-              {listening ? "Ecoute" : "Pause"}
-            </span>
-          </div>
-          <button
-            onClick={onClose}
-            className="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-200 hover:bg-slate-800"
-          >
-            Fermer
-          </button>
-        </div>
-
-        <div className="px-4 py-3 space-y-3">
-          <p className="text-xs text-slate-400">
-            L'IA ecoute l'interlocuteur et propose des reponses en direct.
-          </p>
-          <div className="space-y-2">
-            <label className="text-[10px] uppercase tracking-wide text-slate-500">
-              Mode
-            </label>
-            <select
-              value={mode}
-              onChange={(event) => onChangeMode(event.target.value as SuggestionMode)}
-              className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100"
-            >
-              {SUGGESTION_MODES.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.label}
-                </option>
-              ))}
-            </select>
-            {activeMode && (
-              <p className="text-[11px] text-slate-400">{activeMode.hint}</p>
-            )}
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              onClick={onToggleListening}
-              className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                listening
-                  ? "bg-emerald-500 text-white"
-                  : "bg-slate-800 text-slate-100"
-              }`}
-            >
-              {listening ? "Arreter l'ecoute" : "Ecouter l'autre"}
-            </button>
-            {mode === "rp" && (
-              <button
-                onClick={onToggleGuidelines}
-                className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                  useGuidelines
-                    ? "bg-sky-500 text-white"
-                    : "bg-slate-800 text-slate-100"
-                }`}
-              >
-                Guidelines {useGuidelines ? "ON" : "OFF"}
-              </button>
-            )}
-          </div>
-          {suggestError && (
-            <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
-              {suggestError}
-            </div>
-          )}
-          {suggesting && (
-            <div className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-[11px] text-slate-300">
-              Analyse en cours...
-            </div>
-          )}
-          {lastHeard && (
-            <div className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-[11px] text-slate-200">
-              <span className="text-[10px] uppercase text-slate-500">Dernier extrait</span>
-              <p className="mt-1">{lastHeard}</p>
-            </div>
-          )}
-        </div>
-
-        <div className="flex-1 overflow-y-auto px-4 pb-6">
-          {suggestions.length === 0 ? (
-            <p className="text-xs text-slate-500">
-              Aucune suggestion pour le moment.
-            </p>
-          ) : (
-            <div className="space-y-3">
-              {suggestions.map((item) => (
-                <div
-                  key={item.id}
-                  className="rounded-xl border border-slate-800 bg-slate-900/80 px-3 py-3"
-                >
-                  <p className="text-xs text-slate-100">{item.text}</p>
-                  <div className="mt-2 flex items-center justify-between text-[10px] text-slate-500">
-                    <span>
-                      {new Date(item.createdAt).toLocaleTimeString("fr-FR", {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
-                    </span>
-                    <button
-                      onClick={() => handleSend(item.text, item.id)}
-                      disabled={sendingId === item.id}
-                      className="rounded-full bg-sky-500 px-3 py-1 text-[10px] font-semibold text-white disabled:opacity-60"
-                    >
-                      {sendingId === item.id ? "Envoi..." : "Envoyer au chat"}
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function TranslationNotebookOverlay({
-  isOpen,
-  onClose,
-  embedSrc,
-  pageHref,
-  title,
-  subtitle,
-}: {
-  isOpen: boolean;
-  onClose: () => void;
-  embedSrc: string;
-  pageHref: string;
-  title: string;
-  subtitle: string;
-}) {
-  useEffect(() => {
-    if (!isOpen || typeof window === "undefined") return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, onClose]);
-
-  return (
-    <div
-      className={`fixed inset-0 z-50 ${isOpen ? "pointer-events-auto" : "pointer-events-none"}`}
-    >
-      <div
-        onClick={onClose}
-        className={`absolute inset-0 bg-black/55 transition-opacity ${
-          isOpen ? "opacity-100" : "opacity-0"
-        }`}
-      />
-      <div className="absolute inset-x-2 top-2 bottom-2 sm:inset-x-8 sm:top-6 sm:bottom-6">
-        <div
-          onClick={(event) => event.stopPropagation()}
-          className={`flex h-full flex-col overflow-hidden rounded-2xl border border-slate-700 bg-slate-950 shadow-2xl transition-all ${
-            isOpen ? "translate-y-0 opacity-100" : "translate-y-3 opacity-0"
-          }`}
-        >
-          <div className="flex items-center justify-between border-b border-slate-800 px-3 py-2 sm:px-4">
-            <div>
-              <p className="text-sm font-semibold text-slate-100">{title}</p>
-              <p className="text-[11px] text-slate-400">{subtitle}</p>
-            </div>
-            <div className="flex items-center gap-2">
-              <a
-                href={pageHref}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-200 hover:bg-slate-800"
-              >
-                Ouvrir page
-              </a>
-              <button
-                type="button"
-                onClick={onClose}
-                className="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-100 hover:bg-slate-800"
-              >
-                Fermer
-              </button>
-            </div>
-          </div>
-          <div className="min-h-0 flex-1 bg-slate-950">
-            <iframe
-              title={title}
-              src={embedSrc}
-              className="h-full w-full border-0 bg-slate-950"
-            />
           </div>
         </div>
       </div>
@@ -13289,6 +15670,13 @@ function InviteDrawer({
   onCopy: (kind: InviteLinkKind) => void;
   copied: InviteCopyFeedback | null;
 }) {
+  const { locale } = useUiLocale();
+  const ui = LIVEKIT_UI_COPY[locale];
+  const shareBody = `${ui.inviteEmailBody}\n\n${inviteLinks.smart}`;
+  const mailHref = buildMailtoHref(ui.inviteEmailSubject, shareBody);
+  const smsHref = buildSmsHref(shareBody);
+  const canUseNativeShare =
+    typeof navigator !== "undefined" && typeof navigator.share === "function";
   return (
     <div
       className={`fixed inset-0 z-40 ${
@@ -13307,22 +15695,22 @@ function InviteDrawer({
         }`}
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800">
-          <p className="text-sm font-semibold">Partager la salle</p>
+          <p className="text-sm font-semibold">{ui.shareRoom}</p>
           <button
             onClick={onClose}
             className="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-200 hover:bg-slate-800"
           >
-            Fermer
+            {ui.close}
           </button>
         </div>
         <div className="px-4 py-4 space-y-3">
           <p className="text-xs text-slate-400">
-            Un seul lien intelligent: il ouvre l'application BFZoom si disponible, sinon la version web.
+            {ui.smartHint}
           </p>
           <div className="space-y-2 rounded-lg border border-slate-800 bg-slate-900/50 p-3">
-            <p className="text-xs font-semibold text-slate-100">Lien intelligent</p>
+            <p className="text-xs font-semibold text-slate-100">{ui.smartLink}</p>
             <p className="text-[11px] text-slate-400">
-              Invite en un clic: app mobile si installée, sinon navigateur.
+              {ui.smartHint}
             </p>
             <input
               value={inviteLinks.smart}
@@ -13330,18 +15718,33 @@ function InviteDrawer({
               onFocus={(event) => event.target.select()}
               className="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-200"
             />
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={onShare}
-                className="rounded-md border border-emerald-500/50 bg-emerald-500/15 px-3 py-2 text-xs font-semibold text-emerald-100 hover:bg-emerald-500/25"
+            <p className="text-[11px] text-slate-400">{ui.shareOptionsHint}</p>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              {canUseNativeShare && (
+                <button
+                  onClick={onShare}
+                  className="rounded-md border border-violet-500/50 bg-violet-500/15 px-3 py-2 text-xs font-semibold text-violet-100 hover:bg-violet-500/25"
+                >
+                  {copied === "shared" ? ui.inviteShareSent : ui.shareViaDevice}
+                </button>
+              )}
+              <a
+                href={mailHref}
+                className="rounded-md border border-emerald-500/50 bg-emerald-500/15 px-3 py-2 text-center text-xs font-semibold text-emerald-100 hover:bg-emerald-500/25"
               >
-                {copied === "shared" ? "Partage envoye ✅" : "Partager"}
-              </button>
+                {ui.sendEmail}
+              </a>
+              <a
+                href={smsHref}
+                className="rounded-md border border-amber-500/50 bg-amber-500/15 px-3 py-2 text-center text-xs font-semibold text-amber-100 hover:bg-amber-500/25"
+              >
+                {ui.sendSms}
+              </a>
               <button
                 onClick={() => onCopy("smart")}
                 className="rounded-md bg-sky-500 px-3 py-2 text-xs font-semibold text-white hover:bg-sky-400"
               >
-                {copied === "smart" ? "Lien copie ✅" : "Copier le lien"}
+                {copied === "smart" ? ui.linkCopied : ui.copyLink}
               </button>
             </div>
           </div>
@@ -13400,8 +15803,6 @@ function SettingsDrawer({
   aiGallery,
   onAiGallerySelect,
   onRefreshTranslationEntitlement,
-  onSendToChat,
-  onOpenNotebook,
 }: {
   roomId: string;
   isHost: boolean;
@@ -13451,17 +15852,14 @@ function SettingsDrawer({
   aiGallery: AiGalleryItem[];
   onAiGallerySelect: (item: AiGalleryItem) => void;
   onRefreshTranslationEntitlement: () => Promise<void> | void;
-  onSendToChat: (text: string, opts?: { fromName?: string }) => Promise<void>;
-  onOpenNotebook: () => void;
 }) {
+  const { locale } = useUiLocale();
+  const ui = LIVEKIT_UI_COPY[locale];
   const appVersion = process.env.NEXT_PUBLIC_APP_VERSION || "dev";
   const [isMobile, setIsMobile] = useState(false);
   const [hostOpen, setHostOpen] = useState(false);
-  const [coachOpen, setCoachOpen] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(true);
-  const [mobileSection, setMobileSection] = useState<
-    "camera" | "coach" | "host"
-  >("camera");
+  const [mobileSection, setMobileSection] = useState<"camera" | "host">("camera");
 
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 768px)");
@@ -13476,9 +15874,8 @@ function SettingsDrawer({
   }, []);
 
   const mobileSections = [
-    { id: "camera", label: "Camera" },
-    { id: "coach", label: "Coach" },
-    { id: "host", label: "Hote" },
+    { id: "camera", label: ui.cameraSection },
+    { id: "host", label: ui.hostSection },
   ] as const;
 
   return (
@@ -13502,14 +15899,14 @@ function SettingsDrawer({
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800">
           <div>
-            <p className="text-sm font-semibold">Reglages</p>
+            <p className="text-sm font-semibold">{ui.settingsTitle}</p>
             <p className="text-[10px] text-slate-400">BFZoom v{appVersion}</p>
           </div>
           <button
             onClick={onClose}
             className="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-200 hover:bg-slate-800"
           >
-            Fermer
+            {ui.close}
           </button>
         </div>
 
@@ -13576,15 +15973,12 @@ function SettingsDrawer({
                   onRefreshTranslationEntitlement={onRefreshTranslationEntitlement}
                 />
               )}
-              {mobileSection === "coach" && (
-                <CoachPanel roomId={roomId} onSendToChat={onSendToChat} />
-              )}
               {mobileSection === "host" && <LiveKitHostSection roomId={roomId} />}
             </>
           ) : (
             <>
               <SectionHeader
-                title="Camera"
+                title={ui.cameraSection}
                 isOpen={cameraOpen}
                 onToggle={() => setCameraOpen((value) => !value)}
               />
@@ -13636,12 +16030,12 @@ function SettingsDrawer({
 
               {!isHost && (
                 <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3 text-xs text-slate-300">
-                  <p className="font-semibold text-slate-100">Options hote</p>
+                  <p className="font-semibold text-slate-100">{ui.hostOptions}</p>
                   <p className="mt-1 text-slate-300">
-                    Coach et gestion hote sont reserves a l'hote.
+                    {ui.hostReserved}
                   </p>
                   <p className="mt-2 text-[11px] text-slate-400">
-                    Ouvre le lien de salle en mode hote pour les afficher.
+                    {ui.hostLinkHint}
                   </p>
                 </div>
               )}
@@ -13649,15 +16043,7 @@ function SettingsDrawer({
               {isHost && (
                 <>
                   <SectionHeader
-                    title="Coach IA"
-                    isOpen={coachOpen}
-                    onToggle={() => setCoachOpen((value) => !value)}
-                  />
-                  {coachOpen && (
-                    <CoachPanel roomId={roomId} onSendToChat={onSendToChat} />
-                  )}
-                  <SectionHeader
-                    title="Gestion hote"
+                    title={ui.hostSection}
                     isOpen={hostOpen}
                     onToggle={() => setHostOpen((value) => !value)}
                   />
@@ -13681,6 +16067,8 @@ function SectionHeader({
   isOpen: boolean;
   onToggle: () => void;
 }) {
+  const { locale } = useUiLocale();
+  const ui = LIVEKIT_UI_COPY[locale];
   return (
     <div className="flex items-center justify-between">
       <p className="text-xs font-semibold uppercase tracking-wider text-slate-300">{title}</p>
@@ -13688,7 +16076,7 @@ function SectionHeader({
         onClick={onToggle}
         className="rounded-full border border-slate-700 px-3 py-1 text-[11px] text-slate-200 hover:bg-slate-800"
       >
-        {isOpen ? "Replier" : "Ouvrir"}
+        {isOpen ? ui.collapse : ui.open}
       </button>
     </div>
   );
@@ -13725,17 +16113,164 @@ function BackgroundSection({
   onAiGallerySelect: (item: AiGalleryItem) => void;
   onRefreshTranslationEntitlement: () => Promise<void> | void;
 }) {
+  const { locale } = useUiLocale();
+  const ui = LIVEKIT_UI_COPY[locale];
   const [aiPrompt, setAiPrompt] = useState("");
   const [aiPromptText, setAiPromptText] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState("");
   const [latestAiImage, setLatestAiImage] = useState<string | null>(null);
   const [latestAiPrompt, setLatestAiPrompt] = useState("");
+  const [brokenAiImageUrls, setBrokenAiImageUrls] = useState<Set<string>>(new Set());
   const [aiStatus, setAiStatus] = useState<"idle" | "pending" | "processing" | "complete" | "error">(
     "idle"
   );
   const aiControllerRef = useRef<AbortController | null>(null);
   const aiPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const verifiedAiImageUrlsRef = useRef<Set<string>>(new Set());
+
+  const rememberBrokenAiImageUrl = useCallback((url: string | null | undefined) => {
+    const trimmed = typeof url === "string" ? url.trim() : "";
+    if (!trimmed) return;
+    setBrokenAiImageUrls((prev) => {
+      if (prev.has(trimmed)) return prev;
+      const next = new Set(prev);
+      next.add(trimmed);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem(BROKEN_AI_IMAGE_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return;
+      const next = new Set(
+        parsed
+          .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+          .filter(Boolean)
+      );
+      if (next.size > 0) {
+        setBrokenAiImageUrls(next);
+      }
+    } catch {
+      // ignore corrupt persisted cache
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      if (brokenAiImageUrls.size === 0) {
+        window.localStorage.removeItem(BROKEN_AI_IMAGE_STORAGE_KEY);
+        return;
+      }
+      window.localStorage.setItem(
+        BROKEN_AI_IMAGE_STORAGE_KEY,
+        JSON.stringify(Array.from(brokenAiImageUrls))
+      );
+    } catch {
+      // ignore storage write failures
+    }
+  }, [brokenAiImageUrls]);
+
+  const prunePersistedBrokenAiImage = useCallback((url: string) => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem(AI_GALLERY_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as AiGalleryItem[];
+      if (!Array.isArray(parsed)) return;
+      const filtered = parsed.filter((entry) => entry?.image !== url);
+      if (filtered.length === parsed.length) return;
+      if (filtered.length === 0) {
+        window.localStorage.removeItem(AI_GALLERY_STORAGE_KEY);
+      } else {
+        window.localStorage.setItem(AI_GALLERY_STORAGE_KEY, JSON.stringify(filtered));
+      }
+    } catch {
+      // ignore corrupt gallery cache
+    }
+  }, []);
+
+  const handleAiImageLoadError = useCallback(
+    (url: string | null | undefined) => {
+      const trimmed = typeof url === "string" ? url.trim() : "";
+      if (!trimmed) return;
+      rememberBrokenAiImageUrl(trimmed);
+      prunePersistedBrokenAiImage(trimmed);
+      if (latestAiImage === trimmed) {
+        setLatestAiImage(null);
+      }
+      if (aiBackgroundUrl === trimmed) {
+        onAiBackgroundClear();
+      }
+      setAiError("Le fond IA n'est plus disponible. Regénère-le ou supprime-le.");
+    },
+    [
+      aiBackgroundUrl,
+      latestAiImage,
+      onAiBackgroundClear,
+      prunePersistedBrokenAiImage,
+      rememberBrokenAiImageUrl,
+      ]
+  );
+
+  const extractAiJobIdFromUrl = useCallback((url: string | null | undefined) => {
+    const trimmed = typeof url === "string" ? url.trim() : "";
+    if (!trimmed) return "";
+    try {
+      const parsed = new URL(trimmed, "https://bfzoom.local");
+      if (!parsed.pathname.endsWith("/api/dalle/image")) return "";
+      return parsed.searchParams.get("jobId")?.trim() || "";
+    } catch {
+      return "";
+    }
+  }, []);
+
+  const isBrokenAiImageUrl = useCallback(
+    (url: string | null | undefined) => {
+      const trimmed = typeof url === "string" ? url.trim() : "";
+      return trimmed ? brokenAiImageUrls.has(trimmed) : false;
+    },
+    [brokenAiImageUrls]
+  );
+
+  useEffect(() => {
+    const candidates = [aiBackgroundUrl, ...aiGallery.map((item) => item.image)]
+      .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+      .filter(Boolean);
+
+    for (const url of candidates) {
+      if (isBrokenAiImageUrl(url)) continue;
+      if (verifiedAiImageUrlsRef.current.has(url)) continue;
+      const jobId = extractAiJobIdFromUrl(url);
+      if (!jobId) continue;
+
+      verifiedAiImageUrlsRef.current.add(url);
+      void fetch(`/api/dalle?jobId=${encodeURIComponent(jobId)}`, {
+        cache: "no-store",
+      })
+        .then(async (response) => {
+          if (!response.ok) {
+            handleAiImageLoadError(url);
+            return;
+          }
+          const data = (await response.json().catch(() => ({}))) as {
+            status?: "pending" | "processing" | "complete" | "error";
+            imageUrl?: string;
+          };
+          if (data.status === "error" || !data.imageUrl) {
+            handleAiImageLoadError(url);
+          }
+        })
+        .catch(() => {
+          verifiedAiImageUrlsRef.current.delete(url);
+        });
+    }
+  }, [aiBackgroundUrl, aiGallery, extractAiJobIdFromUrl, handleAiImageLoadError, isBrokenAiImageUrl]);
 
   const clearAiPolling = useCallback(() => {
     if (aiPollingRef.current) {
@@ -13809,6 +16344,12 @@ function BackgroundSection({
         if (nextStatus === "complete" && data.imageUrl) {
           clearAiPolling();
           const proxiedImage = `/api/dalle/image?jobId=${encodeURIComponent(jobId)}`;
+          setBrokenAiImageUrls((prev) => {
+            if (!prev.has(proxiedImage)) return prev;
+            const next = new Set(prev);
+            next.delete(proxiedImage);
+            return next;
+          });
           setLatestAiImage(proxiedImage);
           setLatestAiPrompt(data.prompt || prompt);
           onAiImageGenerated(proxiedImage);
@@ -13958,7 +16499,7 @@ function BackgroundSection({
               type="text"
               value={aiPrompt}
               onChange={(event) => setAiPrompt(event.target.value)}
-              placeholder="Prompt (ex: studio zen, lumiere douce)"
+              placeholder={ui.dallePromptPlaceholder}
               className="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-500 focus:border-sky-400 focus:outline-none"
             />
             <button
@@ -13967,7 +16508,7 @@ function BackgroundSection({
               disabled={aiLoading}
               className="rounded-lg bg-sky-500 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-white disabled:opacity-60"
             >
-              {aiLoading ? "Generation..." : "Generer"}
+              {aiLoading ? ui.generating : ui.generate}
             </button>
             <button
               type="button"
@@ -13975,34 +16516,34 @@ function BackgroundSection({
               disabled={!latestAiImage || !latestAiPrompt || aiLoading}
               className="rounded-lg border border-slate-700 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-100 disabled:border-slate-800 disabled:text-slate-500"
             >
-              Enregistrer
+              {ui.save}
             </button>
           </div>
           <div className="space-y-1">
-            <label className="text-[11px] text-slate-400">Texte a integrer (optionnel)</label>
+            <label className="text-[11px] text-slate-400">{ui.overlayTextOptional}</label>
             <input
               type="text"
               value={aiPromptText}
               onChange={(event) => setAiPromptText(event.target.value)}
-              placeholder="Ex: Focus, Discipline"
+              placeholder={ui.overlayTextPlaceholder}
               className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-[11px] text-slate-100 placeholder:text-slate-500 focus:border-sky-400 focus:outline-none"
             />
             <p className="text-[10px] text-slate-400">
-              Le texte peut varier selon le rendu DALL·E.
+              {ui.overlayTextHint}
             </p>
           </div>
           <p className="text-[11px] text-slate-300">
             {aiError ||
               (aiStatus === "pending" || aiStatus === "processing"
-                ? "Generation IA en cours..."
+                ? ui.aiGeneratingStatus
                 : aiBackgroundUrl
-                ? "Fond IA actif."
-                : "Genere un fond puis active-le ci-dessous.")}
+                ? ui.aiBackgroundActiveStatus
+                : ui.generateThenActivate)}
           </p>
         </div>
       )}
       {!isHost && (
-        <p className="text-[11px] text-slate-400">Generation IA reservee a l'hote.</p>
+        <p className="text-[11px] text-slate-400">{ui.aiGenerationHostOnly}</p>
       )}
       {disabled && (
         <p className="text-[11px] text-amber-200">
@@ -14024,30 +16565,44 @@ function BackgroundSection({
               >
                 {opt.mode === "image" && opt.imagePath ? (
                   <span className="flex items-center gap-2">
-                    <Image
-                      src={opt.imagePath}
-                      alt=""
-                      className="h-6 w-10 rounded-md object-cover"
-                      width={160}
-                      height={96}
-                      unoptimized
-                    />
-                    {opt.label}
+                    {isBrokenAiImageUrl(opt.imagePath) ? (
+                      <span className="flex h-6 w-10 items-center justify-center rounded-md bg-slate-800 text-[9px] text-slate-400">
+                        indispo
+                      </span>
+                    ) : (
+                      <Image
+                        src={opt.imagePath}
+                        alt=""
+                        className="h-6 w-10 rounded-md object-cover"
+                        width={160}
+                        height={96}
+                        unoptimized
+                        onError={() => handleAiImageLoadError(opt.imagePath)}
+                      />
+                    )}
+                    {getLocalizedBackgroundOptionLabel(opt.id, ui)}
                   </span>
                 ) : (
-              opt.label
+              getLocalizedBackgroundOptionLabel(opt.id, ui)
             )}
             </button>
           ))}
         </div>
-        {aiBackgroundUrl && (
+        {aiBackgroundUrl && !isBrokenAiImageUrl(aiBackgroundUrl) && (
           <div className="mt-3 flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2">
-            <div
-              className="h-12 w-12 rounded-lg bg-center bg-contain bg-no-repeat"
-              style={{ backgroundImage: `url(${aiBackgroundUrl})` }}
-            />
+            <div className="relative h-12 w-12 overflow-hidden rounded-lg">
+              <Image
+                src={aiBackgroundUrl}
+                alt=""
+                className="h-12 w-12 rounded-lg object-contain"
+                width={192}
+                height={192}
+                unoptimized
+                onError={() => handleAiImageLoadError(aiBackgroundUrl)}
+              />
+            </div>
             <div className="flex-1 text-[11px] text-slate-200">
-              Fond IA actif · génère un nouveau prompt pour le remplacer.
+              {ui.aiBackgroundActiveCard}
             </div>
             <div className="flex gap-2">
               <button
@@ -14056,7 +16611,7 @@ function BackgroundSection({
                 disabled={disabled}
                 className="rounded-full border border-slate-700 px-3 py-1 text-[11px] text-white disabled:border-slate-600 disabled:text-slate-500 hover:border-slate-500"
               >
-                Activer
+                {ui.activate}
               </button>
               <button
                 type="button"
@@ -14064,14 +16619,14 @@ function BackgroundSection({
                 disabled={disabled}
                 className="rounded-full border border-rose-500 px-3 py-1 text-[11px] text-rose-300 disabled:border-rose-400 disabled:text-rose-500 hover:border-rose-400"
               >
-                Supprimer
+                {ui.remove}
               </button>
             </div>
           </div>
         )}
         {aiGallery.length > 0 && (
           <div className="space-y-2 rounded-xl border border-slate-800 bg-slate-950/50 p-3">
-            <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Galerie IA</p>
+            <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">{ui.aiGalleryTitle}</p>
             <div className="grid grid-cols-2 gap-2">
               {aiGallery.map((item) => (
                 <button
@@ -14081,10 +16636,23 @@ function BackgroundSection({
                   disabled={disabled}
                   className="group flex flex-col gap-1 rounded-xl border border-slate-800 bg-slate-900/60 p-2 text-left transition hover:border-sky-400"
                 >
-                  <div
-                    className="h-16 w-full rounded-md bg-center bg-contain bg-no-repeat"
-                    style={{ backgroundImage: `url(${item.image})` }}
-                  />
+                  <div className="relative h-16 w-full overflow-hidden rounded-md bg-slate-900/60">
+                    {isBrokenAiImageUrl(item.image) ? (
+                      <div className="flex h-full w-full items-center justify-center text-[10px] text-slate-400">
+                        image indisponible
+                      </div>
+                    ) : (
+                      <Image
+                        src={item.image}
+                        alt={item.prompt}
+                        className="h-16 w-full rounded-md object-contain"
+                        width={256}
+                        height={160}
+                        unoptimized
+                        onError={() => handleAiImageLoadError(item.image)}
+                      />
+                    )}
+                  </div>
                   <p className="truncate text-[11px] text-white group-disabled:text-slate-500">
                     {item.prompt}
                   </p>
@@ -14106,13 +16674,13 @@ function BackgroundSection({
             className="hidden"
             disabled={disabled}
           />
-          <span className="text-xs">Importer une image</span>
+          <span className="text-xs">{ui.importImage}</span>
         </label>
       </div>
       {customBackgrounds.length > 0 && (
         <div className="space-y-2 pt-2">
           <p className="text-[11px] uppercase tracking-wide text-slate-500">
-            Fonds importés
+            {ui.importedBackgrounds}
           </p>
           <div className="flex flex-wrap gap-2">
             {customBackgrounds.map((item) => (
@@ -14144,7 +16712,7 @@ function BackgroundSection({
                   onClick={() => onRemoveCustomBackground(item.id)}
                   className="rounded-full border border-rose-500/60 px-2 py-1 text-[10px] font-semibold text-rose-300 hover:bg-rose-500/20"
                 >
-                  Supprimer
+                  {ui.delete}
                 </button>
               </div>
             ))}
@@ -14240,6 +16808,8 @@ function CameraSection({
   onAiGallerySelect: (item: AiGalleryItem) => void;
   onRefreshTranslationEntitlement: () => Promise<void> | void;
 }) {
+  const { locale } = useUiLocale();
+  const ui = LIVEKIT_UI_COPY[locale];
   const { localParticipant, isCameraEnabled } = useLocalParticipant();
   const [error, setError] = useState("");
   const [isFlipping, setIsFlipping] = useState(false);
@@ -14421,16 +16991,16 @@ function CameraSection({
     <div className="flex flex-col gap-2">
       <section className="rounded-xl border border-slate-800 bg-slate-900/40 px-3 py-3 text-xs text-slate-200 space-y-3">
         <div className="flex items-center justify-between">
-          <span className="font-semibold text-[12px] uppercase tracking-wide text-slate-400">Caméra & sous-titres</span>
+          <span className="font-semibold text-[12px] uppercase tracking-wide text-slate-400">{ui.cameraAndCaptionsTitle}</span>
           <span
-            title="Réglages de la caméra et des sous-titres."
+            title={ui.cameraAndCaptionsInfo}
             className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-600 text-[10px] text-slate-300"
           >
             <Info className="h-3 w-3" />
           </span>
         </div>
         <p className="text-[11px] text-slate-500">
-          Ajuste le cadrage et contrôle la transcription automatique.
+          {ui.cameraAndCaptionsHint}
         </p>
         <div className="grid gap-2">
           <button
@@ -14438,16 +17008,16 @@ function CameraSection({
             className="flex items-center justify-between rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-2 text-xs text-slate-200"
           >
             <span className="flex items-center gap-2">
-              Auto-cadrage
+              {ui.autoFrame}
               <span
-                title="Garde ton visage centre automatiquement."
+                title={ui.autoFrameInfo}
                 className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-600 text-[10px] text-slate-300"
               >
                 <Info className="h-3 w-3" />
               </span>
             </span>
             <span className={autoFrame ? "text-sky-200" : "text-slate-400"}>
-              {autoFrame ? "Actif" : "Inactif"}
+              {autoFrame ? ui.active : ui.inactive}
             </span>
           </button>
           {isHost ? (
@@ -14546,7 +17116,7 @@ function CameraSection({
               <div className="grid gap-1">
                 <div className="flex items-center justify-between text-[11px]">
                   <span className="font-semibold text-slate-200">
-                    Langue source (ex : Français, Persan, Arabe…)
+                    Langue source (ex : Français, Darija, Persan, Arabe…)
                   </span>
                   <span className="text-slate-500">{sourceLanguageName}</span>
                 </div>
@@ -14566,7 +17136,7 @@ function CameraSection({
                   ))}
                 </select>
                 <p className="text-[11px] text-slate-500">
-                  Choisis ta langue parlée (Français, Persan, Arabe, etc.) : toutes les options du sélecteur sont reconnues par OpenAI et l’accent est détecté automatiquement.
+                  Choisis ta langue parlée (Français, Darija, Persan, Arabe, etc.) : toutes les options du sélecteur sont reconnues par OpenAI et l’accent est détecté automatiquement.
                 </p>
               </div>
               <div className="grid gap-1">
@@ -14773,9 +17343,9 @@ function CameraSection({
         <div className="flex flex-col gap-1 rounded-xl border border-slate-700 bg-slate-900/40 px-3 py-2 text-xs text-slate-200">
           <div className="flex items-center justify-between">
             <span className="flex items-center gap-2">
-              Taille sous-titres
+              {ui.captionSize}
               <span
-                title="Ajuste la taille du texte affiche."
+                title={ui.captionSizeInfo}
                 className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-600 text-[10px] text-slate-300"
               >
                 <Info className="h-3 w-3" />
@@ -14807,9 +17377,9 @@ function CameraSection({
         <div className="flex flex-col gap-1 rounded-xl border border-slate-700 bg-slate-900/40 px-3 py-2 text-xs text-slate-200">
           <div className="flex items-center justify-between">
             <span className="flex items-center gap-2">
-              Cadrage video
+              {ui.videoFit}
             <span
-              title="Remplir coupe l'image, Entier affiche toute l'image."
+              title={ui.videoFitInfo}
               className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-600 text-[10px] text-slate-300"
             >
               <Info className="h-3 w-3" />
@@ -14826,7 +17396,7 @@ function CameraSection({
                     : "border border-slate-700 text-slate-200"
                 }`}
               >
-                {fit === "cover" ? "Remplir" : "Entier"}
+                {fit === "cover" ? ui.fill : ui.fit}
               </button>
             ))}
           </div>
@@ -14837,10 +17407,10 @@ function CameraSection({
               onClick={() => onChangeVideoFit("contain")}
               className="rounded-full border border-slate-700 bg-white/10 px-3 py-1 text-[11px] font-semibold text-slate-200"
             >
-              Forcer l'entier
+              {ui.forceFit}
             </button>
             <p className="text-[11px] text-slate-400">
-              Réapplique « Entier » pour voir tout le fond DALL·E.
+              {ui.forceFitHint}
             </p>
           </div>
         )}
@@ -14848,10 +17418,10 @@ function CameraSection({
       <section className="rounded-xl border border-slate-800 bg-slate-900/40 px-3 py-3 text-xs text-slate-200 space-y-2">
         <div className="flex items-center justify-between">
           <span className="font-semibold text-[12px] uppercase tracking-wide text-slate-400">
-            Arriere-plan
+            {ui.backgroundTitle}
           </span>
           <span
-            title="Choisis, importe ou supprime les fonds depuis les reglages."
+            title={ui.backgroundInfo}
             className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-600 text-[10px] text-slate-300"
           >
             <Info className="h-3 w-3" />
@@ -14880,294 +17450,9 @@ function CameraSection({
         className="flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-900/40 px-3 py-2 text-xs text-slate-200 disabled:opacity-50"
       >
         <SwitchCamera className="h-4 w-4" />
-        Retourner la camera
+        {ui.flipCamera}
       </button>
       {error && <p className="text-[11px] text-rose-200">{error}</p>}
-    </div>
-  );
-}
-
-type CoachItem = {
-  id: string;
-  title: string;
-  prompt: string;
-  local?: string;
-};
-
-type CoachMode = {
-  id: string;
-  title: string;
-  description?: string;
-  items: CoachItem[];
-};
-
-type CoachLibrary = {
-  modes: CoachMode[];
-};
-
-type CoachTone = "professionnel" | "neutre" | "diplomatique" | "direct";
-
-function CoachPanel({
-  roomId,
-  onSendToChat,
-}: {
-  roomId: string;
-  onSendToChat: (text: string, opts?: { fromName?: string }) => Promise<void>;
-}) {
-  const allModes = [
-    boxingLibrary,
-    mentalLibrary,
-    generalLibrary,
-    businessLibrary,
-    meditationLibrary,
-  ] as CoachLibrary["modes"];
-  const enabled = new Set((coachIndex as { enabled?: string[] }).enabled || []);
-  const library = allModes.filter((mode) => enabled.has(mode.id));
-  const [modeId, setModeId] = useState(library[0]?.id || "");
-  const [prompt, setPrompt] = useState("");
-  const [localText, setLocalText] = useState("");
-  const [response, setResponse] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [useAI, setUseAI] = useState(false);
-  const [outputLanguage, setOutputLanguage] = useState<SourceLanguageOption["code"]>(
-    DEFAULT_SOURCE_LANGUAGE
-  );
-  const [tone, setTone] = useState<CoachTone>("professionnel");
-  const [culturalAdaptation, setCulturalAdaptation] = useState(true);
-  const [culturalRegion, setCulturalRegion] = useState("");
-
-  const currentMode = library.find((mode) => mode.id === modeId) || library[0];
-  const outputLanguageOption = useMemo(
-    () => SOURCE_LANGUAGE_OPTIONS.find((item) => item.code === outputLanguage) || SOURCE_LANGUAGE_OPTIONS[0],
-    [outputLanguage]
-  );
-
-  const handleGenerate = async () => {
-    if (!prompt.trim()) return;
-    setLoading(true);
-    setError("");
-    try {
-      if (!useAI) {
-        const fallback = localText.trim() || prompt.trim();
-        setResponse(fallback || "Aucune reponse locale.");
-        return;
-      }
-      const authHeader = await getAuthHeader();
-      const culturalInstruction = culturalAdaptation
-        ? `Adapte le style, les formulations, la politesse et les usages professionnels a la langue ${outputLanguageOption.name} (${outputLanguageOption.label})${
-            culturalRegion.trim() ? ` dans le contexte ${culturalRegion.trim()}` : ""
-          }. Evite les stereotypes.`
-        : "Utilise un style international neutre sans adaptation culturelle locale.";
-      const res = await fetch("/api/openai", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeader },
-        body: JSON.stringify({
-          intent: "coach_ai",
-          roomId,
-          messages: [
-            {
-              role: "system",
-              content:
-                "Tu es un coach en communication professionnelle. Tu produis uniquement du contenu de communication actionnable (scripts, questions, objections, formulations). " +
-                "Tu ne corriges pas les echanges live de la visio. " +
-                "Reponds en 6-8 lignes max, clair, concret et utilisable tout de suite. " +
-                culturalInstruction,
-            },
-            {
-              role: "user",
-              content: `Mode: ${currentMode?.title || "Coach"}\nSalle: ${roomId}\nLangue de sortie: ${outputLanguageOption.name}\nTon: ${tone}\nDemande: ${prompt}\nReponse courte avec 3 astuces pratico-pratiques.`,
-            },
-          ],
-        }),
-      });
-      const raw = await res.text();
-      let data: unknown = null;
-      try {
-        data = JSON.parse(raw);
-      } catch {
-        if (!res.ok) throw new Error(raw || "Erreur OpenAI");
-      }
-      if (!res.ok) {
-        const errMessage =
-          (data as { error?: string })?.error || "Erreur OpenAI";
-        throw new Error(errMessage);
-      }
-      const choice = (data as { choices?: { message?: { content?: string }; finish_reason?: string }[] })
-        ?.choices?.[0];
-      const answer = choice?.message?.content || "Pas de reponse pour le moment.";
-      const trimmed =
-        choice?.finish_reason === "length"
-          ? `${answer}\n\n[Reponse tronquee]`
-          : answer;
-      setResponse(trimmed);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Erreur inconnue";
-      setError(message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleSendToChat = async () => {
-    if (!response.trim()) return;
-    await onSendToChat(response.trim(), { fromName: "Coach IA" });
-  };
-
-  return (
-    <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-3 space-y-3">
-      <div>
-        <label className="text-[11px] text-slate-400">Mode</label>
-        <select
-          value={modeId}
-          onChange={(event) => setModeId(event.target.value)}
-          className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-900 px-2 py-2 text-xs text-slate-200"
-        >
-          {library.map((mode) => (
-            <option key={mode.id} value={mode.id}>
-              {mode.title}
-            </option>
-          ))}
-        </select>
-        {currentMode?.description && (
-          <p className="mt-2 text-[11px] text-slate-500">
-            {currentMode.description}
-          </p>
-        )}
-      </div>
-
-      <div className="flex flex-wrap gap-2">
-        {currentMode?.items.map((item) => (
-          <button
-            key={item.id}
-            onClick={() => {
-              setPrompt(item.prompt);
-              setLocalText(item.local || item.prompt);
-            }}
-            className="rounded-full border border-slate-700 px-3 py-1 text-[11px] text-slate-200 hover:bg-slate-800"
-          >
-            {item.title}
-          </button>
-        ))}
-      </div>
-      <div className="flex flex-col gap-2 rounded-xl border border-slate-800 bg-slate-900 px-3 py-2">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <p className="text-xs text-slate-200">Mode de reponse</p>
-            <p className="text-[11px] text-slate-500">
-              {useAI
-                ? "IA (personnalise, consomme le quota traduction)"
-                : "Local (rapide, sans quota)"}
-            </p>
-          </div>
-          <button
-            onClick={() => setUseAI((value) => !value)}
-            className={`rounded-full px-3 py-1 text-[11px] ${
-              useAI ? "bg-sky-500 text-white" : "border border-slate-700 text-slate-200"
-            }`}
-          >
-            {useAI ? "IA" : "Local"}
-          </button>
-        </div>
-      </div>
-
-      <div className="space-y-2 rounded-xl border border-slate-800 bg-slate-900 px-3 py-2">
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          <label className="space-y-1">
-            <span className="text-[11px] text-slate-400">Langue de sortie</span>
-            <select
-              value={outputLanguage}
-              onChange={(event) => setOutputLanguage(event.target.value)}
-              className="w-full rounded-lg border border-slate-800 bg-slate-950 px-2 py-2 text-xs text-slate-200"
-            >
-              {SOURCE_LANGUAGE_OPTIONS.map((item) => (
-                <option key={item.code} value={item.code}>
-                  {item.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="space-y-1">
-            <span className="text-[11px] text-slate-400">Ton de communication</span>
-            <select
-              value={tone}
-              onChange={(event) => setTone(event.target.value as CoachTone)}
-              className="w-full rounded-lg border border-slate-800 bg-slate-950 px-2 py-2 text-xs text-slate-200"
-            >
-              <option value="professionnel">Professionnel</option>
-              <option value="neutre">Neutre</option>
-              <option value="diplomatique">Diplomatique</option>
-              <option value="direct">Direct</option>
-            </select>
-          </label>
-        </div>
-
-        <div className="flex items-center justify-between gap-3 rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2">
-          <div>
-            <p className="text-[11px] text-slate-300">Adaptation culturelle</p>
-            <p className="text-[11px] text-slate-500">
-              Usages, politesse et codes conversationnels de la langue cible.
-            </p>
-          </div>
-          <button
-            onClick={() => setCulturalAdaptation((value) => !value)}
-            className={`rounded-full px-3 py-1 text-[11px] ${
-              culturalAdaptation ? "bg-emerald-500 text-white" : "border border-slate-700 text-slate-200"
-            }`}
-          >
-            {culturalAdaptation ? "ON" : "OFF"}
-          </button>
-        </div>
-
-        <label className="space-y-1">
-          <span className="text-[11px] text-slate-400">Contexte culturel (optionnel)</span>
-          <input
-            value={culturalRegion}
-            onChange={(event) => setCulturalRegion(event.target.value)}
-            disabled={!culturalAdaptation}
-            placeholder="Ex: France, Quebec, Maroc, Arabie saoudite, Japon..."
-            className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-100 disabled:opacity-50"
-          />
-        </label>
-      </div>
-
-      <div className="space-y-2">
-        <textarea
-          value={prompt}
-          onChange={(event) => {
-            setPrompt(event.target.value);
-            if (!useAI) {
-              setLocalText(event.target.value);
-            }
-          }}
-          placeholder="Ecris ou selectionne un prompt..."
-          rows={4}
-          className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100"
-        />
-        <button
-          onClick={handleGenerate}
-          disabled={loading || !prompt.trim()}
-          className="w-full rounded-lg bg-sky-500 px-3 py-2 text-xs text-white disabled:opacity-50"
-        >
-          {loading ? "Generation..." : "Generer"}
-        </button>
-      </div>
-
-      {error && <p className="text-xs text-red-300">{error}</p>}
-
-      {response && (
-        <div className="space-y-2">
-          <div className="max-h-60 overflow-y-auto rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 whitespace-pre-line">
-            {response}
-          </div>
-          <button
-            onClick={handleSendToChat}
-            className="w-full rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:bg-slate-800"
-          >
-            Envoyer au chat
-          </button>
-        </div>
-      )}
     </div>
   );
 }

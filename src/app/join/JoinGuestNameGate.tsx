@@ -2,23 +2,35 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { useAiPracticeViewportProfile } from "@/components/video/useAiPracticeViewportProfile";
+import {
+  buildConferenceMobileAppHref,
+  resolvePreferredMobileStoreUrl,
+} from "@/lib/mobileVideoLinks";
 
 const GUEST_NAME_STORAGE_KEY = "bfzoom:guest-name";
 const GUEST_NAME_MAX_LENGTH = 80;
 
 const sanitizeGuestName = (value: string) => value.trim().slice(0, GUEST_NAME_MAX_LENGTH);
-const sanitizeRoomId = (value: string) => value.trim().slice(0, 120);
+const sanitizeJoinToken = (value: string) => value.trim().slice(0, 120);
 
 export default function JoinGuestNameGate({
-  room,
+  joinToken,
   initialName,
 }: {
-  room: string;
+  joinToken: string;
   initialName?: string;
 }) {
   const router = useRouter();
-  const cleanRoom = sanitizeRoomId(room);
+  const viewportProfile = useAiPracticeViewportProfile();
+  const cleanJoinToken = sanitizeJoinToken(joinToken);
   const [guestName, setGuestName] = useState(() => sanitizeGuestName(initialName || ""));
+  const [preferredStoreUrl, setPreferredStoreUrl] = useState("");
+  const isPhone = viewportProfile.isPhone;
+
+  useEffect(() => {
+    setPreferredStoreUrl(resolvePreferredMobileStoreUrl());
+  }, []);
 
   useEffect(() => {
     if (guestName) return;
@@ -40,21 +52,33 @@ export default function JoinGuestNameGate({
     window.localStorage.setItem(GUEST_NAME_STORAGE_KEY, value);
   };
 
-  const buildWebHref = (value: string) => {
-    const query = new URLSearchParams({ room: cleanRoom, name: value });
+  const buildWebHref = (value: string, allowMobileWeb = false) => {
+    const query = new URLSearchParams({ invite: cleanJoinToken, name: value });
+    if (allowMobileWeb) {
+      query.set("web", "1");
+    }
     return `/videoconference?${query.toString()}`;
   };
 
   const buildMobileHref = (value: string) => {
-    const query = new URLSearchParams({ guest: value });
-    return `bfzoom://join/${encodeURIComponent(cleanRoom)}?${query.toString()}`;
+    return buildConferenceMobileAppHref({ inviteId: cleanJoinToken, guestName: value });
   };
 
   const handleContinue = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (isPhone) {
+      handleOpenMobileApp();
+      return;
+    }
     const nextName = resolveGuestName();
     persistGuestName(nextName);
     router.replace(buildWebHref(nextName));
+  };
+
+  const handleContinueOnMobileWeb = () => {
+    const nextName = resolveGuestName();
+    persistGuestName(nextName);
+    router.replace(buildWebHref(nextName, true));
   };
 
   const handleOpenMobileApp = () => {
@@ -75,9 +99,13 @@ export default function JoinGuestNameGate({
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-300">
             BFZoom
           </p>
-          <h1 className="mt-2 text-xl font-semibold text-white">Rejoindre la salle</h1>
+          <h1 className="mt-2 text-xl font-semibold text-white">
+            {isPhone ? "Ouvrir dans l'app BFZoom" : "Rejoindre la salle"}
+          </h1>
           <p className="mt-2 text-sm text-slate-300">
-            Choisis le nom affiche pour les participants puis selectionne App ou Web.
+            {isPhone
+              ? "La visio BFZoom n'est pas optimisee pour le navigateur mobile. Choisis ton nom puis ouvre l'app."
+              : "Choisis le nom affiche pour les participants puis continue sur le web."}
           </p>
           <label htmlFor="guest-name" className="mt-4 block text-xs font-semibold uppercase tracking-wide text-slate-300">
             Nom invite
@@ -96,22 +124,47 @@ export default function JoinGuestNameGate({
             <span>Visible dans la visioconference.</span>
             <span>{helper}</span>
           </div>
-          <button
-            type="submit"
-            className="mt-4 w-full rounded-xl bg-amber-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-amber-300"
-          >
-            Continuer sur le web
-          </button>
-          <button
-            type="button"
-            onClick={handleOpenMobileApp}
-            className="mt-2 w-full rounded-xl border border-white/25 bg-white/10 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/15"
-          >
-            Ouvrir l&apos;app mobile
-          </button>
-          <p className="mt-2 text-[11px] text-slate-400">
-            Si l&apos;application n&apos;est pas installee, utilise &quot;Continuer sur le web&quot;.
-          </p>
+          {isPhone ? (
+            <>
+              <button
+                type="button"
+                onClick={handleOpenMobileApp}
+                className="mt-4 w-full rounded-xl bg-amber-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-amber-300"
+              >
+                Ouvrir l&apos;app BFZoom
+              </button>
+              {preferredStoreUrl ? (
+                <a
+                  href={preferredStoreUrl}
+                  className="mt-2 flex w-full items-center justify-center rounded-xl border border-white/25 bg-white/10 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/15"
+                >
+                  Telecharger l&apos;app
+                </a>
+              ) : null}
+              <button
+                type="button"
+                onClick={handleContinueOnMobileWeb}
+                className="mt-2 w-full rounded-xl border border-slate-600 bg-transparent px-4 py-2 text-sm font-semibold text-slate-200 transition hover:bg-white/5"
+              >
+                Continuer quand meme sur le web
+              </button>
+              <p className="mt-2 text-[11px] text-slate-400">
+                Le web mobile reste un mode secours non optimise. Sur telephone, BFZoom est prevu pour l&apos;app.
+              </p>
+            </>
+          ) : (
+            <>
+              <button
+                type="submit"
+                className="mt-4 w-full rounded-xl bg-amber-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-amber-300"
+              >
+                Continuer sur le web
+              </button>
+              <p className="mt-2 text-[11px] text-slate-400">
+                Sur iPhone ou Android, privilegie l&apos;app BFZoom pour la visioconference.
+              </p>
+            </>
+          )}
         </form>
       </div>
     </div>

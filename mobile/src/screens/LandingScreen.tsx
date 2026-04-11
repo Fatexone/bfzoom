@@ -9,14 +9,12 @@ import {
   View,
 } from "react-native";
 import { onAuthStateChanged } from "firebase/auth";
-import { LanguageSwitcher, useI18n } from "../i18n";
+import { useI18n } from "../i18n";
 import { env } from "../config/env";
 import { auth } from "../services/firebase";
 
 type LandingScreenProps = {
   onOpenLogin: () => void;
-  onOpenConference: () => void;
-  onOpenDashboard: () => void;
 };
 
 type AccordionKey = "pricing" | "features" | "languages";
@@ -79,8 +77,6 @@ function LandingAccordion({
 
 export function LandingScreen({
   onOpenLogin,
-  onOpenConference,
-  onOpenDashboard,
 }: LandingScreenProps) {
   const { language } = useI18n();
   const [userEmail, setUserEmail] = useState("");
@@ -96,46 +92,35 @@ export function LandingScreen({
       language === "fr"
         ? {
             contact: "Contact",
-            heroKicker: "VISIO MULTILINGUE EN DIRECT",
-            heroTitle: "Parle ta langue. Le monde te comprend.",
-            heroSubtitle:
-              "Application mobile de visioconference avec traduction voix + sous-titres en direct. Tu parles dans ta langue, ton interlocuteur recoit dans la sienne. Ideal pour 2 a 4 participants.",
-            createRoom: "Creer une room",
+            heroTitle: "Parle ta langue. BFZoom traduit en direct.",
+            heroSubtitle: "Voix traduite et sous-titres partages.",
             signIn: "Se connecter",
-            mobileFirst: "Mobile-first",
-            realtime: "Temps reel",
-            fastRoomLink: "Lien de salle rapide",
-            pricingTitle: "Tarification mobile",
-            pricingDescription: "Packs iPhone et minutes de traduction.",
+            brandSignature: "by Beyond Frontiers",
+            pricingTitle: "Informations pratiques",
+            pricingDescription: "Application gratuite, 3 minutes offertes et achats iPhone.",
             pricingBody:
-              "Telechargement gratuit. Tu peux acheter tes packs de traduction sur iPhone sans partager d'information personnelle. Cree ensuite un compte si tu veux synchroniser tes minutes sur plusieurs appareils. Concu pour les appels 1:1 et les petits groupes jusqu'a 4 participants.",
-            loginRequiredTitle: "Connexion requise",
-            loginRequiredBody:
-              "Pour lancer une session, connecte-toi d'abord. Le meme ecran permet aussi de creer ton compte avec ton email.",
-            createAccount: "Creer un compte / se connecter",
-            openPacks: "Voir les packs iPhone",
-            whyTitle: "Pourquoi BFZoom",
-            whyDescription: "Une vraie valeur unique pour communiquer a l'international.",
+              "L'application BFZoom est gratuite au telechargement et inclut 3 minutes de traduction offertes une seule fois. Ensuite, les minutes de traduction s'achetent sur iPhone. Une fois connecte, ton dashboard BFZoom centralise le suivi de tes minutes et de tes usages.",
+            whyTitle: "BFZoom",
+            whyDescription:
+              "Visioconference pour parler au monde, et Pocket pour voyager sans barriere.",
             languagesTitle: "Langues disponibles",
             languagesDescription:
               "Selection source et langue de reception pour chaque participant.",
-            footerConference: "Visioconference",
             openWebError: "Impossible d'ouvrir la page web.",
-            signedOutLabel:
-              "Connecte-toi pour creer une room et lancer une visio multilingue.",
-            connectedLabel: (email: string) => `Connecte: ${email}`,
+            connectedLabel: (email: string) => `Compte connecte: ${email}`,
             featureItems: [
-              "Interpretation live: tu parles ta langue, l'autre ecoute dans la sienne.",
-              "Talkie-walkie traduction + mode voix naturelle selon ton usage.",
-              "Sous-titres partages + voix traduite pour echanges internationaux.",
-              "Invitation par lien en un clic, sans friction pour l'invite.",
-              "Application mobile concentree sur la visio multilingue en direct, ideale pour 2 a 4 participants.",
+              "BFZoom est d'abord une visioconference multilingue: chacun parle sa langue, l'autre comprend dans la sienne.",
+              "Voix traduite et sous-titres partages pour echanger avec des clients, proches ou partenaires partout dans le monde.",
+              "Pocket Interpreter t'accompagne en face-a-face pour voyager, demander, comprendre et ne plus rester bloque.",
+              "Un meme coeur produit, deux usages simples: la room video pour parler au monde, Pocket pour le terrain.",
+              "Beyond Frontiers: moins de barrieres linguistiques, plus de conversations utiles.",
             ],
             languageItems: [
               "Francais",
               "Portugais",
               "Portugais (Bresil)",
               "Arabe",
+              "Darija (Maghreb)",
               "Anglais",
               "Chinois",
               "Allemand",
@@ -154,46 +139,35 @@ export function LandingScreen({
           }
         : {
             contact: "Contact",
-            heroKicker: "LIVE MULTILINGUAL CALLS",
-            heroTitle: "Speak your language. Let the world understand.",
-            heroSubtitle:
-              "Mobile video calls with live voice translation and shared captions. You speak in your language, the other participant receives everything in theirs. Ideal for 2 to 4 participants.",
-            createRoom: "Create a room",
+            heroTitle: "Speak your language. BFZoom translates live.",
+            heroSubtitle: "Translated voice and shared captions.",
             signIn: "Sign in",
-            mobileFirst: "Mobile-first",
-            realtime: "Real-time",
-            fastRoomLink: "Fast room link",
-            pricingTitle: "Mobile pricing",
-            pricingDescription: "iPhone packs and translation minutes.",
+            brandSignature: "by Beyond Frontiers",
+            pricingTitle: "Practical information",
+            pricingDescription: "Free app, 3 free minutes and iPhone purchases.",
             pricingBody:
-              "Free download. You can buy iPhone translation packs without sharing personal information. Create an account later if you want to sync your minutes across multiple devices. Built for 1:1 calls and small groups up to 4 participants.",
-            loginRequiredTitle: "Sign-in required",
-            loginRequiredBody:
-              "To start a session, sign in first. The same screen also lets you create your account with your email.",
-            createAccount: "Create account / sign in",
-            openPacks: "View iPhone packs",
-            whyTitle: "Why BFZoom",
-            whyDescription: "A real differentiator for international conversations.",
+              "The BFZoom app is free to download and includes 3 one-time free translation minutes. After that, translation minutes are purchased on iPhone. Once signed in, your BFZoom dashboard centralizes your minutes and usage follow-up.",
+            whyTitle: "BFZoom",
+            whyDescription:
+              "Video calls to speak to the world, and Pocket for travel without language barriers.",
             languagesTitle: "Available languages",
             languagesDescription:
               "Choose a source and listening language for each participant.",
-            footerConference: "Video calls",
             openWebError: "Unable to open the web page.",
-            signedOutLabel:
-              "Sign in to create a room and start a multilingual video call.",
-            connectedLabel: (email: string) => `Signed in: ${email}`,
+            connectedLabel: (email: string) => `Account ready: ${email}`,
             featureItems: [
-              "Live interpreting: you speak your language, the other person listens in theirs.",
-              "Push-to-talk translation with natural voice mode depending on your use case.",
-              "Shared captions and translated voice for international conversations.",
-              "Invite by link in one tap, with no friction for guests.",
-              "A mobile app focused on live multilingual video calls, ideal for 2 to 4 participants.",
+              "BFZoom is first a multilingual video call experience: each person speaks their own language, the other understands in theirs.",
+              "Translated voice and shared captions help you speak with clients, relatives or partners anywhere in the world.",
+              "Pocket Interpreter supports face-to-face moments when you travel, ask, understand and avoid getting stuck.",
+              "One product core, two simple uses: video rooms to speak to the world, Pocket for the field.",
+              "Beyond Frontiers means fewer language barriers and more useful conversations.",
             ],
             languageItems: [
               "French",
               "Portuguese",
               "Portuguese (Brazil)",
               "Arabic",
+              "Darija (Maghreb)",
               "English",
               "Chinese",
               "German",
@@ -222,10 +196,7 @@ export function LandingScreen({
   }, []);
 
   const sessionLabel = useMemo(() => {
-    if (!userEmail) {
-      return ui.signedOutLabel;
-    }
-    return ui.connectedLabel(userEmail);
+    return userEmail ? ui.connectedLabel(userEmail) : "";
   }, [ui, userEmail]);
 
   const openWeb = async (path: string) => {
@@ -246,19 +217,18 @@ export function LandingScreen({
       <View style={styles.glowTop} />
       <View style={styles.glowBottom} />
       <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
-        <View style={styles.headerRow}>
-          <View style={styles.brandRow}>
-            <Image source={MOBILE_BRAND_ICON} style={styles.brandLogo} resizeMode="cover" />
+          <View style={styles.headerRow}>
+            <View style={styles.brandRow}>
+            <Image source={MOBILE_BRAND_ICON} style={styles.brandLogo} resizeMode="cover" alt="" />
             <View>
               <Text style={styles.brand}>BFZoom</Text>
-              <Text style={styles.brandHint}>mobile</Text>
+              <Text style={styles.brandHint}>{ui.brandSignature}</Text>
             </View>
-          </View>
-          <View style={styles.headerActions}>
-            <LanguageSwitcher compact />
-            <Pressable
-              style={styles.headerLink}
-              onPress={() => void openWeb("/contact?mobileReturn=home")}
+            </View>
+            <View style={styles.headerActions}>
+              <Pressable
+                style={styles.headerLink}
+                onPress={() => void openWeb("/contact?mobileReturn=home")}
             >
               <Text style={styles.headerLinkText}>{ui.contact}</Text>
             </Pressable>
@@ -266,58 +236,23 @@ export function LandingScreen({
         </View>
 
         <View style={styles.heroCard}>
-          <Text style={styles.heroKicker}>{ui.heroKicker}</Text>
           <Text style={styles.heroTitle}>{ui.heroTitle}</Text>
-          <Text style={styles.heroSubtitle}>
-            {ui.heroSubtitle} {sessionLabel}
-          </Text>
+          <Text style={styles.heroSubtitle}>{ui.heroSubtitle}</Text>
 
-          <View style={styles.ctaRow}>
-            <Pressable style={styles.secondaryCta} onPress={onOpenDashboard}>
-              <Text style={styles.secondaryCtaText}>{ui.openPacks}</Text>
-            </Pressable>
-            {userEmail ? (
-              <Pressable style={styles.primaryCta} onPress={onOpenConference}>
-                <Text style={styles.primaryCtaText}>{ui.createRoom}</Text>
-              </Pressable>
-            ) : (
+          {sessionLabel ? (
+            <View style={styles.sessionCard}>
+              <Text style={styles.sessionLabel}>{sessionLabel}</Text>
+            </View>
+          ) : null}
+
+          {!userEmail ? (
+            <View style={styles.ctaRow}>
               <Pressable style={styles.primaryCta} onPress={onOpenLogin}>
                 <Text style={styles.primaryCtaText}>{ui.signIn}</Text>
               </Pressable>
-            )}
-          </View>
-
-          <View style={styles.tagsRow}>
-            <Text style={styles.statusTag}>{ui.mobileFirst}</Text>
-            <Text style={styles.statusTag}>{ui.realtime}</Text>
-            <Text style={styles.statusTag}>{ui.fastRoomLink}</Text>
-          </View>
-        </View>
-
-        <LandingAccordion
-          title={ui.pricingTitle}
-          description={ui.pricingDescription}
-          isOpen={expanded.pricing}
-          onToggle={() => toggleAccordion("pricing")}
-          items={[]}
-        >
-          <Text style={styles.offerBody}>{ui.pricingBody}</Text>
-          <Pressable style={styles.secondaryCta} onPress={onOpenDashboard}>
-            <Text style={styles.secondaryCtaText}>{ui.openPacks}</Text>
-          </Pressable>
-        </LandingAccordion>
-
-        {!userEmail ? (
-          <View style={styles.loginCard}>
-            <Text style={styles.loginTitle}>{ui.loginRequiredTitle}</Text>
-            <Text style={styles.loginBody}>{ui.loginRequiredBody}</Text>
-            <View style={styles.loginActions}>
-              <Pressable style={styles.loginGhostButton} onPress={onOpenLogin}>
-                <Text style={styles.loginGhostButtonText}>{ui.createAccount}</Text>
-              </Pressable>
             </View>
-          </View>
-        ) : null}
+          ) : null}
+        </View>
 
         <LandingAccordion
           title={ui.whyTitle}
@@ -333,12 +268,15 @@ export function LandingScreen({
           onToggle={() => toggleAccordion("languages")}
           items={ui.languageItems}
         />
-
-        <View style={styles.footerRow}>
-          <Pressable onPress={onOpenConference}>
-            <Text style={styles.footerLink}>{ui.footerConference}</Text>
-          </Pressable>
-        </View>
+        <LandingAccordion
+          title={ui.pricingTitle}
+          description={ui.pricingDescription}
+          isOpen={expanded.pricing}
+          onToggle={() => toggleAccordion("pricing")}
+          items={[]}
+        >
+          <Text style={styles.offerBody}>{ui.pricingBody}</Text>
+        </LandingAccordion>
 
         {openError ? <Text style={styles.errorText}>{openError}</Text> : null}
       </ScrollView>
@@ -402,11 +340,10 @@ const styles = StyleSheet.create({
     letterSpacing: 0.2,
   },
   brandHint: {
-    color: "#93c5fd",
+    color: "#38bdf8",
     fontSize: 12,
     fontWeight: "700",
-    textTransform: "uppercase",
-    letterSpacing: 1.2,
+    letterSpacing: 0.4,
   },
   headerLink: {
     borderWidth: 1,
@@ -429,12 +366,6 @@ const styles = StyleSheet.create({
     padding: 14,
     gap: 12,
   },
-  heroKicker: {
-    color: "#7dd3fc",
-    fontSize: 10,
-    fontWeight: "800",
-    letterSpacing: 1.8,
-  },
   heroTitle: {
     color: "#f8fafc",
     fontSize: 24,
@@ -445,6 +376,20 @@ const styles = StyleSheet.create({
     color: "#cbd5e1",
     fontSize: 13,
     lineHeight: 19,
+  },
+  sessionCard: {
+    borderWidth: 1,
+    borderColor: "#1e293b",
+    borderRadius: 12,
+    backgroundColor: "rgba(11,18,32,0.88)",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  sessionLabel: {
+    color: "#e2e8f0",
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: "600",
   },
   ctaRow: {
     flexDirection: "row",
@@ -472,68 +417,6 @@ const styles = StyleSheet.create({
   },
   secondaryCtaText: {
     color: "#e2e8f0",
-    fontSize: 13,
-    fontWeight: "700",
-  },
-  tagsRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-  },
-  statusTag: {
-    borderWidth: 1,
-    borderColor: "#1e293b",
-    borderRadius: 999,
-    backgroundColor: "#0b1220",
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    color: "#94a3b8",
-    fontSize: 11,
-    fontWeight: "700",
-  },
-  loginCard: {
-    borderWidth: 1,
-    borderColor: "#312e81",
-    borderRadius: 16,
-    backgroundColor: "rgba(30,27,75,0.45)",
-    padding: 13,
-    gap: 8,
-  },
-  loginTitle: {
-    color: "#e0e7ff",
-    fontSize: 16,
-    fontWeight: "800",
-  },
-  loginBody: {
-    color: "#c7d2fe",
-    fontSize: 13,
-    lineHeight: 19,
-  },
-  loginActions: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-  },
-  loginButton: {
-    borderRadius: 12,
-    backgroundColor: "#4f46e5",
-    paddingHorizontal: 13,
-    paddingVertical: 10,
-  },
-  loginButtonText: {
-    color: "#ffffff",
-    fontSize: 13,
-    fontWeight: "800",
-  },
-  loginGhostButton: {
-    borderWidth: 1,
-    borderColor: "#6366f1",
-    borderRadius: 12,
-    paddingHorizontal: 13,
-    paddingVertical: 10,
-  },
-  loginGhostButtonText: {
-    color: "#c7d2fe",
     fontSize: 13,
     fontWeight: "700",
   },
@@ -601,19 +484,6 @@ const styles = StyleSheet.create({
     color: "#cbd5e1",
     fontSize: 13,
     lineHeight: 18,
-  },
-  footerRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 14,
-    paddingTop: 4,
-  },
-  footerLink: {
-    color: "#94a3b8",
-    fontSize: 12,
-    fontWeight: "700",
   },
   errorText: {
     color: "#fca5a5",

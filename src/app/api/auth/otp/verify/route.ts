@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getAdminAuth } from "@/lib/firebaseAdmin";
 import { getAdminDb } from "@/lib/firebaseAdmin";
 import { verifyOtp } from "@/lib/otpStore";
+import { getAppReviewOtpCode, isAppReviewEmail } from "@/lib/reviewAccess";
 
 export const runtime = "nodejs";
 
@@ -19,9 +20,15 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Missing email/code" }, { status: 400 });
   }
 
-  const result = await verifyOtp(email, code);
-  if (!result.ok) {
-    return NextResponse.json({ error: result.reason }, { status: 401 });
+  const reviewOtpCode = getAppReviewOtpCode();
+  const isReviewBypass =
+    Boolean(reviewOtpCode) && isAppReviewEmail(email) && code === reviewOtpCode;
+
+  if (!isReviewBypass) {
+    const result = await verifyOtp(email, code);
+    if (!result.ok) {
+      return NextResponse.json({ error: result.reason }, { status: 401 });
+    }
   }
 
   try {

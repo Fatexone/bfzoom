@@ -50,7 +50,7 @@ export default function PeerVideoCall({
   const audioMissing = localStream ? localStream.getAudioTracks().length === 0 : false;
 
   return (
-    <div className="flex flex-col min-h-dvh bg-gradient-to-b from-sky-50 via-blue-50 to-sky-100 text-slate-800 pb-[env(safe-area-inset-bottom)]">
+    <div className="flex flex-col min-h-dvh bg-linear-to-b from-sky-50 via-blue-50 to-sky-100 text-slate-800 pb-[env(safe-area-inset-bottom)]">
       <div className="sticky top-0 z-40 w-full bg-white/80 backdrop-blur border-b border-sky-200">
         <div className="max-w-6xl mx-auto px-4 py-3">
           <Header roomId={roomId} userCount={userCount} onLeave={handleLeave} />

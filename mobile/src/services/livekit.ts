@@ -26,6 +26,91 @@ export type LiveKitInviteRedeemResult = {
   inviteId?: string;
 };
 
+const LIVEKIT_REQUEST_TIMEOUT_MS = 15_000;
+
+class LiveKitRequestAbortError extends Error {
+  readonly reason: "cancelled" | "timeout";
+
+  constructor(reason: "cancelled" | "timeout", message?: string) {
+    super(
+      message ||
+        (reason === "timeout" ? "The request timed out." : "The request was cancelled.")
+    );
+    this.name = "LiveKitRequestAbortError";
+    this.reason = reason;
+  }
+}
+
+const isAbortLikeError = (error: unknown) => {
+  const raw = error instanceof Error ? `${error.name} ${error.message}` : String(error || "");
+  return /abort|aborted/i.test(raw);
+};
+
+const fetchWithTimeout = async (
+  input: string,
+  init: RequestInit,
+  {
+    signal,
+    timeoutMs = LIVEKIT_REQUEST_TIMEOUT_MS,
+  }: {
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  }
+) => {
+  if (typeof AbortController === "undefined") {
+    if (signal?.aborted) {
+      throw new LiveKitRequestAbortError("cancelled");
+    }
+    return fetch(input, { ...init, signal });
+  }
+
+  const controller = new AbortController();
+  let abortedByTimeout = false;
+  const abortFromExternalSignal = () => controller.abort();
+  if (signal?.aborted) {
+    controller.abort();
+  } else if (signal) {
+    signal.addEventListener("abort", abortFromExternalSignal, { once: true });
+  }
+
+  const timeoutId = setTimeout(() => {
+    abortedByTimeout = true;
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    try {
+      return await fetch(input, {
+        ...init,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (isAbortLikeError(error)) {
+        throw new LiveKitRequestAbortError(abortedByTimeout ? "timeout" : "cancelled");
+      }
+      throw error;
+    }
+  } finally {
+    clearTimeout(timeoutId);
+    if (signal) {
+      signal.removeEventListener("abort", abortFromExternalSignal);
+    }
+  }
+};
+
+const readAbortError = (error: unknown, timeoutMessage: string): never => {
+  if (error instanceof LiveKitRequestAbortError) {
+    if (error.reason === "timeout") {
+      throw new Error(timeoutMessage);
+    }
+    throw error;
+  }
+  if (isAbortLikeError(error)) {
+    throw new LiveKitRequestAbortError("cancelled");
+  }
+  throw error;
+};
+
 const sanitizeApiErrorMessage = (raw: string, fallback: string) => {
   const trimmed = raw.trim();
   if (!trimmed) return fallback;
@@ -144,19 +229,31 @@ export const fetchLiveKitToken = async ({
     headers.Authorization = `Bearer ${bearerToken.trim()}`;
   }
 
-  const response = await fetch(`${apiBaseUrl}/api/livekit/token`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload),
-    signal,
-  });
+  let response: Response | undefined;
+  try {
+    response = await fetchWithTimeout(
+      `${apiBaseUrl}/api/livekit/token`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+      },
+      { signal }
+    );
+  } catch (error) {
+    readAbortError(
+      error,
+      "Live room authentication timed out. Check your connection and try again."
+    );
+  }
+  const safeResponse = response as Response;
 
-  if (!response.ok) {
-    const message = await parseErrorMessage(response);
+  if (!safeResponse.ok) {
+    const message = await parseErrorMessage(safeResponse);
     throw new Error(message);
   }
 
-  const raw = await response.text();
+  const raw = await safeResponse.text();
   return parseLiveKitTokenResponse(raw);
 };
 
@@ -171,22 +268,31 @@ export const createLiveKitInvite = async ({
   bearerToken: string;
   signal?: AbortSignal;
 }): Promise<LiveKitInviteCreateResult> => {
-  const response = await fetch(`${apiBaseUrl}/api/livekit/invite`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${bearerToken.trim()}`,
-    },
-    body: JSON.stringify({ room }),
-    signal,
-  });
+  let response: Response | undefined;
+  try {
+    response = await fetchWithTimeout(
+      `${apiBaseUrl}/api/livekit/invite`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${bearerToken.trim()}`,
+        },
+        body: JSON.stringify({ room }),
+      },
+      { signal }
+    );
+  } catch (error) {
+    readAbortError(error, "Invite creation timed out. Check your connection and try again.");
+  }
+  const safeResponse = response as Response;
 
-  if (!response.ok) {
-    const message = await parseErrorMessage(response);
+  if (!safeResponse.ok) {
+    const message = await parseErrorMessage(safeResponse);
     throw new Error(message);
   }
 
-  const raw = await response.text();
+  const raw = await safeResponse.text();
   return parseLiveKitInviteCreateResponse(raw);
 };
 
@@ -212,23 +318,32 @@ export const redeemLiveKitInvite = async ({
     headers.Authorization = `Bearer ${bearerToken.trim()}`;
   }
 
-  const response = await fetch(`${apiBaseUrl}/api/livekit/invite/redeem`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      invite: inviteId,
-      identity,
-      name,
-      includeGuestTtsToken: true,
-    }),
-    signal,
-  });
+  let response: Response | undefined;
+  try {
+    response = await fetchWithTimeout(
+      `${apiBaseUrl}/api/livekit/invite/redeem`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          invite: inviteId,
+          identity,
+          name,
+          includeGuestTtsToken: true,
+        }),
+      },
+      { signal }
+    );
+  } catch (error) {
+    readAbortError(error, "Invite join timed out. Check your connection and try again.");
+  }
+  const safeResponse = response as Response;
 
-  if (!response.ok) {
-    const message = await parseErrorMessage(response);
+  if (!safeResponse.ok) {
+    const message = await parseErrorMessage(safeResponse);
     throw new Error(message);
   }
 
-  const raw = await response.text();
+  const raw = await safeResponse.text();
   return parseLiveKitInviteRedeemResponse(raw);
 };

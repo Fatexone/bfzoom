@@ -55,7 +55,7 @@ export default function Lobby({ onJoin }: LobbyProps) {
         <span>BFZoom</span>
       </h1>
       <p className="text-gray-500 text-sm mb-6">
-        Crée une salle ou rejoins-en une avec un simple code.
+        Crée une salle ou rejoins-la avec une invitation BFZoom.
       </p>
 
       {/* ===== Tags ===== */}
@@ -75,7 +75,7 @@ export default function Lobby({ onJoin }: LobbyProps) {
           ref={inputRef}
           value={roomId}
           onChange={(e) => setRoomId(e.target.value)}
-          placeholder="Entrer le code de la salle"
+          placeholder="Coller une invitation BFZoom"
           className="w-full pl-9 pr-10 py-2.5 border border-gray-300 rounded-lg text-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400 transition"
         />
         <button
@@ -111,7 +111,7 @@ export default function Lobby({ onJoin }: LobbyProps) {
 
       {/* ===== Bas ===== */}
       <p className="mt-5 text-gray-500 text-xs">
-        Partage ton code avec ton interlocuteur pour démarrer la visioconférence.
+        Partage une invitation BFZoom avec ton interlocuteur pour démarrer la visioconférence.
       </p>
     </div>
   );

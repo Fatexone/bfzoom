@@ -64,6 +64,13 @@ export const CAPTION_TARGETS_CONFIG: CaptionTargetConfig[] = [
     speechLocale: "ar-SA",
   },
   {
+    code: "ar-ma",
+    label: "DA",
+    name: "Darija (Maghreb)",
+    description: "Darija du Maghreb avec voix arabe marocaine si disponible.",
+    speechLocale: "ar-MA",
+  },
+  {
     code: "he",
     label: "HE",
     name: "Hebrew",
@@ -131,6 +138,7 @@ export const SOURCE_LANGUAGE_OPTIONS: SourceLanguageOption[] = [
   { code: "it", label: "IT", name: "Italien", recognitionLocale: "it-IT" },
   { code: "pt", label: "PT", name: "Portugais", recognitionLocale: "pt-PT" },
   { code: "ar", label: "AR", name: "Arabe", recognitionLocale: "ar-SA" },
+  { code: "ar-ma", label: "DA", name: "Darija (Maghreb)", recognitionLocale: "ar-MA" },
   { code: "fa", label: "FA", name: "Persan (Farsi)", recognitionLocale: "fa-IR" },
 ];
 

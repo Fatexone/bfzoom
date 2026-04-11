@@ -8,6 +8,8 @@
     "build": "cross-env NEXT_DISABLE_ESLINT_PATCH=1 next build",
     "start": "cross-env NEXT_DISABLE_ESLINT_PATCH=1 next start",
     "lint": "cross-env NEXT_DISABLE_ESLINT_PATCH=1 eslint --ext .ts,.tsx,.js,.jsx src server",
+    "check:all": "npm run lint && npm run build && npm --prefix mobile run typecheck && npm --prefix functions run build",
+    "check:prod-api": "bash ./scripts/check_prod_api.sh",
     "socket": "node server/socket/index.js",
     "vercel:deploy": "vercel --prod",
     "render:deploy": "git push render main"
@@ -70,5 +72,6 @@
     "Vercel"
   ],
   "author": "Brice Faradji",
-  "license": "MIT"
+  "license": "MIT",
+  "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
 }

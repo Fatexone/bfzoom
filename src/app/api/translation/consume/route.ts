@@ -10,12 +10,17 @@ import {
   planTranslationConsumption,
   secondsToWalletMinutes,
 } from "@/lib/translationCredits";
+import {
+  buildAuthenticatedPocketTranscribeGrantFields,
+  buildAuthenticatedTranslationGrantFields,
+} from "@/lib/translationRuntimeGuard";
 import { checkRateLimit, getClientIp } from "@/lib/rateLimit";
 
 type ConsumeBody = {
   seconds?: number;
   origin?: string;
   roomId?: string;
+  preview?: boolean;
 };
 
 export const runtime = "nodejs";
@@ -40,6 +45,10 @@ export async function POST(req: Request) {
     1,
     Math.min(300, Math.floor(Number(body.seconds ?? 1) || 1))
   );
+  const normalizedOrigin = (body.origin || "").trim().slice(0, 80);
+  const normalizedRoomId = (body.roomId || "").trim().slice(0, 80);
+  const previewOnly = body.preview === true;
+  const isPocketPreview = previewOnly && normalizedOrigin.startsWith("local-pocket");
 
   const adminDb = getAdminDb();
   const userRef = adminDb.collection("users").doc(user.uid);
@@ -79,8 +88,45 @@ export async function POST(req: Request) {
       meter: meterData,
       unlimited,
     });
+    const previewGrantFields = isPocketPreview
+      ? buildAuthenticatedPocketTranscribeGrantFields()
+      : {};
 
     if (unlimited) {
+      if (previewOnly) {
+        if (Object.keys(previewGrantFields).length > 0) {
+          tx.set(
+            meterRef,
+            {
+              ...previewGrantFields,
+              updatedAt: FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+          );
+        }
+        return {
+          enabled: snapshot.enabled,
+          lockReason: "",
+          isAdmin,
+          isPremium,
+          periodKey: snapshot.periodKey,
+          freeSecondsLimit: snapshot.freeSecondsLimit,
+          freeSecondsUsed: snapshot.freeSecondsUsed,
+          freeSecondsRemaining: snapshot.freeSecondsRemaining,
+          paidSecondsRemaining: snapshot.paidSecondsRemaining,
+          totalSecondsRemaining: snapshot.totalSecondsRemaining,
+          status: 200,
+        } satisfies ConsumeResult;
+      }
+      tx.set(
+        meterRef,
+        {
+          ...buildAuthenticatedTranslationGrantFields(),
+          updatedAt: FieldValue.serverTimestamp(),
+          lastConsumedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
       return {
         enabled: true,
         lockReason: "",
@@ -117,9 +163,36 @@ export async function POST(req: Request) {
       } satisfies ConsumeResult;
     }
 
+    if (previewOnly) {
+      if (Object.keys(previewGrantFields).length > 0) {
+        tx.set(
+          meterRef,
+          {
+            ...previewGrantFields,
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+      }
+      return {
+        enabled: snapshot.enabled,
+        lockReason: "",
+        isAdmin,
+        isPremium,
+        periodKey: snapshot.periodKey,
+        freeSecondsLimit: snapshot.freeSecondsLimit,
+        freeSecondsUsed: snapshot.freeSecondsUsed,
+        freeSecondsRemaining: snapshot.freeSecondsRemaining,
+        paidSecondsRemaining: snapshot.paidSecondsRemaining,
+        totalSecondsRemaining: snapshot.totalSecondsRemaining,
+        status: 200,
+      } satisfies ConsumeResult;
+    }
+
     tx.set(
       meterRef,
       {
+        ...buildAuthenticatedTranslationGrantFields(),
         periodKey: snapshot.periodKey,
         freeTrialUsedSeconds: plan.nextFreeSecondsUsed,
         freeUsedSeconds: plan.nextFreeSecondsUsed,
@@ -152,8 +225,8 @@ export async function POST(req: Request) {
       requestedSeconds,
       consumedFreeSeconds: plan.consumedFreeSeconds,
       consumedPaidSeconds: plan.consumedPaidSeconds,
-      origin: (body.origin || "").trim().slice(0, 80),
-      roomId: (body.roomId || "").trim().slice(0, 80),
+      origin: normalizedOrigin,
+      roomId: normalizedRoomId,
       createdAt: FieldValue.serverTimestamp(),
     });
 
