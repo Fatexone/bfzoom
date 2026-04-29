@@ -4060,6 +4060,7 @@ function RoomView({
     room.on(RoomEvent.TrackUnsubscribed, syncRoomLifecycle);
     room.on(RoomEvent.TrackMuted, syncRoomLifecycle);
     room.on(RoomEvent.TrackUnmuted, syncRoomLifecycle);
+    room.on(RoomEvent.TrackStreamStateChanged, syncRoomLifecycle);
     room.on(RoomEvent.Reconnected, syncRoomLifecycle);
     return () => {
       room.off(RoomEvent.LocalTrackPublished, syncRoomLifecycle);
@@ -4068,6 +4069,7 @@ function RoomView({
       room.off(RoomEvent.TrackUnsubscribed, syncRoomLifecycle);
       room.off(RoomEvent.TrackMuted, syncRoomLifecycle);
       room.off(RoomEvent.TrackUnmuted, syncRoomLifecycle);
+      room.off(RoomEvent.TrackStreamStateChanged, syncRoomLifecycle);
       room.off(RoomEvent.Reconnected, syncRoomLifecycle);
     };
   }, [room]);
