@@ -17,6 +17,7 @@ import {
 // Important for serverless providers (e.g. Vercel) where default function
 // duration can be too short for structured lesson generation requests.
 export const maxDuration = 60;
+export const preferredRegion = "cdg1";
 
 const STREAM_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_MS = 120_000;

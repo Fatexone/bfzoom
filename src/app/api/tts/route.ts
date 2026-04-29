@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
+
+export const maxDuration = 30;
+export const preferredRegion = "cdg1";
 import { getVerifiedUser, isEmailAllowlisted } from "@/lib/serverAuth";
 import { canUseRoomFeatures } from "@/lib/roomAccess";
 import { hasRoomHostTranslationAccess } from "@/lib/livekitRoomRegistry";
