@@ -5535,14 +5535,14 @@ function RoomView({
     setCaptionText(text);
     setSubtitleSpeakerLabel(`${session.displayName || session.identity || "BFZoom"}${ui.meSuffix}`);
     if (!captionsEnabled) return;
+    const sourceTranscript = realtimeInputTranscriptRef.current?.trim() || "";
     await publishCaption({
       roomId: session.roomId,
       from: session.identity,
       speakerName: session.displayName,
-      text,
-      sourceText: realtimeInputTranscriptRef.current || undefined,
+      text: sourceTranscript || text,
+      sourceText: sourceTranscript || undefined,
       sourceLang: sourceLanguage,
-      targetLang: targetLanguage,
       timestamp: Date.now(),
     });
   }, [
@@ -5552,7 +5552,6 @@ function RoomView({
     session.identity,
     session.roomId,
     sourceLanguage,
-    targetLanguage,
     ui.meSuffix,
   ]);
 
@@ -5838,10 +5837,9 @@ function RoomView({
           roomId: session.roomId,
           from: session.identity,
           speakerName: session.displayName,
-          text: finalCaption,
+          text: clean,
           sourceText: clean,
           sourceLang,
-          targetLang: targetLanguage,
           durationSeconds: Math.max(1, Math.min(300, Math.floor(durationSeconds || 1))),
           timestamp: Date.now(),
         }).catch(() => {});
