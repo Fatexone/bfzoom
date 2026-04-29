@@ -639,6 +639,7 @@ type CaptionPayload = {
   from?: string;
   timestamp?: number;
   target?: CaptionTargetCode;
+  targetLang?: string;
   audioTrackPublished?: boolean;
   sourceText?: string;
   sourceLang?: string;
@@ -7739,23 +7740,25 @@ function LiveKitConference({
         const incomingSourceText = (payload.sourceText || payload.text || "").trim();
         setSourceText(incomingSourceText);
         setSourceFromLocal(false);
+        const effectivePayloadTarget: CaptionTargetCode | undefined =
+          payload.target ?? (normalizeCaptionTargetCode(payload.targetLang) ?? undefined);
         let localText = payload.text;
-        let localTarget = normalizeCaptionTargetCode(payload.target);
+        let localTarget = normalizeCaptionTargetCode(effectivePayloadTarget);
         let fallbackMessage = "";
         if (
           localReceptionTarget &&
           localReceptionTargetName &&
           (payload.sourceText || payload.text) &&
-          payload.target !== localReceptionTarget
+          effectivePayloadTarget !== localReceptionTarget
         ) {
           const sourceText = (payload.sourceText || "").trim();
           const translationInput = (sourceText || payload.text || "").trim();
           const translationFromCode =
-            sourceText.length > 0 ? payload.sourceLang : payload.target || payload.sourceLang;
+            sourceText.length > 0 ? payload.sourceLang : effectivePayloadTarget || payload.sourceLang;
           const translationFromName =
             sourceText.length > 0
               ? payload.sourceLangName || resolveLanguageNameFromCode(payload.sourceLang) || "Source"
-              : resolveLanguageNameFromCode(payload.target) ||
+              : resolveLanguageNameFromCode(effectivePayloadTarget) ||
                 payload.sourceLangName ||
                 resolveLanguageNameFromCode(payload.sourceLang) ||
                 "Source";
@@ -7774,20 +7777,20 @@ function LiveKitConference({
               } else {
                 fallbackMessage = buildCaptionFallbackMessage(
                   localReceptionTargetName,
-                  localTarget ?? payload.target
+                  localTarget ?? effectivePayloadTarget
                 );
               }
             } catch (err) {
               console.warn("Guest translation failed", err);
               fallbackMessage = buildCaptionFallbackMessage(
                 localReceptionTargetName,
-                localTarget ?? payload.target
+                localTarget ?? effectivePayloadTarget
               );
             }
           }
         }
         const resolvedCaptionTarget = resolveCaptionDisplayTarget(
-          localTarget ?? payload.target,
+          localTarget ?? effectivePayloadTarget,
           localReceptionTarget
         );
         const captionMatchesReception =
