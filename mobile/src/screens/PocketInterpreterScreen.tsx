@@ -2263,7 +2263,7 @@ export function PocketInterpreterScreen({
             bearerToken: activeBearerToken,
             mediaSessionId: playlistMediaSessionId,
             releaseAudioSessionOnEnd: false,
-            allowDeviceVoiceFallback: false,
+            allowDeviceVoiceFallback: true,
           });
         }
         if (!isPlaybackCurrent()) return;
@@ -3067,17 +3067,15 @@ export function PocketInterpreterScreen({
             .catch(() => {});
         }
 
-        void persistHistoryAudioUri(stable.uri, nextEntryId, "source")
-          .then((persistedSourceAudioUri) => {
-            if (!persistedSourceAudioUri) return;
-            updateHistoryEntrySourceAudio(nextEntryId, persistedSourceAudioUri);
-            logPocket("history_source_audio_persisted", {
-              entryId: nextEntryId,
-              sourceLanguage,
-              targetLanguage,
-            });
-          })
-          .catch(() => {});
+        const persistedSourceAudioUri = await persistHistoryAudioUri(stable.uri, nextEntryId, "source").catch(() => null);
+        if (persistedSourceAudioUri) {
+          updateHistoryEntrySourceAudio(nextEntryId, persistedSourceAudioUri);
+          logPocket("history_source_audio_persisted", {
+            entryId: nextEntryId,
+            sourceLanguage,
+            targetLanguage,
+          });
+        }
         return;
       } catch (pocketProcessError) {
         if (!isPocketProcessFallbackError(pocketProcessError)) {
@@ -3243,17 +3241,15 @@ export function PocketInterpreterScreen({
         setStatus("idle");
         await releasePocketAudioSession(mediaSessionId);
       }
-      void persistHistoryAudioUri(stable.uri, nextEntryId, "source")
-        .then((persistedSourceAudioUri) => {
-          if (!persistedSourceAudioUri) return;
-          updateHistoryEntrySourceAudio(nextEntryId, persistedSourceAudioUri);
-          logPocket("history_source_audio_persisted", {
-            entryId: nextEntryId,
-            sourceLanguage,
-            targetLanguage,
-          });
-        })
-        .catch(() => {});
+      const persistedSourceAudioUriFallback = await persistHistoryAudioUri(stable.uri, nextEntryId, "source").catch(() => null);
+      if (persistedSourceAudioUriFallback) {
+        updateHistoryEntrySourceAudio(nextEntryId, persistedSourceAudioUriFallback);
+        logPocket("history_source_audio_persisted", {
+          entryId: nextEntryId,
+          sourceLanguage,
+          targetLanguage,
+        });
+      }
     } catch (nextError) {
       if (isTranslationAbortError(nextError)) {
         if (isInteractionCurrent()) {

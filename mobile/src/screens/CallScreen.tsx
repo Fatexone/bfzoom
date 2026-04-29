@@ -974,9 +974,10 @@ export function CallScreen({ session, onLeave }: CallScreenProps) {
       expectedRoomDisconnectRef.current = true;
       roomEndForAllInFlightRef.current = false;
       clearRoomRecoveryTimer();
+      void liveKitRoom.disconnect().catch(() => {});
       onLeave(reason);
     },
-    [clearRoomRecoveryTimer, onLeave]
+    [clearRoomRecoveryTimer, liveKitRoom, onLeave]
   );
   const performEndRoomForAll = useCallback(async () => {
     if (!isHostSession) {

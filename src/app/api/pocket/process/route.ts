@@ -609,6 +609,14 @@ export async function POST(req: Request) {
     const requestedLocale = normalizeLocale(formData.get("locale"));
     const requestedInstructions = normalizeInstructions(formData.get("instructions"));
 
+    // Start transcription immediately (parallel with entitlement Firestore read)
+    const transcribeStartedAt = Date.now();
+    const transcriptionPromise = transcribePocketAudio({
+      openai,
+      file,
+      language: sourceLanguage,
+    }).catch((err) => ({ __error: err }));
+
     const entitlementResult = await entitlementPromise;
     entitlementCompletedAt = Date.now();
     if ("error" in entitlementResult) {
@@ -638,13 +646,10 @@ export async function POST(req: Request) {
       );
     }
 
-    const transcribeStartedAt = Date.now();
-    const transcription = await transcribePocketAudio({
-      openai,
-      file,
-      language: sourceLanguage,
-    });
+    const transcriptionRaw = await transcriptionPromise;
+    if ("__error" in transcriptionRaw) throw transcriptionRaw.__error;
     const transcribeCompletedAt = Date.now();
+    const transcription = transcriptionRaw;
     sourceText = (transcription.text || "").trim();
     if (!sourceText) {
       return NextResponse.json({ error: "No speech detected." }, { status: 400 });
